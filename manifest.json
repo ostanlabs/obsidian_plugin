@@ -1,0 +1,12 @@
+{
+  "id": "canvas-structured-items",
+  "name": "Canvas Structured Items",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Create structured Task and Accomplishment items on Canvas from templates with automatic Notion sync",
+  "author": "",
+  "authorUrl": "",
+  "fundingUrl": "",
+  "isDesktopOnly": false
+}
+

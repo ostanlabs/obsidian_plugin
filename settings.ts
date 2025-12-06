@@ -1,0 +1,298 @@
+import { App, PluginSettingTab, Setting, Notice } from "obsidian";
+import CanvasStructuredItemsPlugin from "./main";
+
+export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
+	plugin: CanvasStructuredItemsPlugin;
+
+	constructor(app: App, plugin: CanvasStructuredItemsPlugin) {
+		super(app, plugin);
+		this.plugin = plugin;
+	}
+
+	display(): void {
+		const { containerEl } = this;
+
+		containerEl.empty();
+
+		// General Section
+		containerEl.createEl("h2", { text: "General Settings" });
+
+		new Setting(containerEl)
+			.setName("Notes base folder")
+			.setDesc("Default folder where generated notes will be saved")
+			.addText((text) =>
+				text
+					.setPlaceholder("Projects")
+					.setValue(this.plugin.settings.notesBaseFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.notesBaseFolder = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Infer base folder from canvas location")
+			.setDesc(
+				"If enabled, notes will be created in the same folder as the canvas file, ignoring the base folder setting"
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.inferBaseFolderFromCanvas)
+					.onChange(async (value) => {
+						this.plugin.settings.inferBaseFolderFromCanvas = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// Templates Section
+		containerEl.createEl("h2", { text: "Templates" });
+
+		new Setting(containerEl)
+			.setName("Task template path")
+			.setDesc("Path to the task template file")
+			.addText((text) =>
+				text
+					.setPlaceholder("Templates/canvas-task-template.md")
+					.setValue(this.plugin.settings.taskTemplatePath)
+					.onChange(async (value) => {
+						this.plugin.settings.taskTemplatePath = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Accomplishment template path")
+			.setDesc("Path to the accomplishment template file")
+			.addText((text) =>
+				text
+					.setPlaceholder("Templates/canvas-accomplishment-template.md")
+					.setValue(this.plugin.settings.accomplishmentTemplatePath)
+					.onChange(async (value) => {
+						this.plugin.settings.accomplishmentTemplatePath = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Use template folder")
+			.setDesc(
+				"Enable to scan a folder for templates and choose from multiple options"
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.useTemplateFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.useTemplateFolder = value;
+						await this.plugin.saveSettings();
+						this.display(); // Refresh to show/hide folder setting
+					})
+			);
+
+		if (this.plugin.settings.useTemplateFolder) {
+			new Setting(containerEl)
+				.setName("Template folder")
+				.setDesc("Folder containing template files to choose from")
+				.addText((text) =>
+					text
+						.setPlaceholder("Templates")
+						.setValue(this.plugin.settings.templateFolder)
+						.onChange(async (value) => {
+							this.plugin.settings.templateFolder = value;
+							await this.plugin.saveSettings();
+						})
+				);
+		}
+
+		new Setting(containerEl)
+			.setName("Regenerate default templates")
+			.setDesc("Recreate the default template files (existing templates will be overwritten)")
+			.addButton((button) =>
+				button.setButtonText("Regenerate").onClick(async () => {
+					await this.plugin.ensureTemplatesExist(true);
+					new Notice("Default templates regenerated");
+				})
+			);
+
+		// IDs Section
+		containerEl.createEl("h2", { text: "ID Generation" });
+
+		new Setting(containerEl)
+			.setName("Task ID prefix")
+			.setDesc("Prefix for task IDs (e.g., 'T' for T001)")
+			.addText((text) =>
+				text
+					.setPlaceholder("T")
+					.setValue(this.plugin.settings.idPrefixTask)
+					.onChange(async (value) => {
+						this.plugin.settings.idPrefixTask = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Accomplishment ID prefix")
+			.setDesc("Prefix for accomplishment IDs (e.g., 'A' for A001)")
+			.addText((text) =>
+				text
+					.setPlaceholder("A")
+					.setValue(this.plugin.settings.idPrefixAccomplishment)
+					.onChange(async (value) => {
+						this.plugin.settings.idPrefixAccomplishment = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("ID zero-padding length")
+			.setDesc("Number of digits to use for IDs (e.g., 3 for 001)")
+			.addText((text) =>
+				text
+					.setPlaceholder("3")
+					.setValue(String(this.plugin.settings.idZeroPadLength))
+					.onChange(async (value) => {
+						const num = parseInt(value);
+						if (!isNaN(num) && num > 0) {
+							this.plugin.settings.idZeroPadLength = num;
+							await this.plugin.saveSettings();
+						}
+					})
+			);
+
+		// Effort Avenues Section
+		containerEl.createEl("h2", { text: "Effort Avenues" });
+
+		new Setting(containerEl)
+			.setName("Effort options")
+			.setDesc("One effort avenue per line")
+			.addTextArea((text) => {
+				text.inputEl.rows = 6;
+				text.inputEl.cols = 30;
+				text.setValue(this.plugin.settings.effortOptions.join("\n")).onChange(
+					async (value) => {
+						this.plugin.settings.effortOptions = value
+							.split("\n")
+							.map((s) => s.trim())
+							.filter((s) => s.length > 0);
+						await this.plugin.saveSettings();
+					}
+				);
+			});
+
+		new Setting(containerEl)
+			.setName("Default effort")
+			.setDesc("Default effort avenue to pre-select")
+			.addDropdown((dropdown) => {
+				this.plugin.settings.effortOptions.forEach((effort) => {
+					dropdown.addOption(effort, effort);
+				});
+				dropdown.setValue(this.plugin.settings.defaultEffort).onChange(async (value) => {
+					this.plugin.settings.defaultEffort = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		// Notion Integration Section
+		containerEl.createEl("h2", { text: "Notion Integration" });
+
+		new Setting(containerEl)
+			.setName("Enable Notion sync")
+			.setDesc("Enable syncing items to Notion database")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.notionEnabled).onChange(async (value) => {
+					this.plugin.settings.notionEnabled = value;
+					await this.plugin.saveSettings();
+					this.display(); // Refresh to show/hide conditional settings
+				})
+			);
+
+		if (this.plugin.settings.notionEnabled) {
+			new Setting(containerEl)
+				.setName("Integration token")
+				.setDesc("Notion internal integration token")
+				.addText((text) => {
+					text.inputEl.type = "password";
+					text.setPlaceholder("secret_...")
+						.setValue(this.plugin.settings.notionIntegrationToken)
+						.onChange(async (value) => {
+							this.plugin.settings.notionIntegrationToken = value;
+							await this.plugin.saveSettings();
+						});
+				});
+
+			new Setting(containerEl)
+				.setName("Parent page ID")
+				.setDesc("Notion page ID where the database will be created")
+				.addText((text) =>
+					text
+						.setPlaceholder("abc123...")
+						.setValue(this.plugin.settings.notionParentPageId)
+						.onChange(async (value) => {
+							this.plugin.settings.notionParentPageId = value;
+							await this.plugin.saveSettings();
+						})
+				);
+
+			new Setting(containerEl)
+				.setName("Database name")
+				.setDesc("Name for the Notion database")
+				.addText((text) =>
+					text
+						.setPlaceholder("Obsidian Canvas Items")
+						.setValue(this.plugin.settings.notionDatabaseName)
+						.onChange(async (value) => {
+							this.plugin.settings.notionDatabaseName = value;
+							await this.plugin.saveSettings();
+						})
+				);
+
+			new Setting(containerEl)
+				.setName("Database ID")
+				.setDesc("Notion database ID (filled after initialization)")
+				.addText((text) => {
+					text.setValue(this.plugin.settings.notionDatabaseId).onChange(
+						async (value) => {
+							this.plugin.settings.notionDatabaseId = value;
+							await this.plugin.saveSettings();
+						}
+					);
+				});
+
+			new Setting(containerEl)
+				.setName("Initialize Notion database")
+				.setDesc("Create a new database in Notion with the required schema")
+				.addButton((button) =>
+					button
+						.setButtonText("Initialize")
+						.setCta()
+						.onClick(async () => {
+							await this.plugin.initializeNotionDatabase();
+						})
+				);
+
+			new Setting(containerEl)
+				.setName("Sync on note creation")
+				.setDesc("Automatically sync to Notion when a new note is created")
+				.addToggle((toggle) =>
+					toggle
+						.setValue(this.plugin.settings.syncOnNoteCreate)
+						.onChange(async (value) => {
+							this.plugin.settings.syncOnNoteCreate = value;
+							await this.plugin.saveSettings();
+						})
+				);
+
+			new Setting(containerEl)
+				.setName("Sync on demand only")
+				.setDesc("Disable automatic sync; only sync via manual command")
+				.addToggle((toggle) =>
+					toggle
+						.setValue(this.plugin.settings.syncOnDemandOnly)
+						.onChange(async (value) => {
+							this.plugin.settings.syncOnDemandOnly = value;
+							await this.plugin.saveSettings();
+						})
+				);
+		}
+	}
+}
+
