@@ -335,6 +335,18 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 							await this.plugin.saveSettings();
 						})
 				);
+
+			new Setting(containerEl)
+				.setName("Auto-sync on MD file change")
+				.setDesc("Automatically sync to Notion when a markdown file is modified (with 2s debounce)")
+				.addToggle((toggle) =>
+					toggle
+						.setValue(this.plugin.settings.autoSyncOnMdChange)
+						.onChange(async (value) => {
+							this.plugin.settings.autoSyncOnMdChange = value;
+							await this.plugin.saveSettings();
+						})
+				);
 		}
 	}
 }
