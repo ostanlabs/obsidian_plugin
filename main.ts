@@ -66,6 +66,8 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	private isResizing: boolean = false;
 	// Debounce timers for MD file sync to Notion
 	private mdSyncDebounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+	// Cache file path -> accomplishment ID for deletion sync
+	private fileAccomplishmentIdCache: Map<string, string> = new Map();
 
 	private getCanvasNodeFromEventTarget(target: EventTarget | null): any {
 		if (!(target instanceof HTMLElement)) return null;
@@ -179,10 +181,20 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 			})
 		);
 
+		// Watch for MD file deletions to archive corresponding Notion pages
+		this.registerEvent(
+			this.app.vault.on("delete", async (file) => {
+				if (file instanceof TFile && file.extension === "md") {
+					await this.handleMdFileDeletion(file);
+				}
+			})
+		);
+
 		// Initialize cache after layout is ready (vault files are indexed)
 		this.app.workspace.onLayoutReady(async () => {
-			console.log('[Canvas Plugin] Layout ready, initializing canvas node cache...');
+			console.log('[Canvas Plugin] Layout ready, initializing caches...');
 			await this.initializeCanvasNodeCache();
+			await this.initializeFileAccomplishmentIdCache();
 		});
 
 		await this.logger.info("Plugin initialization complete");
@@ -2024,6 +2036,36 @@ private registerCommands(): void {
 		}
 	}
 
+	/**
+	 * Initialize cache of file path -> accomplishment ID for deletion sync
+	 */
+	private async initializeFileAccomplishmentIdCache(): Promise<void> {
+		try {
+			console.log('[Canvas Plugin] Initializing file accomplishment ID cache...');
+			const mdFiles = this.app.vault.getMarkdownFiles();
+			let cachedCount = 0;
+
+			for (const file of mdFiles) {
+				try {
+					const content = await this.app.vault.read(file);
+					const frontmatter = parseFrontmatter(content);
+
+					if (frontmatter && isPluginCreatedNote(frontmatter) && frontmatter.id) {
+						this.fileAccomplishmentIdCache.set(file.path, frontmatter.id);
+						cachedCount++;
+					}
+				} catch (error) {
+					// Skip files that can't be read
+				}
+			}
+
+			console.log('[Canvas Plugin] File accomplishment ID cache initialized with', cachedCount, 'entries');
+		} catch (error) {
+			console.error('[Canvas Plugin] Failed to initialize file accomplishment ID cache:', error);
+			await this.logger?.error("Failed to initialize file accomplishment ID cache", error);
+		}
+	}
+
 	private async handleCanvasModification(canvasFile: TFile): Promise<void> {
 		console.log('[Canvas Plugin] ===== Canvas modification detected =====');
 		console.log('[Canvas Plugin] Canvas file:', canvasFile.path);
@@ -2105,6 +2147,11 @@ private registerCommands(): void {
 				return;
 			}
 
+			// Cache the accomplishment ID for deletion sync
+			if (frontmatter.id) {
+				this.fileAccomplishmentIdCache.set(file.path, frontmatter.id);
+			}
+
 			// Get the canvas source
 			const canvasSource = frontmatter.canvas_source;
 			if (!canvasSource) {
@@ -2178,6 +2225,44 @@ private registerCommands(): void {
 			}
 		} catch (error) {
 			await this.logger?.error("Failed to handle MD file modification", error);
+		}
+	}
+
+	/**
+	 * Handle MD file deletion to archive corresponding Notion page
+	 */
+	private async handleMdFileDeletion(file: TFile): Promise<void> {
+		// Check if Notion sync is enabled
+		if (!this.settings.notionEnabled || !this.notionClient) {
+			return;
+		}
+
+		try {
+			// Get the accomplishment ID from cache
+			const accomplishmentId = this.fileAccomplishmentIdCache.get(file.path);
+			if (!accomplishmentId) {
+				console.log('[Canvas Plugin] No cached accomplishment ID for deleted file:', file.path);
+				return;
+			}
+
+			// Remove from cache
+			this.fileAccomplishmentIdCache.delete(file.path);
+
+			// Find the Notion page by accomplishment ID
+			const page = await this.notionClient.findPageByAccomplishmentId(accomplishmentId);
+			if (!page) {
+				console.log('[Canvas Plugin] No Notion page found for accomplishment:', accomplishmentId);
+				return;
+			}
+
+			// Archive the page
+			console.log('[Canvas Plugin] Archiving Notion page for deleted file:', file.path, 'accomplishment:', accomplishmentId);
+			await this.notionClient.archivePage(page.id);
+			console.log('[Canvas Plugin] Notion page archived successfully');
+			new Notice(`Notion page archived for deleted note: ${accomplishmentId}`);
+		} catch (error) {
+			console.error('[Canvas Plugin] Failed to archive Notion page:', error);
+			await this.logger?.error("Failed to archive Notion page for deleted file", error);
 		}
 	}
 
