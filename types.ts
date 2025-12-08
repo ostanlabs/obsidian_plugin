@@ -22,6 +22,8 @@ export interface CanvasItemFromTemplateSettings {
 	notionDatabaseName: string;
 	syncOnNoteCreate: boolean;
 	syncOnDemandOnly: boolean;
+	notionSyncIntervalMinutes: number; // Polling interval for bi-directional sync
+	autoSyncOnMdChange: boolean; // Auto-sync when MD file is modified
 }
 
 export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
@@ -52,6 +54,8 @@ export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
 	notionDatabaseName: "Obsidian Canvas Items",
 	syncOnNoteCreate: true,
 	syncOnDemandOnly: false,
+	notionSyncIntervalMinutes: 5,
+	autoSyncOnMdChange: true,
 };
 
 export type ItemType = "accomplishment";
@@ -67,6 +71,8 @@ export interface ItemFrontmatter {
 	status: ItemStatus;
 	priority: ItemPriority;
 	inProgress?: boolean; // When true, node border is red
+	time_estimate?: number; // Total time estimate in hours (sum of task estimates)
+	depends_on?: string[]; // Array of accomplishment IDs this depends on
 	created_by_plugin?: boolean;
 	created: string;
 	updated: string;

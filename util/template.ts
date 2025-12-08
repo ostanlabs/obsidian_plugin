@@ -17,6 +17,8 @@ export function replacePlaceholders(
 	result = result.replace(/\{\{status\}\}/g, frontmatter.status);
 	result = result.replace(/\{\{priority\}\}/g, frontmatter.priority);
 	result = result.replace(/\{\{inProgress\}\}/g, String(frontmatter.inProgress ?? false));
+	result = result.replace(/\{\{time_estimate\}\}/g, String(frontmatter.time_estimate ?? 0));
+	result = result.replace(/\{\{depends_on\}\}/g, JSON.stringify(frontmatter.depends_on ?? []));
 	result = result.replace(/\{\{created\}\}/g, frontmatter.created);
 	result = result.replace(/\{\{updated\}\}/g, frontmatter.updated);
 	result = result.replace(/\{\{created_by_plugin\}\}/g, String(frontmatter.created_by_plugin ?? true));
@@ -50,6 +52,8 @@ effort: {{effort}}
 status: Not Started
 priority: High
 inProgress: false
+time_estimate: 0
+depends_on: []
 created_by_plugin: true
 collapsed_height: {{collapsed_height}}
 expanded_height: {{expanded_height}}
@@ -76,15 +80,15 @@ Describe the final state that will be true once this is done.
 
 ### Task 1: [Name]
 - **Goal:** [What this task achieves]
-- **Description:** [Details]
-- **Technical Notes:** [Implementation specifics]
+- **Estimate:** 0h
 - **Status:** ⬜ Not Started
+- **Notes:** [Implementation details]
 
 ### Task 2: [Name]
 - **Goal:** [What this task achieves]
-- **Description:** [Details]
-- **Technical Notes:** [Implementation specifics]
+- **Estimate:** 0h
 - **Status:** ⬜ Not Started
+- **Notes:** [Implementation details]
 
 ## Notes
 

@@ -1,7 +1,46 @@
 import { Client } from "@notionhq/client";
-import { Notice } from "obsidian";
+import { Notice, requestUrl, RequestUrlParam } from "obsidian";
 import { CanvasItemFromTemplateSettings, ItemFrontmatter } from "../types";
 import { Logger } from "../util/logger";
+
+/**
+ * Custom fetch implementation using Obsidian's requestUrl to bypass CORS
+ * The Notion SDK uses fetch internally, which triggers CORS in Electron.
+ * Obsidian's requestUrl makes requests at the native level, bypassing CORS.
+ */
+function obsidianFetch(url: string, init?: RequestInit): Promise<Response> {
+	const params: RequestUrlParam = {
+		url,
+		method: (init?.method as string) || "GET",
+		headers: init?.headers as Record<string, string>,
+		body: init?.body as string,
+		throw: false, // Don't throw on non-2xx, let us handle it
+	};
+
+	return requestUrl(params).then((response) => {
+		// Convert Obsidian's response to a fetch-like Response object
+		// Using 'as unknown as Response' to satisfy TypeScript while providing
+		// the minimal interface the Notion SDK actually uses
+		return {
+			ok: response.status >= 200 && response.status < 300,
+			status: response.status,
+			statusText: String(response.status),
+			headers: new Headers(response.headers),
+			url,
+			json: async () => response.json,
+			text: async () => response.text,
+			blob: async () => new Blob([response.arrayBuffer]),
+			arrayBuffer: async () => response.arrayBuffer,
+			bytes: async () => new Uint8Array(response.arrayBuffer),
+			clone: () => { throw new Error("clone not implemented"); },
+			body: null,
+			bodyUsed: false,
+			formData: async () => { throw new Error("formData not implemented"); },
+			redirected: false,
+			type: "basic" as ResponseType,
+		} as unknown as Response;
+	});
+}
 
 export class NotionClient {
 	private client: Client | null = null;
@@ -16,6 +55,7 @@ export class NotionClient {
 
 	/**
 	 * Initialize the Notion client if credentials are available
+	 * Uses custom fetch to bypass CORS restrictions in Obsidian
 	 */
 	private initializeClient(): void {
 		if (
@@ -24,8 +64,9 @@ export class NotionClient {
 		) {
 			this.client = new Client({
 				auth: this.settings.notionIntegrationToken,
+				fetch: obsidianFetch,
 			});
-			this.logger.info("Notion client initialized");
+			this.logger.info("Notion client initialized with Obsidian fetch");
 		} else {
 			this.client = null;
 		}
@@ -92,7 +133,6 @@ export class NotionClient {
 					Type: {
 						select: {
 							options: [
-								{ name: "Task", color: "blue" as const },
 								{ name: "Accomplishment", color: "green" as const },
 							],
 						},
@@ -128,8 +168,19 @@ export class NotionClient {
 							],
 						},
 					},
-					Parent: {
-						rich_text: {},
+					"In Progress": {
+						checkbox: {},
+					},
+					"Time Estimate": {
+						number: {
+							format: "number" as const,
+						},
+					},
+					Created: {
+						date: {},
+					},
+					Updated: {
+						date: {},
 					},
 					"Canvas Source": {
 						rich_text: {},
@@ -144,9 +195,49 @@ export class NotionClient {
 			});
 
 			this.logger.info("Notion database created", { id: response.id });
+
+			// Add self-referential relation for dependencies
+			// This must be done after database creation since we need the database ID
+			await this.addDependencyRelation(response.id);
+
 			return response.id;
 		} catch (error) {
 			this.logger.error("Failed to create Notion database", error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Add the "Depends On" self-referential relation to the database
+	 * This creates a two-way relation (Depends On / Blocks)
+	 */
+	private async addDependencyRelation(databaseId: string): Promise<void> {
+		if (!this.client) {
+			throw new Error("Notion client not initialized");
+		}
+
+		try {
+			this.logger.info("Adding dependency relation to database...");
+
+			// Use type assertion because the SDK types don't fully support dual_property
+			await this.client.databases.update({
+				database_id: databaseId,
+				properties: {
+					"Depends On": {
+						relation: {
+							database_id: databaseId,
+							type: "dual_property",
+							dual_property: {
+								synced_property_name: "Blocks",
+							},
+						},
+					} as any,
+				},
+			});
+
+			this.logger.info("Dependency relation added successfully");
+		} catch (error) {
+			this.logger.error("Failed to add dependency relation", error);
 			throw error;
 		}
 	}
@@ -285,6 +376,22 @@ export class NotionClient {
 					},
 				],
 			},
+			"In Progress": {
+				checkbox: frontmatter.inProgress ?? false,
+			},
+			"Time Estimate": {
+				number: frontmatter.time_estimate ?? 0,
+			},
+			Created: {
+				date: frontmatter.created ? {
+					start: frontmatter.created,
+				} : null,
+			},
+			Updated: {
+				date: frontmatter.updated ? {
+					start: frontmatter.updated,
+				} : null,
+			},
 			"Last Synced": {
 				date: {
 					start: new Date().toISOString(),
@@ -293,6 +400,49 @@ export class NotionClient {
 		};
 
 		return properties;
+	}
+
+	/**
+	 * Build Notion properties with dependency relations
+	 * This is used when we have the page IDs for dependencies
+	 */
+	buildPropertiesWithRelations(frontmatter: ItemFrontmatter, dependencyPageIds: string[]): any {
+		const properties = this.buildProperties(frontmatter);
+
+		if (dependencyPageIds.length > 0) {
+			properties["Depends On"] = {
+				relation: dependencyPageIds.map(id => ({ id })),
+			};
+		}
+
+		return properties;
+	}
+
+	/**
+	 * Update only the dependency relations for a page
+	 */
+	async updateDependencies(pageId: string, dependencyPageIds: string[]): Promise<void> {
+		if (!this.client) {
+			throw new Error("Notion client not initialized");
+		}
+
+		try {
+			this.logger.info("Updating dependencies for page", { pageId, dependencyCount: dependencyPageIds.length });
+
+			await this.client.pages.update({
+				page_id: pageId,
+				properties: {
+					"Depends On": {
+						relation: dependencyPageIds.map(id => ({ id })),
+					},
+				},
+			});
+
+			this.logger.info("Dependencies updated", { pageId });
+		} catch (error) {
+			this.logger.error("Failed to update dependencies", error);
+			throw error;
+		}
 	}
 
 	private mapStatus(status: string): string {
@@ -369,6 +519,183 @@ export class NotionClient {
 			}
 		} catch (error) {
 			this.logger.error("Failed to sync note to Notion", error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Query all pages in the database
+	 * Used for bi-directional sync and finding pages by accomplishment ID
+	 */
+	async queryAllPages(): Promise<any[]> {
+		if (!this.client) {
+			throw new Error("Notion client not initialized");
+		}
+
+		if (!this.settings.notionDatabaseId) {
+			throw new Error("Notion database not initialized");
+		}
+
+		try {
+			const pages: any[] = [];
+			let hasMore = true;
+			let startCursor: string | undefined;
+
+			while (hasMore) {
+				const response = await this.client.databases.query({
+					database_id: this.settings.notionDatabaseId,
+					start_cursor: startCursor,
+					page_size: 100,
+				});
+
+				pages.push(...response.results);
+				hasMore = response.has_more;
+				startCursor = response.next_cursor ?? undefined;
+			}
+
+			this.logger.info("Queried all pages", { count: pages.length });
+			return pages;
+		} catch (error) {
+			this.logger.error("Failed to query pages", error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Find a page by accomplishment ID
+	 */
+	async findPageByAccomplishmentId(accomplishmentId: string): Promise<any | null> {
+		if (!this.client) {
+			throw new Error("Notion client not initialized");
+		}
+
+		if (!this.settings.notionDatabaseId) {
+			throw new Error("Notion database not initialized");
+		}
+
+		try {
+			const response = await this.client.databases.query({
+				database_id: this.settings.notionDatabaseId,
+				filter: {
+					property: "ID",
+					rich_text: {
+						equals: accomplishmentId,
+					},
+				},
+			});
+
+			if (response.results.length > 0) {
+				return response.results[0];
+			}
+			return null;
+		} catch (error) {
+			this.logger.error("Failed to find page by ID", error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Archive a page in Notion (soft delete)
+	 */
+	async archivePage(pageId: string): Promise<void> {
+		if (!this.client) {
+			throw new Error("Notion client not initialized");
+		}
+
+		try {
+			this.logger.info("Archiving Notion page", { pageId });
+
+			await this.client.pages.update({
+				page_id: pageId,
+				archived: true,
+			});
+
+			this.logger.info("Notion page archived", { pageId });
+		} catch (error) {
+			this.logger.error("Failed to archive Notion page", error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Get a page by ID with all properties
+	 */
+	async getPage(pageId: string): Promise<any> {
+		if (!this.client) {
+			throw new Error("Notion client not initialized");
+		}
+
+		try {
+			const page = await this.client.pages.retrieve({
+				page_id: pageId,
+			});
+			return page;
+		} catch (error) {
+			this.logger.error("Failed to get page", error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Get page content (blocks)
+	 */
+	async getPageContent(pageId: string): Promise<any[]> {
+		if (!this.client) {
+			throw new Error("Notion client not initialized");
+		}
+
+		try {
+			const blocks: any[] = [];
+			let hasMore = true;
+			let startCursor: string | undefined;
+
+			while (hasMore) {
+				const response = await this.client.blocks.children.list({
+					block_id: pageId,
+					start_cursor: startCursor,
+					page_size: 100,
+				});
+
+				blocks.push(...response.results);
+				hasMore = response.has_more;
+				startCursor = response.next_cursor ?? undefined;
+			}
+
+			return blocks;
+		} catch (error) {
+			this.logger.error("Failed to get page content", error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Update page content (replace all blocks)
+	 */
+	async updatePageContent(pageId: string, blocks: any[]): Promise<void> {
+		if (!this.client) {
+			throw new Error("Notion client not initialized");
+		}
+
+		try {
+			// First, delete existing blocks
+			const existingBlocks = await this.getPageContent(pageId);
+			for (const block of existingBlocks) {
+				await this.client.blocks.delete({
+					block_id: block.id,
+				});
+			}
+
+			// Then, add new blocks
+			if (blocks.length > 0) {
+				await this.client.blocks.children.append({
+					block_id: pageId,
+					children: blocks,
+				});
+			}
+
+			this.logger.info("Page content updated", { pageId, blockCount: blocks.length });
+		} catch (error) {
+			this.logger.error("Failed to update page content", error);
 			throw error;
 		}
 	}
