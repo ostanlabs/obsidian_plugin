@@ -168,6 +168,15 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 			})
 		);
 
+		// Watch for MD file modifications to update canvas node colors (e.g., inProgress)
+		this.registerEvent(
+			this.app.vault.on("modify", async (file) => {
+				if (file instanceof TFile && file.extension === "md") {
+					await this.handleMdFileModification(file);
+				}
+			})
+		);
+
 		// Initialize cache after layout is ready (vault files are indexed)
 		this.app.workspace.onLayoutReady(async () => {
 			console.log('[Canvas Plugin] Layout ready, initializing canvas node cache...');
@@ -2072,6 +2081,72 @@ private registerCommands(): void {
 			console.log('[Canvas Plugin] Cache updated with', currentNodeIds.size, 'nodes');
 		} catch (error) {
 			await this.logger?.error("Failed to handle canvas modification", error);
+		}
+	}
+
+	/**
+	 * Handle MD file modifications to update canvas node colors (e.g., inProgress flag)
+	 */
+	private async handleMdFileModification(file: TFile): Promise<void> {
+		// Skip if we're currently updating the canvas ourselves
+		if (this.isUpdatingCanvas) {
+			return;
+		}
+
+		try {
+			const content = await this.app.vault.read(file);
+			const frontmatter = parseFrontmatter(content);
+
+			// Only process plugin-created notes
+			if (!frontmatter || !isPluginCreatedNote(frontmatter)) {
+				return;
+			}
+
+			// Get the canvas source
+			const canvasSource = frontmatter.canvas_source;
+			if (!canvasSource) {
+				return;
+			}
+
+			// Find the canvas file
+			const canvasFile = this.app.vault.getAbstractFileByPath(canvasSource);
+			if (!(canvasFile instanceof TFile)) {
+				return;
+			}
+
+			// Load canvas data
+			const canvasData = await loadCanvasData(this.app, canvasFile);
+
+			// Find the node that references this file
+			const node = canvasData.nodes.find((n: CanvasNode) => n.file === file.path);
+			if (!node) {
+				return;
+			}
+
+			// Resolve the new color based on inProgress and effort
+			const newColor = this.resolveNodeColor(frontmatter.effort, frontmatter.inProgress);
+
+			// Check if color needs to be updated
+			if (node.color !== newColor) {
+				console.log('[Canvas Plugin] Updating node color for', file.path, 'from', node.color, 'to', newColor);
+
+				// Update the node color
+				node.color = newColor;
+
+				// Save the canvas
+				this.isUpdatingCanvas = true;
+				try {
+					await saveCanvasData(this.app, canvasFile, canvasData);
+					// Reload canvas to reflect changes
+					await reloadCanvasViewsWithViewport(this.app, canvasFile);
+				} finally {
+					setTimeout(() => {
+						this.isUpdatingCanvas = false;
+					}, 500);
+				}
+			}
+		} catch (error) {
+			await this.logger?.error("Failed to handle MD file modification", error);
 		}
 	}
 
