@@ -33,6 +33,14 @@ export function parseFrontmatter(content: string): ItemFrontmatter | null {
 		return null;
 	}
 
+	// Convert boolean strings to actual booleans
+	if (frontmatter.inProgress !== undefined) {
+		frontmatter.inProgress = frontmatter.inProgress === "true";
+	}
+	if (frontmatter.created_by_plugin !== undefined) {
+		frontmatter.created_by_plugin = frontmatter.created_by_plugin === "true";
+	}
+
 	return frontmatter as ItemFrontmatter;
 }
 
@@ -177,6 +185,7 @@ export function serializeFrontmatter(frontmatter: ItemFrontmatter): string {
 
 	lines.push(`status: ${frontmatter.status}`);
 	lines.push(`priority: ${frontmatter.priority}`);
+	lines.push(`inProgress: ${frontmatter.inProgress ?? false}`);
 	lines.push(`created_by_plugin: ${frontmatter.created_by_plugin ?? true}`);
 	lines.push(`created: ${frontmatter.created}`);
 	lines.push(`updated: ${frontmatter.updated}`);

@@ -16,6 +16,7 @@ export function replacePlaceholders(
 	result = result.replace(/\{\{id\}\}/g, frontmatter.id);
 	result = result.replace(/\{\{status\}\}/g, frontmatter.status);
 	result = result.replace(/\{\{priority\}\}/g, frontmatter.priority);
+	result = result.replace(/\{\{inProgress\}\}/g, String(frontmatter.inProgress ?? false));
 	result = result.replace(/\{\{created\}\}/g, frontmatter.created);
 	result = result.replace(/\{\{updated\}\}/g, frontmatter.updated);
 	result = result.replace(/\{\{created_by_plugin\}\}/g, String(frontmatter.created_by_plugin ?? true));
@@ -39,44 +40,6 @@ export function replacePlaceholders(
 }
 
 /**
- * Default task template
- */
-export const DEFAULT_TASK_TEMPLATE = `---
-type: {{type}}
-title: {{title}}
-id: {{id}}
-effort: {{effort}}
-status: Not Started
-priority: Medium
-parent: {{parent}}
-created_by_plugin: true
-collapsed_height: {{collapsed_height}}
-expanded_height: {{expanded_height}}
-expanded_width: {{expanded_width}}
-created: {{created}}
-updated: {{updated}}
-canvas_source: {{canvas_source}}
-vault_path: {{vault_path}}
-notion_page_id: {{notion_page_id}}
----
-
-# {{title}} (Task)
-
-## Objective
-
-Describe what needs to be achieved.
-
-## Steps
-
-- [ ] Step 1
-- [ ] Step 2
-
-## Notes
-
-- ...
-`;
-
-/**
  * Default accomplishment template
  */
 export const DEFAULT_ACCOMPLISHMENT_TEMPLATE = `---
@@ -86,7 +49,7 @@ id: {{id}}
 effort: {{effort}}
 status: Not Started
 priority: High
-parent: {{parent}}
+inProgress: false
 created_by_plugin: true
 collapsed_height: {{collapsed_height}}
 expanded_height: {{expanded_height}}
@@ -98,23 +61,26 @@ vault_path: {{vault_path}}
 notion_page_id: {{notion_page_id}}
 ---
 
-# {{title}} (Accomplishment)
+## Accomplishment Overview
+**Goal:** [One sentence describing the end state]
+**Dependencies:**
+**Status:** Not Started
 
-## Outcome
+## Tasks
 
-Describe the final state that will be true once this is done.
+### Task 1: [Name]
+- **Goal:** [What this task achieves]
+- **Description:** [Details]
+- **Technical Notes:** [Implementation specifics]
+- **Status:** ⬜ Not Started
 
-## Acceptance Criteria
-
-- [ ] Criterion 1
-- [ ] Criterion 2
-
-## Related Tasks
-
-- [ ] Link tasks here
+### Task 2: [Name]
+- **Goal:** [What this task achieves]
+- **Description:** [Details]
+- **Technical Notes:** [Implementation specifics]
+- **Status:** ⬜ Not Started
 
 ## Notes
-
-- ...
+[Additional context]
 `;
 

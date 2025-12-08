@@ -2,15 +2,14 @@ import { App, TFile } from "obsidian";
 import { CanvasItemFromTemplateSettings } from "../types";
 
 /**
- * Generate a unique ID for a new item
+ * Generate a unique ID for a new accomplishment
  * Scans existing notes to find the highest ID and increments
  */
 export async function generateId(
 	app: App,
-	settings: CanvasItemFromTemplateSettings,
-	type: "task" | "accomplishment"
+	settings: CanvasItemFromTemplateSettings
 ): Promise<string> {
-	const prefix = type === "task" ? settings.idPrefixTask : settings.idPrefixAccomplishment;
+	const prefix = settings.idPrefixAccomplishment;
 	const padLength = settings.idZeroPadLength;
 
 	// Get all markdown files

@@ -30,7 +30,6 @@ interface ItemCreationResult {
 import { Logger } from "./util/logger";
 import { generateId } from "./util/idGenerator";
 import {
-	DEFAULT_TASK_TEMPLATE,
 	DEFAULT_ACCOMPLISHMENT_TEMPLATE,
 	replacePlaceholders,
 } from "./util/template";
@@ -273,7 +272,7 @@ private registerCommands(): void {
 		console.log('[Canvas Plugin] Item data:', itemData);
 
 		// Generate ID
-		const id = await generateId(this.app, this.settings, itemData.type);
+		const id = await generateId(this.app, this.settings);
 		console.log('[Canvas Plugin] Generated ID:', id);
 
 		// Determine note path
@@ -288,7 +287,8 @@ private registerCommands(): void {
 			effort: itemData.effort,
 			id,
 			status: this.normalizeStatus("Not Started"),
-			priority: this.normalizePriority(itemData.type === "accomplishment" ? "High" : "Medium"),
+			priority: this.normalizePriority("High"),
+			inProgress: false,
 			created_by_plugin: true,
 			created: now,
 			updated: now,
@@ -330,9 +330,9 @@ private registerCommands(): void {
 		const expandedHeight = sizeConfig.expandedHeight ?? EXPANDED_HEIGHT_DEFAULT;
 		const expandedWidth = sizeConfig.expandedWidth ?? EXPANDED_WIDTH_DEFAULT;
 		
-		// Get color for the node
-		const color = this.resolveEffortColor(itemData.effort);
-		
+		// Get color for the node (inProgress is false for new items)
+		const color = this.resolveNodeColor(itemData.effort, false);
+
 		// Build metadata
 		const metadata = this.buildCanvasMetadata(
 			itemData.type,
@@ -464,10 +464,7 @@ private registerCommands(): void {
 			templatePath = customPath;
 		} else {
 			// Use default template path from settings
-			templatePath =
-				type === "task"
-					? this.settings.taskTemplatePath
-					: this.settings.accomplishmentTemplatePath;
+			templatePath = this.settings.accomplishmentTemplatePath;
 		}
 
 		const file = this.app.vault.getAbstractFileByPath(templatePath);
@@ -480,9 +477,7 @@ private registerCommands(): void {
 		await this.logger?.warn("Template not found, using default", {
 			path: templatePath,
 		});
-		return type === "task"
-			? DEFAULT_TASK_TEMPLATE
-			: DEFAULT_ACCOMPLISHMENT_TEMPLATE;
+		return DEFAULT_ACCOMPLISHMENT_TEMPLATE;
 	}
 
 	/**
@@ -496,16 +491,18 @@ private registerCommands(): void {
 		effort: string | undefined,
 		type: ItemType,
 		options?: { alias?: string; collapsed?: boolean },
-		sizeConfig?: { collapsedHeight: number; expandedHeight: number; expandedWidth?: number }
+		sizeConfig?: { collapsedHeight: number; expandedHeight: number; expandedWidth?: number },
+		inProgress?: boolean
 	): Promise<void> {
 		console.log('[Canvas Plugin] updateCanvas called:', {
 			canvasPath: canvasFile.path,
 			notePath,
 			existingNodeId,
-			effort
+			effort,
+			inProgress
 		});
 
-	const color = this.resolveEffortColor(effort);
+	const color = this.resolveNodeColor(effort, inProgress);
 	const metadata = this.buildCanvasMetadata(type, title, effort, options, color);
 	
 	console.log('[Canvas Plugin] ===== START updateCanvas =====');
@@ -696,8 +693,8 @@ private registerCommands(): void {
 				return;
 			}
 
-			if (frontmatter.type !== "task" && frontmatter.type !== "accomplishment") {
-				new Notice("This note is not a task or accomplishment");
+			if (frontmatter.type !== "accomplishment") {
+				new Notice("This note is not an accomplishment");
 				return;
 			}
 
@@ -726,11 +723,6 @@ private registerCommands(): void {
 	 */
 	async ensureTemplatesExist(force = false): Promise<void> {
 		const templates = [
-			{
-				path: this.settings.taskTemplatePath,
-				content: DEFAULT_TASK_TEMPLATE,
-				name: "Task",
-			},
 			{
 				path: this.settings.accomplishmentTemplatePath,
 				content: DEFAULT_ACCOMPLISHMENT_TEMPLATE,
@@ -1792,7 +1784,7 @@ private registerCommands(): void {
 	): Promise<void> {
 		try {
 			// Generate ID
-			const id = await generateId(this.app, this.settings, result.type);
+			const id = await generateId(this.app, this.settings);
 
 			// Keep the same file path
 			const newPath = file.path;
@@ -1963,20 +1955,20 @@ private registerCommands(): void {
 				// Use provided path (file already created in creation flow)
 				notePath = existingNotePath;
 				console.log('[Canvas Plugin] Using existing note path:', notePath);
-				
+
 				// Read ID from existing file's frontmatter
 				const existingFile = this.app.vault.getAbstractFileByPath(notePath);
 				if (existingFile instanceof TFile) {
 					const fileContent = await this.app.vault.read(existingFile);
 					const parsed = parseFrontmatter(fileContent);
-					id = parsed?.id || await generateId(this.app, this.settings, result.type);
+					id = parsed?.id || await generateId(this.app, this.settings);
 					console.log('[Canvas Plugin] Read ID from existing file:', id);
 				} else {
-					id = await generateId(this.app, this.settings, result.type);
+					id = await generateId(this.app, this.settings);
 				}
 			} else {
 				// Generate new path (conversion flow)
-				id = await generateId(this.app, this.settings, result.type);
+				id = await generateId(this.app, this.settings);
 				const baseFolder = canvasFile.parent?.path || this.settings.notesBaseFolder;
 				// Use title as filename, preserving whitespaces
 				notePath = await generateUniqueFilename(
@@ -2025,8 +2017,8 @@ private registerCommands(): void {
 				console.log('[Canvas Plugin] Note file already exists, skipping creation:', notePath);
 			}
 
-			// Get color for the node
-			const color = this.resolveEffortColor(result.effort);
+			// Get color for the node (inProgress is false for new conversions)
+			const color = this.resolveNodeColor(result.effort, false);
 
 			// Load canvas file
 			const canvasData = await loadCanvasData(this.app, canvasFile);
@@ -2250,6 +2242,16 @@ private registerCommands(): void {
 	}
 
 	/**
+	 * Resolve node color - red if inProgress, otherwise effort-based
+	 */
+	private resolveNodeColor(effort?: string, inProgress?: boolean): string | undefined {
+		if (inProgress) {
+			return this.settings.inProgressColor; // Red when in progress
+		}
+		return this.resolveEffortColor(effort);
+	}
+
+	/**
 	 * Build canvas metadata payload for structured notes
 	 */
 	private buildCanvasMetadata(
@@ -2263,7 +2265,7 @@ private registerCommands(): void {
 			plugin: "structured-canvas-notes",
 			collapsed: options?.collapsed ?? false,
 			alias: options?.alias ?? title,
-			shape: type === "accomplishment" ? this.settings.shapeAccomplishment : this.settings.shapeTask,
+			shape: this.settings.shapeAccomplishment,
 			showId: this.settings.showIdInCanvas,
 		};
 

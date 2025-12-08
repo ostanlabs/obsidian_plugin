@@ -43,7 +43,7 @@ export class StructuredItemModal extends Modal {
 		
 		const titleValue = options.defaultTitle || options.currentTitle || "";
 		this.result = {
-			type: options.fixedType || "task",
+			type: options.fixedType || "accomplishment",
 			effort: settings.defaultEffort,
 			title: options.showTitleInput ? titleValue : undefined,
 			alias: titleValue,
@@ -70,35 +70,13 @@ export class StructuredItemModal extends Modal {
 			await this.loadTemplates();
 		}
 
-		// Type dropdown or read-only text
-		if (this.options.typeEditable) {
-			new Setting(contentEl)
-				.setName("Type")
-				.setDesc("Select the type of item")
-				.addDropdown((dropdown) => {
-					dropdown
-						.addOption("task", "Task")
-						.addOption("accomplishment", "Accomplishment")
-						.setValue(this.result.type)
-						.onChange(async (value) => {
-							this.result.type = value as ItemType;
-							// Reload templates when type changes
-							if (this.options.showTemplateSelector && this.settings.useTemplateFolder) {
-								await this.loadTemplates();
-								this.onOpen(); // Refresh modal to show new templates
-							}
-						});
-				});
-		} else {
-			// Show type as read-only text
-			const typeLabel = this.result.type === "task" ? "Task" : "Accomplishment";
-			new Setting(contentEl)
-				.setName("Type")
-				.setDesc("Item type")
-				.addText((text) => {
-					text.setValue(typeLabel).setDisabled(true);
-				});
-		}
+		// Type is always "accomplishment" now - show as read-only
+		new Setting(contentEl)
+			.setName("Type")
+			.setDesc("Item type")
+			.addText((text) => {
+				text.setValue("Accomplishment").setDisabled(true);
+			});
 
 		// Template selector (if enabled and templates are available)
 		if (this.options.showTemplateSelector && this.settings.useTemplateFolder && this.availableTemplates.length > 0) {
@@ -238,19 +216,10 @@ export class StructuredItemModal extends Modal {
 			file.path.startsWith(this.settings.templateFolder + "/")
 		);
 
-		// Filter by type if needed (look for type in filename or frontmatter)
+		// Include accomplishment templates and generic templates
 		for (const file of templateFiles) {
 			const name = file.basename.toLowerCase();
-			// Check if filename indicates type
-			if (this.result.type === "task" && name.includes("task")) {
-				this.availableTemplates.push(file.path);
-			} else if (
-				this.result.type === "accomplishment" &&
-				(name.includes("accomplishment") || name.includes("goal"))
-			) {
-				this.availableTemplates.push(file.path);
-			} else if (!name.includes("task") && !name.includes("accomplishment")) {
-				// Include generic templates
+			if (name.includes("accomplishment") || name.includes("goal") || !name.includes("task")) {
 				this.availableTemplates.push(file.path);
 			}
 		}

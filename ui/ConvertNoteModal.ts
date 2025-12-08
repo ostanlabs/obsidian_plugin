@@ -25,7 +25,7 @@ export class ConvertNoteModal extends Modal {
 		this.currentTitle = currentTitle;
 		this.onSubmit = onSubmit;
 		this.result = {
-			type: "task",
+			type: "accomplishment",
 			effort: settings.defaultEffort,
 			parent: "",
 			keepOriginalName: false,

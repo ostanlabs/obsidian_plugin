@@ -17,17 +17,10 @@ describe("ID Generator", () => {
 	});
 
 	describe("generateId", () => {
-		it("should generate T001 for first task", async () => {
-			mockApp.vault.getMarkdownFiles.mockReturnValue([]);
-
-			const id = await generateId(mockApp, DEFAULT_SETTINGS, "task");
-			expect(id).toBe("T001");
-		});
-
 		it("should generate A001 for first accomplishment", async () => {
 			mockApp.vault.getMarkdownFiles.mockReturnValue([]);
 
-			const id = await generateId(mockApp, DEFAULT_SETTINGS, "accomplishment");
+			const id = await generateId(mockApp, DEFAULT_SETTINGS);
 			expect(id).toBe("A001");
 		});
 
@@ -35,11 +28,11 @@ describe("ID Generator", () => {
 			const mockFiles = [{ path: "test1.md" }, { path: "test2.md" }];
 			mockApp.vault.getMarkdownFiles.mockReturnValue(mockFiles);
 			mockApp.metadataCache.getFileCache
-				.mockReturnValueOnce({ frontmatter: { id: "T001" } })
-				.mockReturnValueOnce({ frontmatter: { id: "T005" } });
+				.mockReturnValueOnce({ frontmatter: { id: "A001" } })
+				.mockReturnValueOnce({ frontmatter: { id: "A005" } });
 
-			const id = await generateId(mockApp, DEFAULT_SETTINGS, "task");
-			expect(id).toBe("T006");
+			const id = await generateId(mockApp, DEFAULT_SETTINGS);
+			expect(id).toBe("A006");
 		});
 
 		it("should handle custom prefix", async () => {
@@ -47,11 +40,11 @@ describe("ID Generator", () => {
 
 			const customSettings = {
 				...DEFAULT_SETTINGS,
-				idPrefixTask: "TASK",
+				idPrefixAccomplishment: "ACC",
 			};
 
-			const id = await generateId(mockApp, customSettings, "task");
-			expect(id).toBe("TASK001");
+			const id = await generateId(mockApp, customSettings);
+			expect(id).toBe("ACC001");
 		});
 
 		it("should handle custom zero-padding", async () => {
@@ -62,8 +55,8 @@ describe("ID Generator", () => {
 				idZeroPadLength: 5,
 			};
 
-			const id = await generateId(mockApp, customSettings, "task");
-			expect(id).toBe("T00001");
+			const id = await generateId(mockApp, customSettings);
+			expect(id).toBe("A00001");
 		});
 	});
 
@@ -71,7 +64,7 @@ describe("ID Generator", () => {
 		it("should return 0 when no files exist", async () => {
 			mockApp.vault.getMarkdownFiles.mockReturnValue([]);
 
-			const maxId = await findHighestId(mockApp, "T");
+			const maxId = await findHighestId(mockApp, "A");
 			expect(maxId).toBe(0);
 		});
 
@@ -83,11 +76,11 @@ describe("ID Generator", () => {
 			];
 			mockApp.vault.getMarkdownFiles.mockReturnValue(mockFiles);
 			mockApp.metadataCache.getFileCache
-				.mockReturnValueOnce({ frontmatter: { id: "T001" } })
-				.mockReturnValueOnce({ frontmatter: { id: "T010" } })
-				.mockReturnValueOnce({ frontmatter: { id: "T005" } });
+				.mockReturnValueOnce({ frontmatter: { id: "A001" } })
+				.mockReturnValueOnce({ frontmatter: { id: "A010" } })
+				.mockReturnValueOnce({ frontmatter: { id: "A005" } });
 
-			const maxId = await findHighestId(mockApp, "T");
+			const maxId = await findHighestId(mockApp, "A");
 			expect(maxId).toBe(10);
 		});
 	});

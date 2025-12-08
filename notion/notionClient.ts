@@ -240,7 +240,7 @@ export class NotionClient {
 			},
 			Type: {
 				select: {
-					name: frontmatter.type === "task" ? "Task" : "Accomplishment",
+					name: "Accomplishment",
 				},
 			},
 			Effort: {

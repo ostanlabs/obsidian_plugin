@@ -27,7 +27,7 @@ export class ItemCreationModal extends Modal {
 		this.onSubmit = onSubmit;
 		this.defaultTitle = defaultTitle;
 		this.result = {
-			type: "task",
+			type: "accomplishment",
 			effort: settings.defaultEffort,
 			title: defaultTitle,
 		};
@@ -178,19 +178,11 @@ export class ItemCreationModal extends Modal {
 			file.path.startsWith(this.settings.templateFolder + "/")
 		);
 
-		// Filter by type if needed (look for type in filename or frontmatter)
+		// Filter templates - include accomplishment templates and generic templates
 		for (const file of templateFiles) {
 			const name = file.basename.toLowerCase();
-			// Check if filename indicates type
-			if (this.result.type === "task" && name.includes("task")) {
-				this.availableTemplates.push(file.path);
-			} else if (
-				this.result.type === "accomplishment" &&
-				(name.includes("accomplishment") || name.includes("goal"))
-			) {
-				this.availableTemplates.push(file.path);
-			} else if (!name.includes("task") && !name.includes("accomplishment")) {
-				// Include generic templates
+			// Include accomplishment templates or generic templates (not task-specific)
+			if (name.includes("accomplishment") || name.includes("goal") || !name.includes("task")) {
 				this.availableTemplates.push(file.path);
 			}
 		}

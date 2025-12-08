@@ -48,19 +48,6 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 		containerEl.createEl("h2", { text: "Templates" });
 
 		new Setting(containerEl)
-			.setName("Task template path")
-			.setDesc("Path to the task template file")
-			.addText((text) =>
-				text
-					.setPlaceholder("Templates/canvas-task-template.md")
-					.setValue(this.plugin.settings.taskTemplatePath)
-					.onChange(async (value) => {
-						this.plugin.settings.taskTemplatePath = value;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
 			.setName("Accomplishment template path")
 			.setDesc("Path to the accomplishment template file")
 			.addText((text) =>
@@ -115,19 +102,6 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 
 		// IDs Section
 		containerEl.createEl("h2", { text: "ID Generation" });
-
-		new Setting(containerEl)
-			.setName("Task ID prefix")
-			.setDesc("Prefix for task IDs (e.g., 'T' for T001)")
-			.addText((text) =>
-				text
-					.setPlaceholder("T")
-					.setValue(this.plugin.settings.idPrefixTask)
-					.onChange(async (value) => {
-						this.plugin.settings.idPrefixTask = value;
-						await this.plugin.saveSettings();
-					})
-			);
 
 		new Setting(containerEl)
 			.setName("Accomplishment ID prefix")
@@ -234,17 +208,8 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
-			.setName("Shape labels")
-			.setDesc("Shape name to write into canvas metadata")
-			.addText((text) =>
-				text
-					.setPlaceholder("task")
-					.setValue(this.plugin.settings.shapeTask)
-					.onChange(async (value) => {
-						this.plugin.settings.shapeTask = value || "task";
-						await this.plugin.saveSettings();
-					})
-			)
+			.setName("Shape label")
+			.setDesc("Shape name to write into canvas metadata for accomplishments")
 			.addText((text) =>
 				text
 					.setPlaceholder("accomplishment")

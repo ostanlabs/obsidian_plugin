@@ -1,10 +1,8 @@
 export interface CanvasItemFromTemplateSettings {
 	notesBaseFolder: string;
-	taskTemplatePath: string;
 	accomplishmentTemplatePath: string;
 	templateFolder: string; // Folder to scan for additional templates
 	useTemplateFolder: boolean; // Enable template folder scanning
-	idPrefixTask: string;
 	idPrefixAccomplishment: string;
 	idZeroPadLength: number;
 	effortOptions: string[];
@@ -13,9 +11,9 @@ export interface CanvasItemFromTemplateSettings {
 	defaultCollapsed: boolean;
 	showIdInCanvas: boolean;
 	expandedFields: string[];
-	shapeTask: string;
 	shapeAccomplishment: string;
 	effortColorMap: Record<string, string>;
+	inProgressColor: string; // Color to use when inProgress is true
 	// Notion
 	notionEnabled: boolean;
 	notionIntegrationToken: string;
@@ -28,11 +26,9 @@ export interface CanvasItemFromTemplateSettings {
 
 export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
 	notesBaseFolder: "Projects",
-	taskTemplatePath: "Templates/canvas-task-template.md",
 	accomplishmentTemplatePath: "Templates/canvas-accomplishment-template.md",
 	templateFolder: "Templates",
 	useTemplateFolder: false,
-	idPrefixTask: "T",
 	idPrefixAccomplishment: "A",
 	idZeroPadLength: 3,
 	effortOptions: ["Business", "Infra", "Engineering", "Research"],
@@ -41,16 +37,14 @@ export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
 	defaultCollapsed: false,
 	showIdInCanvas: true,
 	expandedFields: ["effort", "status", "priority"],
-	shapeTask: "task",
 	shapeAccomplishment: "accomplishment",
 	effortColorMap: {
 		Business: "6",
 		Infra: "4",
 		Engineering: "3",
 		Research: "2",
-		Design: "1",
-		Marketing: "5",
 	},
+	inProgressColor: "1", // Red
 	notionEnabled: false,
 	notionIntegrationToken: "",
 	notionParentPageId: "",
@@ -60,7 +54,7 @@ export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
 	syncOnDemandOnly: false,
 };
 
-export type ItemType = "task" | "accomplishment";
+export type ItemType = "accomplishment";
 // v2.1 spec-aligned status/priority while staying backward compatible with Notion mapping
 export type ItemStatus = "Not Started" | "In Progress" | "Completed" | "Blocked";
 export type ItemPriority = "Low" | "Medium" | "High" | "Critical";
@@ -72,6 +66,7 @@ export interface ItemFrontmatter {
 	id: string;
 	status: ItemStatus;
 	priority: ItemPriority;
+	inProgress?: boolean; // When true, node border is red
 	created_by_plugin?: boolean;
 	created: string;
 	updated: string;
