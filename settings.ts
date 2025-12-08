@@ -191,6 +191,98 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				});
 			});
 
+		// Canvas Display Section
+		containerEl.createEl("h2", { text: "Canvas Display" });
+
+		new Setting(containerEl)
+			.setName("Default collapsed")
+			.setDesc("New cards start collapsed (alias/title only)")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.defaultCollapsed)
+					.onChange(async (value) => {
+						this.plugin.settings.defaultCollapsed = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Show ID on cards")
+			.setDesc("Include the item ID in card display")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.showIdInCanvas)
+					.onChange(async (value) => {
+						this.plugin.settings.showIdInCanvas = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Fields to show when expanded")
+			.setDesc("Comma or newline separated list (e.g., effort,status,priority)")
+			.addTextArea((text) => {
+				text.inputEl.rows = 3;
+				text.inputEl.cols = 30;
+				text.setValue(this.plugin.settings.expandedFields.join(", ")).onChange(async (value) => {
+					this.plugin.settings.expandedFields = value
+						.split(/[\n,]/)
+						.map((s) => s.trim())
+						.filter((s) => s.length > 0);
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("Shape labels")
+			.setDesc("Shape name to write into canvas metadata")
+			.addText((text) =>
+				text
+					.setPlaceholder("task")
+					.setValue(this.plugin.settings.shapeTask)
+					.onChange(async (value) => {
+						this.plugin.settings.shapeTask = value || "task";
+						await this.plugin.saveSettings();
+					})
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("accomplishment")
+					.setValue(this.plugin.settings.shapeAccomplishment)
+					.onChange(async (value) => {
+						this.plugin.settings.shapeAccomplishment = value || "accomplishment";
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Effort color map")
+			.setDesc("One mapping per line: Effort:ColorId (Obsidian color index or hex)")
+			.addTextArea((text) => {
+				text.inputEl.rows = 6;
+				text.inputEl.cols = 30;
+				text.setValue(
+					Object.entries(this.plugin.settings.effortColorMap)
+						.map(([effort, color]) => `${effort}:${color}`)
+						.join("\n")
+				).onChange(async (value) => {
+					const map: Record<string, string> = {};
+					value
+						.split("\n")
+						.map((line) => line.trim())
+						.filter((line) => line.length > 0)
+						.forEach((line) => {
+							const [key, val] = line.split(/[:=]/);
+							if (key && val) {
+								map[key.trim()] = val.trim();
+							}
+						});
+					// Only update if we parsed something, otherwise keep existing mapping
+					this.plugin.settings.effortColorMap = Object.keys(map).length > 0 ? map : this.plugin.settings.effortColorMap;
+					await this.plugin.saveSettings();
+				});
+			});
+
 		// Notion Integration Section
 		containerEl.createEl("h2", { text: "Notion Integration" });
 

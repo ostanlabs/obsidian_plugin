@@ -9,8 +9,9 @@ type: task
 title: Test Task
 effort: Engineering
 id: T001
-status: todo
-priority: medium
+status: Not Started
+priority: Medium
+created_by_plugin: true
 created: 2025-01-01T00:00:00.000Z
 updated: 2025-01-01T00:00:00.000Z
 canvas_source: test.canvas
@@ -48,18 +49,18 @@ type: task
 			const content = `---
 type: task
 title: Old Title
-status: todo
+status: Not Started
 ---
 
 # Content`;
 
 			const result = updateFrontmatter(content, {
 				title: "New Title",
-				status: "done",
+				status: "Completed",
 			});
 
 			expect(result).toContain("title: New Title");
-			expect(result).toContain("status: done");
+			expect(result).toContain("status: Completed");
 			expect(result).toContain("type: task");
 		});
 
@@ -85,12 +86,13 @@ Some text`;
 				title: "Test Task",
 				effort: "Engineering",
 				id: "T001",
-				status: "todo",
-				priority: "medium",
+				status: "Not Started",
+				priority: "Medium",
 				created: "2025-01-01T00:00:00.000Z",
 				updated: "2025-01-01T00:00:00.000Z",
 				canvas_source: "test.canvas",
 				vault_path: "test.md",
+				created_by_plugin: true,
 			};
 
 			const result = serializeFrontmatter(frontmatter);
@@ -108,12 +110,13 @@ Some text`;
 				effort: "Engineering",
 				id: "T001",
 				parent: "A001",
-				status: "todo",
-				priority: "medium",
+				status: "Not Started",
+				priority: "Medium",
 				created: "2025-01-01T00:00:00.000Z",
 				updated: "2025-01-01T00:00:00.000Z",
 				canvas_source: "test.canvas",
 				vault_path: "test.md",
+				created_by_plugin: true,
 			};
 
 			const result = serializeFrontmatter(frontmatter);

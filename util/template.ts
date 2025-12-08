@@ -19,6 +19,19 @@ export function replacePlaceholders(
 	result = result.replace(/\{\{priority\}\}/g, frontmatter.priority);
 	result = result.replace(/\{\{created\}\}/g, frontmatter.created);
 	result = result.replace(/\{\{updated\}\}/g, frontmatter.updated);
+	result = result.replace(/\{\{created_by_plugin\}\}/g, String(frontmatter.created_by_plugin ?? true));
+	result = result.replace(
+		/\{\{collapsed_height\}\}/g,
+		frontmatter.collapsed_height !== undefined ? String(frontmatter.collapsed_height) : ""
+	);
+	result = result.replace(
+		/\{\{expanded_height\}\}/g,
+		frontmatter.expanded_height !== undefined ? String(frontmatter.expanded_height) : ""
+	);
+	result = result.replace(
+		/\{\{expanded_width\}\}/g,
+		frontmatter.expanded_width !== undefined ? String(frontmatter.expanded_width) : ""
+	);
 	result = result.replace(/\{\{canvas_source\}\}/g, frontmatter.canvas_source);
 	result = result.replace(/\{\{vault_path\}\}/g, frontmatter.vault_path);
 	result = result.replace(/\{\{notion_page_id\}\}/g, frontmatter.notion_page_id || "");
@@ -32,11 +45,15 @@ export function replacePlaceholders(
 export const DEFAULT_TASK_TEMPLATE = `---
 type: {{type}}
 title: {{title}}
-effort: {{effort}}
 id: {{id}}
+effort: {{effort}}
+status: Not Started
+priority: Medium
 parent: {{parent}}
-status: todo
-priority: medium
+created_by_plugin: true
+collapsed_height: {{collapsed_height}}
+expanded_height: {{expanded_height}}
+expanded_width: {{expanded_width}}
 created: {{created}}
 updated: {{updated}}
 canvas_source: {{canvas_source}}
@@ -66,10 +83,15 @@ Describe what needs to be achieved.
 export const DEFAULT_ACCOMPLISHMENT_TEMPLATE = `---
 type: {{type}}
 title: {{title}}
-effort: {{effort}}
 id: {{id}}
-status: todo
-priority: high
+effort: {{effort}}
+status: Not Started
+priority: High
+parent: {{parent}}
+created_by_plugin: true
+collapsed_height: {{collapsed_height}}
+expanded_height: {{expanded_height}}
+expanded_width: {{expanded_width}}
 created: {{created}}
 updated: {{updated}}
 canvas_source: {{canvas_source}}

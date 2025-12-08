@@ -137,7 +137,7 @@ export function createWithFrontmatter(body: string, frontmatter: Partial<ItemFro
 	const frontmatterLines: string[] = ["---"];
 	
 	// Define required fields that should always be written (even if empty)
-	const alwaysInclude = ['parent', 'notion_page_id'];
+	const alwaysInclude = ['parent', 'notion_page_id', 'created_by_plugin'];
 	
 	for (const [key, value] of Object.entries(frontmatter)) {
 		// Always include certain fields, even if undefined/null/empty
@@ -172,8 +172,8 @@ export function serializeFrontmatter(frontmatter: ItemFrontmatter): string {
 
 	lines.push(`type: ${frontmatter.type}`);
 	lines.push(`title: ${frontmatter.title}`);
-	lines.push(`effort: ${frontmatter.effort}`);
 	lines.push(`id: ${frontmatter.id}`);
+	lines.push(`effort: ${frontmatter.effort}`);
 
 	if (frontmatter.parent) {
 		lines.push(`parent: ${frontmatter.parent}`);
@@ -181,6 +181,7 @@ export function serializeFrontmatter(frontmatter: ItemFrontmatter): string {
 
 	lines.push(`status: ${frontmatter.status}`);
 	lines.push(`priority: ${frontmatter.priority}`);
+	lines.push(`created_by_plugin: ${frontmatter.created_by_plugin ?? true}`);
 	lines.push(`created: ${frontmatter.created}`);
 	lines.push(`updated: ${frontmatter.updated}`);
 	lines.push(`canvas_source: ${frontmatter.canvas_source}`);

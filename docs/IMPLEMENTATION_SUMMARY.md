@@ -116,3 +116,15 @@
 **Status**: ✅ All features implemented, tested (compilation), and deployed  
 **Version**: 1.0  
 **Date**: December 6, 2025
+
+---
+
+## Alignment: Creation vs Conversion (Structured Notes)
+- Both flows now follow the conversion defaults:
+  - Start collapsed by default.
+  - Apply the same size defaults: `collapsed_height: 100`, `expanded_height: 220`, `expanded_width: 400` (overridable per note via frontmatter).
+- Creation now stores expanded size before applying the collapsed height (mirroring conversion).
+- Menu state/controls reflect the same collapsed state policy.
+- Differences kept:
+  - Conversion updates the existing node in place (preserves edges); creation adds a new node at canvas center.
+  - Conversion still performs a close/reopen to refresh type; creation uses direct add when possible.

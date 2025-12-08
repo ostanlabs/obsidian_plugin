@@ -259,12 +259,12 @@ export class NotionClient {
 			},
 			Status: {
 				select: {
-					name: frontmatter.status,
+					name: this.mapStatus(frontmatter.status),
 				},
 			},
 			Priority: {
 				select: {
-					name: frontmatter.priority,
+					name: this.mapPriority(frontmatter.priority),
 				},
 			},
 			"Canvas Source": {
@@ -305,6 +305,56 @@ export class NotionClient {
 		}
 
 		return properties;
+	}
+
+	private mapStatus(status: string): string {
+		const map: Record<string, string> = {
+			"Not Started": "todo",
+			"In Progress": "in_progress",
+			"Completed": "done",
+			"Blocked": "blocked",
+		};
+
+		if (!status) return "todo";
+		if (map[status]) return map[status];
+
+		const lowerMap: Record<string, string> = {
+			todo: "todo",
+			"in_progress": "in_progress",
+			"in progress": "in_progress",
+			done: "done",
+			completed: "done",
+			blocked: "blocked",
+		};
+
+		const lower = status.toLowerCase();
+		if (lowerMap[lower]) return lowerMap[lower];
+
+		return "todo";
+	}
+
+	private mapPriority(priority: string): string {
+		const map: Record<string, string> = {
+			Low: "low",
+			Medium: "medium",
+			High: "high",
+			Critical: "critical",
+		};
+
+		if (!priority) return "medium";
+		if (map[priority]) return map[priority];
+
+		const lowerMap: Record<string, string> = {
+			low: "low",
+			medium: "medium",
+			high: "high",
+			critical: "critical",
+		};
+
+		const lower = priority.toLowerCase();
+		if (lowerMap[lower]) return lowerMap[lower];
+
+		return "medium";
 	}
 
 	/**

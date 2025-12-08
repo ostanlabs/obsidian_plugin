@@ -22,12 +22,13 @@ Priority: {{priority}}
 				title: "Test Task",
 				effort: "Engineering",
 				id: "T001",
-				status: "todo",
-				priority: "medium",
+				status: "Not Started",
+				priority: "Medium",
 				created: "2025-01-01T00:00:00.000Z",
 				updated: "2025-01-01T00:00:00.000Z",
 				canvas_source: "test.canvas",
 				vault_path: "test.md",
+				created_by_plugin: true,
 			};
 
 			const result = replacePlaceholders(template, frontmatter);
@@ -37,8 +38,8 @@ Priority: {{priority}}
 			expect(result).toContain("id: T001");
 			expect(result).toContain("# Test Task");
 			expect(result).toContain("Effort: Engineering");
-			expect(result).toContain("Status: todo");
-			expect(result).toContain("Priority: medium");
+			expect(result).toContain("Status: Not Started");
+			expect(result).toContain("Priority: Medium");
 		});
 
 		it("should handle missing optional fields", () => {
@@ -49,12 +50,13 @@ Priority: {{priority}}
 				title: "Test",
 				effort: "Engineering",
 				id: "T001",
-				status: "todo",
-				priority: "medium",
+				status: "Not Started",
+				priority: "Medium",
 				created: "2025-01-01T00:00:00.000Z",
 				updated: "2025-01-01T00:00:00.000Z",
 				canvas_source: "test.canvas",
 				vault_path: "test.md",
+				created_by_plugin: true,
 			};
 
 			const result = replacePlaceholders(template, frontmatter);
@@ -70,12 +72,13 @@ Priority: {{priority}}
 				effort: "Engineering",
 				id: "T001",
 				parent: "A001",
-				status: "todo",
-				priority: "medium",
+				status: "Not Started",
+				priority: "Medium",
 				created: "2025-01-01T00:00:00.000Z",
 				updated: "2025-01-01T00:00:00.000Z",
 				canvas_source: "test.canvas",
 				vault_path: "test.md",
+				created_by_plugin: true,
 			};
 
 			const result = replacePlaceholders(template, frontmatter);

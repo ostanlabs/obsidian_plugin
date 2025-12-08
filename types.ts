@@ -10,6 +10,12 @@ export interface CanvasItemFromTemplateSettings {
 	effortOptions: string[];
 	defaultEffort: string;
 	inferBaseFolderFromCanvas: boolean;
+	defaultCollapsed: boolean;
+	showIdInCanvas: boolean;
+	expandedFields: string[];
+	shapeTask: string;
+	shapeAccomplishment: string;
+	effortColorMap: Record<string, string>;
 	// Notion
 	notionEnabled: boolean;
 	notionIntegrationToken: string;
@@ -32,6 +38,19 @@ export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
 	effortOptions: ["Business", "Infra", "Engineering", "Research"],
 	defaultEffort: "Engineering",
 	inferBaseFolderFromCanvas: true,
+	defaultCollapsed: false,
+	showIdInCanvas: true,
+	expandedFields: ["effort", "status", "priority"],
+	shapeTask: "task",
+	shapeAccomplishment: "accomplishment",
+	effortColorMap: {
+		Business: "6",
+		Infra: "4",
+		Engineering: "3",
+		Research: "2",
+		Design: "1",
+		Marketing: "5",
+	},
 	notionEnabled: false,
 	notionIntegrationToken: "",
 	notionParentPageId: "",
@@ -42,8 +61,9 @@ export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
 };
 
 export type ItemType = "task" | "accomplishment";
-export type ItemStatus = "todo" | "in_progress" | "done" | "blocked";
-export type ItemPriority = "low" | "medium" | "high" | "critical";
+// v2.1 spec-aligned status/priority while staying backward compatible with Notion mapping
+export type ItemStatus = "Not Started" | "In Progress" | "Completed" | "Blocked";
+export type ItemPriority = "Low" | "Medium" | "High" | "Critical";
 
 export interface ItemFrontmatter {
 	type: ItemType;
@@ -53,10 +73,15 @@ export interface ItemFrontmatter {
 	parent?: string;
 	status: ItemStatus;
 	priority: ItemPriority;
+	created_by_plugin?: boolean;
 	created: string;
 	updated: string;
 	canvas_source: string;
 	vault_path: string;
 	notion_page_id?: string;
+	// Optional per-note display sizing
+	collapsed_height?: number;
+	expanded_height?: number;
+	expanded_width?: number;
 }
 
