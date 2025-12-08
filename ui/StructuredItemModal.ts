@@ -20,7 +20,6 @@ export interface StructuredItemResult {
 	title?: string; // Only set if showTitleInput is true
 	alias?: string;
 	collapsed?: boolean; // Only set if showCollapsedToggle is true
-	parent?: string;
 	templatePath?: string; // Only set if showTemplateSelector is true
 }
 
@@ -49,7 +48,6 @@ export class StructuredItemModal extends Modal {
 			title: options.showTitleInput ? titleValue : undefined,
 			alias: titleValue,
 			collapsed: options.showCollapsedToggle ? settings.defaultCollapsed : undefined,
-			parent: undefined,
 		};
 	}
 
@@ -171,16 +169,6 @@ export class StructuredItemModal extends Modal {
 						});
 				});
 		}
-
-		// Parent input (optional)
-		new Setting(contentEl)
-			.setName("Parent (optional)")
-			.setDesc("Enter the parent ID or epic (e.g., A001, EPIC-001)")
-			.addText((text) => {
-				text.setPlaceholder("A001").onChange((value) => {
-					this.result.parent = value || undefined;
-				});
-			});
 
 		// Collapse toggle (conditional)
 		if (this.options.showCollapsedToggle) {

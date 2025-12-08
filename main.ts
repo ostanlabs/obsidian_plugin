@@ -15,7 +15,6 @@ import { NotionClient } from "./notion/notionClient";
 interface ConvertNoteResult {
 	type: ItemType;
 	effort: string;
-	parent: string;
 	alias?: string;
 }
 
@@ -25,7 +24,6 @@ interface ItemCreationResult {
 	title: string;
 	alias?: string;
 	collapsed?: boolean;
-	parent?: string;
 	templatePath?: string;
 }
 
@@ -54,7 +52,7 @@ import {
 	CanvasNode,
 	generateNodeId,
 } from "./util/canvas";
-import { toSnakeCase, generateUniqueFilename, isPluginCreatedNote } from "./util/fileNaming";
+import { generateUniqueFilename, isPluginCreatedNote } from "./util/fileNaming";
 
 const COLLAPSED_HEIGHT_DEFAULT = 100;
 const EXPANDED_HEIGHT_DEFAULT = 220;
@@ -289,7 +287,6 @@ private registerCommands(): void {
 			title: itemData.title,
 			effort: itemData.effort,
 			id,
-			parent: itemData.parent,
 			status: this.normalizeStatus("Not Started"),
 			priority: this.normalizePriority(itemData.type === "accomplishment" ? "High" : "Medium"),
 			created_by_plugin: true,
@@ -419,7 +416,7 @@ private registerCommands(): void {
 	private async determineNotePath(
 		canvasFile: TFile,
 		title: string,
-		id: string
+		_id: string // ID is no longer used in filename
 	): Promise<string> {
 		let baseFolder: string;
 
@@ -430,16 +427,14 @@ private registerCommands(): void {
 			baseFolder = this.settings.notesBaseFolder;
 		}
 
-		// Sanitize title for filename
-		const sanitizedTitle = title.replace(/[\\/:*?"<>|]/g, "-");
-		const filename = `${id}-${sanitizedTitle}.md`;
-
 		// Ensure folder exists
 		if (baseFolder) {
 			await this.ensureFolderExists(baseFolder);
 		}
 
-		return normalizePath(baseFolder ? `${baseFolder}/${filename}` : filename);
+		// Use title as filename, preserving whitespaces
+		// generateUniqueFilename will add -index suffix if file already exists
+		return await generateUniqueFilename(this.app, baseFolder, title, "md");
 	}
 
 	/**
@@ -803,7 +798,6 @@ private registerCommands(): void {
 							title: result.title || "New Item",
 							alias: result.alias,
 							collapsed: result.collapsed,
-							parent: result.parent,
 							templatePath: result.templatePath,
 						};
 						await this.createItemAndAddToCanvas(canvasFile, itemResult, null);
@@ -844,7 +838,6 @@ private registerCommands(): void {
 						title: result.title || "New Task",
 						alias: result.alias,
 						collapsed: result.collapsed,
-						parent: result.parent,
 						templatePath: result.templatePath,
 					};
 					await this.createItemAndAddToCanvas(canvasFile, itemResult, null);
@@ -882,7 +875,6 @@ private registerCommands(): void {
 							title: result.title || "New Accomplishment",
 							alias: result.alias,
 							collapsed: result.collapsed,
-							parent: result.parent,
 							templatePath: result.templatePath,
 						};
 						await this.createItemAndAddToCanvas(canvasFile, itemResult, null);
@@ -1887,7 +1879,6 @@ private registerCommands(): void {
 				const convertResult: ConvertNoteResult = {
 					type: result.type,
 					effort: result.effort,
-					parent: result.parent || "",
 					alias: result.alias,
 				};
 				await this.performNoteConversion(file, convertResult, frontmatter, body);
@@ -1924,7 +1915,6 @@ private registerCommands(): void {
 				title: file.basename,
 				effort: result.effort,
 				id,
-				parent: result.parent,
 				status: this.normalizeStatus(existingFrontmatter.status),
 				priority: this.normalizePriority(
 					existingFrontmatter.priority || (result.type === "accomplishment" ? "High" : "Medium")
@@ -2044,7 +2034,6 @@ private registerCommands(): void {
 				const convertResult: ConvertNoteResult = {
 					type: result.type,
 					effort: result.effort,
-					parent: result.parent || "",
 					alias: result.alias,
 				};
 				await this.performCanvasNodeConversion(node, canvasFile, convertResult, nodeText);
@@ -2098,12 +2087,12 @@ private registerCommands(): void {
 			} else {
 				// Generate new path (conversion flow)
 				id = await generateId(this.app, this.settings, result.type);
-				const snakeCaseTitle = toSnakeCase(title);
 				const baseFolder = canvasFile.parent?.path || this.settings.notesBaseFolder;
+				// Use title as filename, preserving whitespaces
 				notePath = await generateUniqueFilename(
 					this.app,
 					baseFolder,
-					`${id}_${snakeCaseTitle}`,
+					title,
 					"md"
 				);
 				console.log('[Canvas Plugin] Generated new note path:', notePath);
@@ -2119,7 +2108,6 @@ private registerCommands(): void {
 					title: title,
 					effort: result.effort,
 					id,
-					parent: result.parent || undefined,
 					status: this.normalizeStatus("Not Started"),
 					priority: this.normalizePriority(result.type === "accomplishment" ? "High" : "Medium"),
 					created_by_plugin: true,

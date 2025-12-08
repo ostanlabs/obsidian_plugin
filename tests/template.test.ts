@@ -43,7 +43,7 @@ Priority: {{priority}}
 		});
 
 		it("should handle missing optional fields", () => {
-			const template = `Parent: {{parent}}`;
+			const template = `Notion ID: {{notion_page_id}}`;
 
 			const frontmatter: ItemFrontmatter = {
 				type: "task",
@@ -60,29 +60,7 @@ Priority: {{priority}}
 			};
 
 			const result = replacePlaceholders(template, frontmatter);
-			expect(result).toBe("Parent: ");
-		});
-
-		it("should handle parent field", () => {
-			const template = `Parent: {{parent}}`;
-
-			const frontmatter: ItemFrontmatter = {
-				type: "task",
-				title: "Test",
-				effort: "Engineering",
-				id: "T001",
-				parent: "A001",
-				status: "Not Started",
-				priority: "Medium",
-				created: "2025-01-01T00:00:00.000Z",
-				updated: "2025-01-01T00:00:00.000Z",
-				canvas_source: "test.canvas",
-				vault_path: "test.md",
-				created_by_plugin: true,
-			};
-
-			const result = replacePlaceholders(template, frontmatter);
-			expect(result).toBe("Parent: A001");
+			expect(result).toBe("Notion ID: ");
 		});
 	});
 });

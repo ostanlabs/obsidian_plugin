@@ -102,26 +102,6 @@ Some text`;
 			expect(result).toContain("title: Test Task");
 			expect(result).toContain("id: T001");
 		});
-
-		it("should handle optional parent field", () => {
-			const frontmatter: ItemFrontmatter = {
-				type: "task",
-				title: "Test",
-				effort: "Engineering",
-				id: "T001",
-				parent: "A001",
-				status: "Not Started",
-				priority: "Medium",
-				created: "2025-01-01T00:00:00.000Z",
-				updated: "2025-01-01T00:00:00.000Z",
-				canvas_source: "test.canvas",
-				vault_path: "test.md",
-				created_by_plugin: true,
-			};
-
-			const result = serializeFrontmatter(frontmatter);
-			expect(result).toContain("parent: A001");
-		});
 	});
 });
 

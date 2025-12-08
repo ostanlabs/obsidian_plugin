@@ -70,7 +70,6 @@ export interface ItemFrontmatter {
 	title: string;
 	effort: string;
 	id: string;
-	parent?: string;
 	status: ItemStatus;
 	priority: ItemPriority;
 	created_by_plugin?: boolean;

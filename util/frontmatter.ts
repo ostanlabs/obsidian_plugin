@@ -175,10 +175,6 @@ export function serializeFrontmatter(frontmatter: ItemFrontmatter): string {
 	lines.push(`id: ${frontmatter.id}`);
 	lines.push(`effort: ${frontmatter.effort}`);
 
-	if (frontmatter.parent) {
-		lines.push(`parent: ${frontmatter.parent}`);
-	}
-
 	lines.push(`status: ${frontmatter.status}`);
 	lines.push(`priority: ${frontmatter.priority}`);
 	lines.push(`created_by_plugin: ${frontmatter.created_by_plugin ?? true}`);

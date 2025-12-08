@@ -14,7 +14,6 @@ export function replacePlaceholders(
 	result = result.replace(/\{\{type\}\}/g, frontmatter.type);
 	result = result.replace(/\{\{effort\}\}/g, frontmatter.effort);
 	result = result.replace(/\{\{id\}\}/g, frontmatter.id);
-	result = result.replace(/\{\{parent\}\}/g, frontmatter.parent || "");
 	result = result.replace(/\{\{status\}\}/g, frontmatter.status);
 	result = result.replace(/\{\{priority\}\}/g, frontmatter.priority);
 	result = result.replace(/\{\{created\}\}/g, frontmatter.created);

@@ -292,18 +292,6 @@ export class NotionClient {
 			},
 		};
 
-		if (frontmatter.parent) {
-			properties.Parent = {
-				rich_text: [
-					{
-						text: {
-							content: frontmatter.parent,
-						},
-					},
-				],
-			};
-		}
-
 		return properties;
 	}
 
