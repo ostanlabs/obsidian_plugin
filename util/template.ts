@@ -22,18 +22,6 @@ export function replacePlaceholders(
 	result = result.replace(/\{\{created\}\}/g, frontmatter.created);
 	result = result.replace(/\{\{updated\}\}/g, frontmatter.updated);
 	result = result.replace(/\{\{created_by_plugin\}\}/g, String(frontmatter.created_by_plugin ?? true));
-	result = result.replace(
-		/\{\{collapsed_height\}\}/g,
-		frontmatter.collapsed_height !== undefined ? String(frontmatter.collapsed_height) : ""
-	);
-	result = result.replace(
-		/\{\{expanded_height\}\}/g,
-		frontmatter.expanded_height !== undefined ? String(frontmatter.expanded_height) : ""
-	);
-	result = result.replace(
-		/\{\{expanded_width\}\}/g,
-		frontmatter.expanded_width !== undefined ? String(frontmatter.expanded_width) : ""
-	);
 	result = result.replace(/\{\{canvas_source\}\}/g, frontmatter.canvas_source);
 	result = result.replace(/\{\{vault_path\}\}/g, frontmatter.vault_path);
 	result = result.replace(/\{\{notion_page_id\}\}/g, frontmatter.notion_page_id || "");
@@ -55,9 +43,6 @@ inProgress: false
 time_estimate: 0
 depends_on: []
 created_by_plugin: true
-collapsed_height: {{collapsed_height}}
-expanded_height: {{expanded_height}}
-expanded_width: {{expanded_width}}
 created: {{created}}
 updated: {{updated}}
 canvas_source: {{canvas_source}}
