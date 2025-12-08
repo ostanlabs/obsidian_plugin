@@ -70,14 +70,6 @@ export class StructuredItemModal extends Modal {
 			await this.loadTemplates();
 		}
 
-		// Type is always "accomplishment" now - show as read-only
-		new Setting(contentEl)
-			.setName("Type")
-			.setDesc("Item type")
-			.addText((text) => {
-				text.setValue("Accomplishment").setDisabled(true);
-			});
-
 		// Template selector (if enabled and templates are available)
 		if (this.options.showTemplateSelector && this.settings.useTemplateFolder && this.availableTemplates.length > 0) {
 			new Setting(contentEl)
