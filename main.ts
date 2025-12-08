@@ -569,7 +569,7 @@ private registerCommands(): void {
 	}
 
 	/**
-	 * Sync all notes in the current canvas to Notion
+	 * Sync all notes in the current canvas to Notion (two-pass: pages then dependencies)
 	 */
 	private async syncAllCanvasNotesToNotion(): Promise<void> {
 		if (!this.notionClient || !this.settings.notionEnabled) {
@@ -609,8 +609,13 @@ private registerCommands(): void {
 			let skippedCount = 0;
 			let errorCount = 0;
 
-			new Notice(`Syncing ${fileNodes.length} notes to Notion...`);
+			// Maps for dependency sync
+			const nodeIdToAccomplishmentId: Map<string, string> = new Map();
+			const accomplishmentIdToNotionPageId: Map<string, string> = new Map();
 
+			new Notice(`Pass 1: Syncing ${fileNodes.length} notes to Notion...`);
+
+			// PASS 1: Sync all pages and build mappings
 			for (const node of fileNodes) {
 				const file = this.app.vault.getAbstractFileByPath(node.file!);
 				if (!(file instanceof TFile)) {
@@ -628,8 +633,18 @@ private registerCommands(): void {
 						continue;
 					}
 
+					// Build node ID -> accomplishment ID mapping
+					if (frontmatter.id) {
+						nodeIdToAccomplishmentId.set(node.id, frontmatter.id);
+					}
+
 					// Sync the file
 					const pageId = await this.notionClient.syncNote(frontmatter);
+
+					// Build accomplishment ID -> Notion page ID mapping
+					if (frontmatter.id) {
+						accomplishmentIdToNotionPageId.set(frontmatter.id, pageId);
+					}
 
 					// Update note with page ID if it was created
 					if (!frontmatter.notion_page_id) {
@@ -643,9 +658,57 @@ private registerCommands(): void {
 				}
 			}
 
-			const message = `Sync complete: ${syncedCount} synced, ${skippedCount} skipped, ${errorCount} errors`;
+			// PASS 2: Sync dependencies from canvas edges
+			let dependencySyncCount = 0;
+			let dependencyErrorCount = 0;
+
+			if (canvasData.edges && canvasData.edges.length > 0) {
+				new Notice(`Pass 2: Syncing ${canvasData.edges.length} dependencies...`);
+
+				// Group edges by target node (toNode depends on fromNode)
+				const dependenciesByTarget: Map<string, string[]> = new Map();
+
+				for (const edge of canvasData.edges) {
+					// In canvas, edge goes from dependency to dependent
+					// So toNode depends on fromNode
+					const targetNodeId = edge.toNode;
+					const dependencyNodeId = edge.fromNode;
+
+					const targetAccomplishmentId = nodeIdToAccomplishmentId.get(targetNodeId);
+					const dependencyAccomplishmentId = nodeIdToAccomplishmentId.get(dependencyNodeId);
+
+					if (targetAccomplishmentId && dependencyAccomplishmentId) {
+						const deps = dependenciesByTarget.get(targetAccomplishmentId) || [];
+						deps.push(dependencyAccomplishmentId);
+						dependenciesByTarget.set(targetAccomplishmentId, deps);
+					}
+				}
+
+				// Update dependencies for each target
+				for (const [targetAccomplishmentId, dependencyAccomplishmentIds] of dependenciesByTarget) {
+					const targetPageId = accomplishmentIdToNotionPageId.get(targetAccomplishmentId);
+					if (!targetPageId) continue;
+
+					// Convert accomplishment IDs to Notion page IDs
+					const dependencyPageIds = dependencyAccomplishmentIds
+						.map(id => accomplishmentIdToNotionPageId.get(id))
+						.filter((id): id is string => id !== undefined);
+
+					if (dependencyPageIds.length > 0) {
+						try {
+							await this.notionClient.updateDependencies(targetPageId, dependencyPageIds);
+							dependencySyncCount++;
+						} catch (error) {
+							await this.logger?.error("Failed to sync dependencies", { targetAccomplishmentId, error });
+							dependencyErrorCount++;
+						}
+					}
+				}
+			}
+
+			const message = `Sync complete: ${syncedCount} pages synced, ${skippedCount} skipped, ${errorCount} errors. Dependencies: ${dependencySyncCount} synced, ${dependencyErrorCount} errors`;
 			new Notice(message);
-			await this.logger?.info("Batch sync complete", { syncedCount, skippedCount, errorCount });
+			await this.logger?.info("Batch sync complete", { syncedCount, skippedCount, errorCount, dependencySyncCount, dependencyErrorCount });
 		} catch (error) {
 			await this.logger?.error("Failed to sync canvas notes to Notion", error);
 			new Notice("Failed to sync canvas notes: " + (error as Error).message);
