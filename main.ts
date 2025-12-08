@@ -68,6 +68,8 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	private mdSyncDebounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 	// Cache file path -> accomplishment ID for deletion sync
 	private fileAccomplishmentIdCache: Map<string, string> = new Map();
+	// Bi-directional sync polling interval
+	private notionSyncIntervalId: ReturnType<typeof setInterval> | null = null;
 
 	private getCanvasNodeFromEventTarget(target: EventTarget | null): any {
 		if (!(target instanceof HTMLElement)) return null;
@@ -195,12 +197,16 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 			console.log('[Canvas Plugin] Layout ready, initializing caches...');
 			await this.initializeCanvasNodeCache();
 			await this.initializeFileAccomplishmentIdCache();
+			// Start bi-directional sync polling if enabled
+			this.startNotionSyncPolling();
 		});
 
 		await this.logger.info("Plugin initialization complete");
 	}
 
 	onunload() {
+		// Stop bi-directional sync polling
+		this.stopNotionSyncPolling();
 		this.logger?.info("Plugin unloaded");
 	}
 
@@ -214,6 +220,8 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 		if (this.notionClient) {
 			this.notionClient.updateSettings(this.settings);
 		}
+		// Restart polling with new interval if settings changed
+		this.restartNotionSyncPolling();
 	}
 
 /**
@@ -2393,6 +2401,265 @@ private registerCommands(): void {
 			console.error('[Canvas Plugin] Failed to check and delete plugin file:', error);
 			await this.logger?.error("Failed to check and delete plugin file", error);
 		}
+	}
+
+	/**
+	 * Start bi-directional sync polling
+	 */
+	private startNotionSyncPolling(): void {
+		if (!this.settings.notionEnabled || this.settings.syncOnDemandOnly) {
+			return;
+		}
+
+		const intervalMs = this.settings.notionSyncIntervalMinutes * 60 * 1000;
+		console.log('[Canvas Plugin] Starting Notion sync polling every', this.settings.notionSyncIntervalMinutes, 'minutes');
+
+		this.notionSyncIntervalId = setInterval(async () => {
+			await this.pollNotionForChanges();
+		}, intervalMs);
+	}
+
+	/**
+	 * Stop bi-directional sync polling
+	 */
+	private stopNotionSyncPolling(): void {
+		if (this.notionSyncIntervalId) {
+			clearInterval(this.notionSyncIntervalId);
+			this.notionSyncIntervalId = null;
+			console.log('[Canvas Plugin] Stopped Notion sync polling');
+		}
+	}
+
+	/**
+	 * Restart bi-directional sync polling (after settings change)
+	 */
+	private restartNotionSyncPolling(): void {
+		this.stopNotionSyncPolling();
+		this.startNotionSyncPolling();
+	}
+
+	/**
+	 * Poll Notion for changes and update local files
+	 */
+	private async pollNotionForChanges(): Promise<void> {
+		if (!this.notionClient || !this.settings.notionEnabled) {
+			return;
+		}
+
+		if (!this.notionClient.isDatabaseInitialized()) {
+			return;
+		}
+
+		try {
+			console.log('[Canvas Plugin] Polling Notion for changes...');
+			const pages = await this.notionClient.queryAllPages();
+
+			let updatedCount = 0;
+
+			for (const page of pages) {
+				try {
+					// Get accomplishment ID from page
+					const idProperty = page.properties?.ID;
+					const accomplishmentId = idProperty?.rich_text?.[0]?.plain_text;
+					if (!accomplishmentId) continue;
+
+					// Find local file by accomplishment ID
+					const localFilePath = this.findFileByAccomplishmentId(accomplishmentId);
+					if (!localFilePath) continue;
+
+					const localFile = this.app.vault.getAbstractFileByPath(localFilePath);
+					if (!(localFile instanceof TFile)) continue;
+
+					// Compare timestamps
+					const notionUpdated = new Date(page.last_edited_time).getTime();
+					const content = await this.app.vault.read(localFile);
+					const frontmatter = parseFrontmatter(content);
+					if (!frontmatter) continue;
+
+					const localUpdated = new Date(frontmatter.updated).getTime();
+
+					// If Notion is newer, update local file
+					if (notionUpdated > localUpdated + 1000) { // 1 second buffer
+						console.log('[Canvas Plugin] Notion page is newer, updating local file:', localFilePath);
+						await this.updateLocalFileFromNotion(localFile, page);
+						updatedCount++;
+					}
+				} catch (error) {
+					console.error('[Canvas Plugin] Error processing page:', error);
+				}
+			}
+
+			if (updatedCount > 0) {
+				console.log('[Canvas Plugin] Updated', updatedCount, 'local files from Notion');
+			} else {
+				console.log('[Canvas Plugin] No changes from Notion');
+			}
+		} catch (error) {
+			console.error('[Canvas Plugin] Failed to poll Notion:', error);
+		}
+	}
+
+	/**
+	 * Find local file path by accomplishment ID
+	 */
+	private findFileByAccomplishmentId(accomplishmentId: string): string | null {
+		for (const [filePath, id] of this.fileAccomplishmentIdCache) {
+			if (id === accomplishmentId) {
+				return filePath;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Update local file from Notion page data
+	 */
+	private async updateLocalFileFromNotion(file: TFile, page: any): Promise<void> {
+		try {
+			const content = await this.app.vault.read(file);
+			const frontmatter = parseFrontmatter(content);
+			if (!frontmatter) return;
+
+			// Extract properties from Notion page
+			const props = page.properties;
+
+			// Update frontmatter from Notion properties
+			if (props.Title?.title?.[0]?.plain_text) {
+				frontmatter.title = props.Title.title[0].plain_text;
+			}
+			if (props.Status?.select?.name) {
+				frontmatter.status = this.mapNotionStatusToLocal(props.Status.select.name);
+			}
+			if (props.Priority?.select?.name) {
+				frontmatter.priority = props.Priority.select.name as ItemPriority;
+			}
+			if (props.Effort?.select?.name) {
+				frontmatter.effort = props.Effort.select.name;
+			}
+			if (props["In Progress"]?.checkbox !== undefined) {
+				frontmatter.inProgress = props["In Progress"].checkbox;
+			}
+			if (props["Time Estimate"]?.number !== undefined) {
+				frontmatter.time_estimate = props["Time Estimate"].number;
+			}
+
+			// Update the updated timestamp
+			frontmatter.updated = new Date(page.last_edited_time).toISOString();
+
+			// Get body content from Notion blocks
+			const blocks = await this.notionClient!.getPageContent(page.id);
+			const bodyContent = this.notionBlocksToMarkdown(blocks);
+
+			// Rebuild the file content
+			const newContent = this.buildMarkdownContent(frontmatter, bodyContent);
+
+			// Write the updated content
+			this.isUpdatingCanvas = true; // Prevent triggering auto-sync back to Notion
+			try {
+				await this.app.vault.modify(file, newContent);
+				console.log('[Canvas Plugin] Updated local file from Notion:', file.path);
+
+				// Update canvas node color if inProgress changed
+				await this.handleMdFileModification(file);
+			} finally {
+				setTimeout(() => {
+					this.isUpdatingCanvas = false;
+				}, 1000);
+			}
+		} catch (error) {
+			console.error('[Canvas Plugin] Failed to update local file from Notion:', error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Map Notion status to local status
+	 */
+	private mapNotionStatusToLocal(notionStatus: string): ItemStatus {
+		const map: Record<string, ItemStatus> = {
+			"todo": "Not Started",
+			"in_progress": "In Progress",
+			"done": "Completed",
+			"blocked": "Blocked",
+		};
+		return map[notionStatus] || "Not Started";
+	}
+
+	/**
+	 * Convert Notion blocks to markdown
+	 */
+	private notionBlocksToMarkdown(blocks: any[]): string {
+		const lines: string[] = [];
+
+		for (const block of blocks) {
+			switch (block.type) {
+				case "heading_1":
+					lines.push(`# ${this.richTextToPlain(block.heading_1.rich_text)}`);
+					break;
+				case "heading_2":
+					lines.push(`## ${this.richTextToPlain(block.heading_2.rich_text)}`);
+					break;
+				case "heading_3":
+					lines.push(`### ${this.richTextToPlain(block.heading_3.rich_text)}`);
+					break;
+				case "paragraph":
+					lines.push(this.richTextToPlain(block.paragraph.rich_text));
+					break;
+				case "bulleted_list_item":
+					lines.push(`- ${this.richTextToPlain(block.bulleted_list_item.rich_text)}`);
+					break;
+				case "numbered_list_item":
+					lines.push(`1. ${this.richTextToPlain(block.numbered_list_item.rich_text)}`);
+					break;
+				case "to_do":
+					const checked = block.to_do.checked ? "x" : " ";
+					lines.push(`- [${checked}] ${this.richTextToPlain(block.to_do.rich_text)}`);
+					break;
+				case "divider":
+					lines.push("---");
+					break;
+				default:
+					// Skip unsupported block types
+					break;
+			}
+		}
+
+		return lines.join("\n");
+	}
+
+	/**
+	 * Convert Notion rich text to plain text
+	 */
+	private richTextToPlain(richText: any[]): string {
+		if (!richText || !Array.isArray(richText)) return "";
+		return richText.map(rt => rt.plain_text || "").join("");
+	}
+
+	/**
+	 * Build markdown content from frontmatter and body
+	 */
+	private buildMarkdownContent(frontmatter: ItemFrontmatter, body: string): string {
+		const yaml = [
+			"---",
+			`type: ${frontmatter.type}`,
+			`title: "${frontmatter.title.replace(/"/g, '\\"')}"`,
+			`effort: ${frontmatter.effort}`,
+			`id: ${frontmatter.id}`,
+			`status: "${frontmatter.status}"`,
+			`priority: ${frontmatter.priority}`,
+			`inProgress: ${frontmatter.inProgress ?? false}`,
+			frontmatter.time_estimate !== undefined ? `time_estimate: ${frontmatter.time_estimate}` : null,
+			frontmatter.depends_on?.length ? `depends_on: [${frontmatter.depends_on.map(d => `"${d}"`).join(", ")}]` : null,
+			`created_by_plugin: ${frontmatter.created_by_plugin ?? true}`,
+			`created: ${frontmatter.created}`,
+			`updated: ${frontmatter.updated}`,
+			`canvas_source: "${frontmatter.canvas_source}"`,
+			`vault_path: "${frontmatter.vault_path}"`,
+			frontmatter.notion_page_id ? `notion_page_id: "${frontmatter.notion_page_id}"` : null,
+			"---",
+		].filter(line => line !== null).join("\n");
+
+		return `${yaml}\n\n${body}`;
 	}
 }
 
