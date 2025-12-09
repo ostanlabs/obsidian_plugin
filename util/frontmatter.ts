@@ -170,12 +170,9 @@ export function updateFrontmatter(
 	const newFrontmatterLines: string[] = ["---"];
 	for (const [key, value] of Object.entries(mergedFrontmatter)) {
 		if (value !== undefined && value !== null) {
-			// Handle arrays (like depends_on)
+			// Handle arrays (like depends_on) - always include, even if empty
 			if (Array.isArray(value)) {
-				// Only include non-empty arrays
-				if (value.length > 0) {
-					newFrontmatterLines.push(`${key}: ${JSON.stringify(value)}`);
-				}
+				newFrontmatterLines.push(`${key}: ${JSON.stringify(value)}`);
 			} else {
 				newFrontmatterLines.push(`${key}: ${value}`);
 			}
@@ -194,13 +191,17 @@ export function updateFrontmatter(
  */
 export function createWithFrontmatter(body: string, frontmatter: Partial<ItemFrontmatter>): string {
 	const frontmatterLines: string[] = ["---"];
-	
+
 	// Define required fields that should always be written (even if empty)
-	const alwaysInclude = ['parent', 'notion_page_id', 'created_by_plugin'];
-	
+	const alwaysInclude = ['parent', 'notion_page_id', 'created_by_plugin', 'depends_on'];
+
 	for (const [key, value] of Object.entries(frontmatter)) {
+		// Handle arrays (like depends_on) - always include, even if empty
+		if (Array.isArray(value)) {
+			frontmatterLines.push(`${key}: ${JSON.stringify(value)}`);
+		}
 		// Always include certain fields, even if undefined/null/empty
-		if (alwaysInclude.includes(key)) {
+		else if (alwaysInclude.includes(key)) {
 			if (value === undefined || value === null || value === "") {
 				frontmatterLines.push(`${key}:`); // Empty value
 			} else {
@@ -243,10 +244,8 @@ export function serializeFrontmatter(frontmatter: ItemFrontmatter): string {
 	lines.push(`canvas_source: ${frontmatter.canvas_source}`);
 	lines.push(`vault_path: ${frontmatter.vault_path}`);
 
-	// Include depends_on if present and non-empty
-	if (frontmatter.depends_on && frontmatter.depends_on.length > 0) {
-		lines.push(`depends_on: ${JSON.stringify(frontmatter.depends_on)}`);
-	}
+	// Always include depends_on (empty array if no dependencies)
+	lines.push(`depends_on: ${JSON.stringify(frontmatter.depends_on || [])}`);
 
 	if (frontmatter.notion_page_id) {
 		lines.push(`notion_page_id: ${frontmatter.notion_page_id}`);
