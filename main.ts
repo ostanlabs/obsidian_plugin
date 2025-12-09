@@ -249,6 +249,15 @@ private registerCommands(): void {
 			new Notice("Templates regenerated successfully");
 		},
 	});
+
+	// Command 4: Sync all notes in current canvas to Notion
+	this.addCommand({
+		id: "sync-canvas-notes-to-notion",
+		name: "Canvas Item: Sync All Notes in Current Canvas to Notion",
+		callback: async () => {
+			await this.syncAllCanvasNotesToNotion();
+		},
+	});
 }
 
 	/**
@@ -567,6 +576,90 @@ private registerCommands(): void {
 		} catch (error) {
 			await this.logger?.error("Failed to sync note to Notion", error);
 			new Notice("Failed to sync to Notion: " + (error as Error).message);
+		}
+	}
+
+	/**
+	 * Sync all notes in the current canvas to Notion
+	 */
+	private async syncAllCanvasNotesToNotion(): Promise<void> {
+		if (!this.notionClient || !this.settings.notionEnabled) {
+			new Notice("Notion sync is not enabled");
+			return;
+		}
+
+		if (!this.notionClient.isDatabaseInitialized()) {
+			new Notice("Notion database not initialized. Run 'Initialize Notion Database' first.");
+			return;
+		}
+
+		const canvasFile = this.getActiveCanvasFile();
+		if (!canvasFile) {
+			new Notice("No active canvas file");
+			return;
+		}
+
+		try {
+			const canvasData = await loadCanvasData(this.app, canvasFile);
+			if (!canvasData) {
+				new Notice("Failed to load canvas data");
+				return;
+			}
+
+			// Find all file nodes that are plugin-created accomplishments
+			const fileNodes = canvasData.nodes.filter(
+				(node) => node.type === "file" && node.file?.endsWith(".md")
+			);
+
+			if (fileNodes.length === 0) {
+				new Notice("No markdown files found in canvas");
+				return;
+			}
+
+			let syncedCount = 0;
+			let skippedCount = 0;
+			let errorCount = 0;
+
+			new Notice(`Syncing ${fileNodes.length} notes to Notion...`);
+
+			for (const node of fileNodes) {
+				const file = this.app.vault.getAbstractFileByPath(node.file!);
+				if (!(file instanceof TFile)) {
+					skippedCount++;
+					continue;
+				}
+
+				try {
+					// Read frontmatter to check if it's a plugin-created accomplishment
+					const content = await this.app.vault.read(file);
+					const frontmatter = parseFrontmatter(content);
+
+					if (!frontmatter || frontmatter.type !== "accomplishment" || !frontmatter.created_by_plugin) {
+						skippedCount++;
+						continue;
+					}
+
+					// Sync the file
+					const pageId = await this.notionClient.syncNote(frontmatter);
+
+					// Update note with page ID if it was created
+					if (!frontmatter.notion_page_id) {
+						await this.updateNoteWithNotionId(file.path, pageId);
+					}
+
+					syncedCount++;
+				} catch (error) {
+					await this.logger?.error("Failed to sync note", { file: file.path, error });
+					errorCount++;
+				}
+			}
+
+			const message = `Sync complete: ${syncedCount} synced, ${skippedCount} skipped, ${errorCount} errors`;
+			new Notice(message);
+			await this.logger?.info("Batch sync complete", { syncedCount, skippedCount, errorCount });
+		} catch (error) {
+			await this.logger?.error("Failed to sync canvas notes to Notion", error);
+			new Notice("Failed to sync canvas notes: " + (error as Error).message);
 		}
 	}
 
