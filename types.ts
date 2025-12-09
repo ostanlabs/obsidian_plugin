@@ -8,9 +8,7 @@ export interface CanvasItemFromTemplateSettings {
 	effortOptions: string[];
 	defaultEffort: string;
 	inferBaseFolderFromCanvas: boolean;
-	defaultCollapsed: boolean;
 	showIdInCanvas: boolean;
-	expandedFields: string[];
 	shapeAccomplishment: string;
 	effortColorMap: Record<string, string>;
 	inProgressColor: string; // Color to use when inProgress is true
@@ -36,9 +34,7 @@ export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
 	effortOptions: ["Business", "Infra", "Engineering", "Research"],
 	defaultEffort: "Engineering",
 	inferBaseFolderFromCanvas: true,
-	defaultCollapsed: false,
 	showIdInCanvas: true,
-	expandedFields: ["effort", "status", "priority"],
 	shapeAccomplishment: "accomplishment",
 	effortColorMap: {
 		Business: "6",
@@ -79,9 +75,5 @@ export interface ItemFrontmatter {
 	canvas_source: string;
 	vault_path: string;
 	notion_page_id?: string;
-	// Optional per-note display sizing
-	collapsed_height?: number;
-	expanded_height?: number;
-	expanded_width?: number;
 }
 

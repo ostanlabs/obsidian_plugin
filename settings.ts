@@ -169,18 +169,6 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 		containerEl.createEl("h2", { text: "Canvas Display" });
 
 		new Setting(containerEl)
-			.setName("Default collapsed")
-			.setDesc("New cards start collapsed (alias/title only)")
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.defaultCollapsed)
-					.onChange(async (value) => {
-						this.plugin.settings.defaultCollapsed = value;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
 			.setName("Show ID on cards")
 			.setDesc("Include the item ID in card display")
 			.addToggle((toggle) =>
@@ -191,21 +179,6 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
-
-		new Setting(containerEl)
-			.setName("Fields to show when expanded")
-			.setDesc("Comma or newline separated list (e.g., effort,status,priority)")
-			.addTextArea((text) => {
-				text.inputEl.rows = 3;
-				text.inputEl.cols = 30;
-				text.setValue(this.plugin.settings.expandedFields.join(", ")).onChange(async (value) => {
-					this.plugin.settings.expandedFields = value
-						.split(/[\n,]/)
-						.map((s) => s.trim())
-						.filter((s) => s.length > 0);
-					await this.plugin.saveSettings();
-				});
-			});
 
 		new Setting(containerEl)
 			.setName("Shape label")

@@ -4,7 +4,6 @@ import { ItemType, CanvasItemFromTemplateSettings } from "../types";
 export interface StructuredItemModalOptions {
 	showTitleInput: boolean;
 	showAliasInput: boolean;
-	showCollapsedToggle: boolean;
 	showTemplateSelector: boolean;
 	typeEditable: boolean;
 	modalTitle: string;
@@ -19,7 +18,6 @@ export interface StructuredItemResult {
 	effort: string;
 	title?: string; // Only set if showTitleInput is true
 	alias?: string;
-	collapsed?: boolean; // Only set if showCollapsedToggle is true
 	templatePath?: string; // Only set if showTemplateSelector is true
 }
 
@@ -47,7 +45,6 @@ export class StructuredItemModal extends Modal {
 			effort: settings.defaultEffort,
 			title: options.showTitleInput ? titleValue : undefined,
 			alias: titleValue,
-			collapsed: options.showCollapsedToggle ? settings.defaultCollapsed : undefined,
 		};
 	}
 
@@ -140,18 +137,6 @@ export class StructuredItemModal extends Modal {
 				});
 		}
 
-		// Collapse toggle (conditional)
-		if (this.options.showCollapsedToggle) {
-			new Setting(contentEl)
-				.setName("Start collapsed")
-				.setDesc("Collapsed nodes show only alias/title")
-				.addToggle((toggle) =>
-					toggle.setValue(this.result.collapsed ?? this.settings.defaultCollapsed).onChange((value) => {
-						this.result.collapsed = value;
-					})
-				);
-		}
-
 		// Show Notion sync status if enabled
 		if (this.settings.notionEnabled && this.settings.notionDatabaseId) {
 			const notionInfo = contentEl.createEl("div", {
@@ -227,10 +212,6 @@ export class StructuredItemModal extends Modal {
 		// Set defaults
 		const titleValue = this.result.title || this.options.currentTitle || this.options.defaultTitle || "";
 		this.result.alias = this.result.alias?.trim() || titleValue;
-		
-		if (this.options.showCollapsedToggle) {
-			this.result.collapsed = this.result.collapsed ?? this.settings.defaultCollapsed;
-		}
 
 		this.onSubmit(this.result);
 		this.close();

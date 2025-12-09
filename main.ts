@@ -44,9 +44,8 @@ import {
 } from "./util/canvas";
 import { generateUniqueFilename, isPluginCreatedNote } from "./util/fileNaming";
 
-const COLLAPSED_HEIGHT_DEFAULT = 100;
-const EXPANDED_HEIGHT_DEFAULT = 220;
-const EXPANDED_WIDTH_DEFAULT = 400;
+const DEFAULT_NODE_HEIGHT = 220;
+const DEFAULT_NODE_WIDTH = 400;
 
 export default class CanvasStructuredItemsPlugin extends Plugin {
 	settings: CanvasItemFromTemplateSettings = DEFAULT_SETTINGS;
@@ -94,32 +93,8 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 					const prev = this.nodeSizeCache.get(el);
 					if (!prev || prev.w !== w || prev.h !== h) {
 						this.nodeSizeCache.set(el, { w, h });
-						const canvasNode = this.findCanvasNodeByElement(el);
-						// Get node ID from getData() to locate node in file
-						const data = canvasNode?.getData?.();
-						if (!data?.id || !canvasNode?.canvas?.view?.file) {
-							return;
-						}
-
 						this.isResizing = true;
 						console.log("[Canvas Plugin] isResizing -> true (observer size change)");
-						
-						// Read file path and collapsed state from canvas file (source of truth)
-						const canvasFile = canvasNode.canvas.view.file;
-						loadCanvasData(this.app, canvasFile).then(canvasData => {
-							const nodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === data.id);
-							if (nodeInFile) {
-								console.log("[Canvas Plugin] Node resized (observer)", {
-									id: nodeInFile.id,
-									newWidth: w,
-									newHeight: h,
-									classList: Array.from(el.classList),
-								});
-								this.persistSizeOnResize(nodeInFile.file, nodeInFile.metadata?.collapsed, w, h);
-							}
-						}).catch(err => {
-							console.error("[Canvas Plugin] Failed to read from canvas file during resize:", err);
-						});
 					}
 				}
 			}
@@ -351,8 +326,7 @@ private registerCommands(): void {
 		title: string,
 		effort: string | undefined,
 		type: ItemType,
-		options?: { alias?: string; collapsed?: boolean },
-		sizeConfig?: { collapsedHeight: number; expandedHeight: number; expandedWidth?: number },
+		options?: { alias?: string },
 		inProgress?: boolean
 	): Promise<void> {
 		console.log('[Canvas Plugin] updateCanvas called:', {
@@ -365,23 +339,23 @@ private registerCommands(): void {
 
 	const color = this.resolveNodeColor(effort, inProgress);
 	const metadata = this.buildCanvasMetadata(type, title, effort, options, color);
-	
+
 	console.log('[Canvas Plugin] ===== START updateCanvas =====');
 	console.log('[Canvas Plugin] Canvas file:', canvasFile.path);
 	console.log('[Canvas Plugin] Note path:', notePath);
 	console.log('[Canvas Plugin] Existing node ID:', existingNodeId);
 	console.log('[Canvas Plugin] Metadata:', metadata);
-	
+
 	// Set flag to prevent deletion detection during our update
 	this.isUpdatingCanvas = true;
 	console.log('[Canvas Plugin] isUpdatingCanvas set to true');
-	
+
 	// Always use file-based approach (same as conversion flow) to ensure metadata is set
 	console.log('[Canvas Plugin] Using file-based approach (write + reload)');
-	
+
 	// Load canvas data
 	const canvasData = await loadCanvasData(this.app, canvasFile);
-	
+
 	if (existingNodeId) {
 		// Update existing node
 		const existingNode = canvasData.nodes.find((n: CanvasNode) => n.id === existingNodeId);
@@ -398,57 +372,49 @@ private registerCommands(): void {
 		// Create new node at center
 		const center = getCanvasCenter(this.app, canvasFile);
 		console.log('[Canvas Plugin] Center position:', center);
-		
+
 		// Ensure valid coordinates
 		if (center.x === null || center.y === null || isNaN(center.x) || isNaN(center.y)) {
 			console.warn('[Canvas Plugin] Invalid center coordinates, using fallback');
 			center.x = 0;
 			center.y = 0;
 		}
-		
-		const collapsedHeight = sizeConfig?.collapsedHeight ?? COLLAPSED_HEIGHT_DEFAULT;
-		const expandedHeight = sizeConfig?.expandedHeight ?? EXPANDED_HEIGHT_DEFAULT;
-		const expandedWidth = sizeConfig?.expandedWidth ?? EXPANDED_WIDTH_DEFAULT;
-		
-		// Store expanded size in metadata (for when node is expanded) - align with conversion flow
-		// buildCanvasMetadata always returns an object, so metadata is guaranteed to exist
-		metadata!.expandedSize = { width: expandedWidth, height: expandedHeight };
-		
+
 		const newNode: CanvasNode = {
 			id: generateNodeId(),
 			type: "file",
 			file: notePath,
 			x: center.x,
 			y: center.y,
-			width: 400,
-			height: collapsedHeight,
+			width: DEFAULT_NODE_WIDTH,
+			height: DEFAULT_NODE_HEIGHT,
 			metadata,
 		} as any; // Use 'as any' to allow styleAttributes (Obsidian-specific field)
-		
+
 		// Add styleAttributes to align with converted nodes
 		(newNode as any).styleAttributes = {};
 		if (color) {
 			newNode.color = color;
 		}
-		
+
 		canvasData.nodes.push(newNode);
 		console.log('[Canvas Plugin] Added new node:', newNode);
 	}
-	
+
 	// Save the canvas file
 	console.log('[Canvas Plugin] Saving canvas file...');
 	await saveCanvasData(this.app, canvasFile, canvasData);
 	console.log('[Canvas Plugin] Canvas file saved successfully');
-	
+
 	// Don't reload - let Obsidian detect the change and refresh automatically
 	console.log('[Canvas Plugin] Letting Obsidian auto-detect canvas file change');
-	
+
 	// Keep the flag true for a bit to prevent deletion detection during auto-refresh
 	setTimeout(() => {
 		this.isUpdatingCanvas = false;
 		console.log('[Canvas Plugin] isUpdatingCanvas set to false (delayed)');
 	}, 500);
-	
+
 	console.log('[Canvas Plugin] ===== END updateCanvas =====');
 	new Notice(`✅ Item created and added to canvas!`, 4000);
 }
@@ -1012,7 +978,6 @@ private registerCommands(): void {
 				});
 				this.lastPointerNodeSize.width = newW;
 				this.lastPointerNodeSize.height = newH;
-				this.persistSizeOnResize(latest?.file, latest?.metadata?.collapsed, newW, newH);
 			}
 		});
 	}
@@ -1022,7 +987,7 @@ private registerCommands(): void {
 		menus.forEach((menu) => {
 			menu
 				.querySelectorAll(
-					".canvas-structured-items-select-menu, .canvas-structured-items-collapse-menu, .canvas-structured-items-open-menu"
+					".canvas-structured-items-select-menu, .canvas-structured-items-open-menu"
 				)
 				.forEach((el) => el.remove());
 		});
@@ -1090,20 +1055,20 @@ private registerCommands(): void {
 			});
 
 			// Determine which button to inject based on node type
-			let mode: "convert" | "collapse" | null = null;
+			let mode: "convert" | "open" | null = null;
 			if (nodeType === "text") {
 				mode = "convert";
 			} else if (nodeType === "file") {
-				// Only show collapse/expand for plugin-created notes
+				// Only show open button for plugin-created notes
 				if (metadata?.plugin === "structured-canvas-notes") {
-					mode = "collapse";
+					mode = "open";
 				} else {
 					// Regular file node, don't show any buttons
 					console.log("[Canvas Plugin] File node is not plugin-created, skipping");
 					return;
 				}
 			}
-			
+
 			if (!mode) {
 				console.log("[Canvas Plugin] No mode determined for node type:", data.type);
 				return;
@@ -1128,7 +1093,7 @@ private registerCommands(): void {
 			// Remove previous injected buttons to avoid stale callbacks or duplicates
 			visibleMenu
 				.querySelectorAll(
-					".canvas-structured-items-select-menu, .canvas-structured-items-collapse-menu, .canvas-structured-items-open-menu"
+					".canvas-structured-items-select-menu, .canvas-structured-items-open-menu"
 				)
 				.forEach((el) => el.remove());
 
@@ -1142,7 +1107,7 @@ private registerCommands(): void {
 					canvasNode
 				);
 				visibleMenu.appendChild(convertButton);
-			} else if (mode === "collapse" && metadata?.plugin === "structured-canvas-notes") {
+			} else if (mode === "open" && metadata?.plugin === "structured-canvas-notes") {
 				// Use file path from canvas file (source of truth)
 				const openButton = this.buildMenuButton(
 					"canvas-structured-items-open-menu",
@@ -1151,33 +1116,6 @@ private registerCommands(): void {
 					canvasNode
 				);
 				visibleMenu.appendChild(openButton);
-
-				const isCollapsed = !!metadata?.collapsed;
-				const collapseLabel = isCollapsed ? "Expand" : "Collapse";
-				const collapseButton = this.buildMenuButton(
-					"canvas-structured-items-collapse-menu",
-					collapseLabel,
-					async () => {
-						// Always read from file to get latest state
-						if (!canvasNode?.canvas?.view?.file) return;
-						
-						try {
-							// Get node ID to locate it in the file
-							const data = canvasNode?.getData?.();
-							if (!data?.id) return;
-							
-							const canvasFile = canvasNode.canvas.view.file;
-							const canvasData = await loadCanvasData(this.app, canvasFile);
-							const latestNodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === data.id);
-							const currentlyCollapsed = !!latestNodeInFile?.metadata?.collapsed;
-							await this.toggleNodeCollapsedState(canvasNode, !currentlyCollapsed);
-						} catch (err) {
-							console.error("[Canvas Plugin] Failed to read latest state from file:", err);
-						}
-					},
-					canvasNode
-				);
-				visibleMenu.appendChild(collapseButton);
 			}
 		} catch (error) {
 			console.error("[Canvas Plugin] Failed to add selection menu button", error);
@@ -1213,7 +1151,7 @@ private registerCommands(): void {
 			e.preventDefault();
 			e.stopPropagation();
 			await onClick();
-			// Rebuild menu immediately to refresh labels (e.g., Collapse/Expand)
+			// Rebuild menu immediately to refresh labels
 			await this.addSelectionMenuButton(canvasNode);
 		});
 
@@ -1288,196 +1226,6 @@ private registerCommands(): void {
 		}
 	}
 
-	private async toggleCollapseFromMenu(canvasNode: any): Promise<void> {
-		try {
-			const data = canvasNode?.getData?.();
-			if (!data) return;
-			console.log("[Canvas Plugin] Collapse/expand clicked for node", data.id);
-			const collapsed = !!data.metadata?.collapsed;
-			await this.toggleNodeCollapsedState(canvasNode, !collapsed);
-		} catch (error) {
-			console.error("[Canvas Plugin] Failed to toggle collapse from menu", error);
-		}
-	}
-
-	private async toggleNodeCollapsedState(canvasNode: any, collapsed: boolean): Promise<void> {
-		const data = canvasNode?.getData?.();
-		const canvasFile = canvasNode?.canvas?.view?.file;
-		if (!data || !canvasFile) {
-			console.log("[Canvas Plugin] toggleNodeCollapsedState missing data or canvasFile");
-			return;
-		}
-
-		const nodeId = data.id;
-		this.isUpdatingCanvas = true;
-
-		const sizeConfig = await this.getSizeConfigForFile(data.file);
-
-		// Update in-memory data and sizing
-		if (!data.metadata) data.metadata = {};
-		if (collapsed) {
-			// persist expanded size from current state
-			await this.persistSizeFields(data.file, {
-				expanded_height: data.height,
-				expanded_width: data.width,
-			});
-			data.metadata.expandedSize = { width: data.width, height: data.height };
-			data.height = sizeConfig.collapsedHeight;
-			console.log("[Canvas Plugin] Resize (memory) collapsed", {
-				nodeId,
-				width: data.width,
-				height: data.height,
-				source: "collapsed-height-setting",
-			});
-		} else {
-			const restore = data.metadata.expandedSize;
-			// persist collapsed size from current state before expanding
-			await this.persistSizeFields(data.file, {
-				collapsed_height: data.height,
-			});
-			data.height = restore?.height ?? sizeConfig.expandedHeight;
-			if (restore?.width) {
-				data.width = restore.width;
-			} else if (sizeConfig.expandedWidth) {
-				data.width = sizeConfig.expandedWidth;
-			}
-			console.log("[Canvas Plugin] Resize (memory) expanded", {
-				nodeId,
-				width: data.width,
-				height: data.height,
-				source: restore ? "expandedSize" : "frontmatter/default",
-			});
-		}
-		data.metadata.collapsed = collapsed;
-
-		try {
-			// Update on-disk canvas JSON
-			const canvasData = await loadCanvasData(this.app, canvasFile);
-			const node = findNodeById(canvasData, nodeId);
-			if (node) {
-				if (!node.metadata) node.metadata = {};
-				if (collapsed) {
-					await this.persistSizeFields(node.file, {
-						expanded_height: node.height,
-						expanded_width: node.width,
-					});
-					node.metadata.expandedSize = { width: node.width, height: node.height };
-					node.height = sizeConfig.collapsedHeight;
-					console.log("[Canvas Plugin] Resize (persisted) collapsed", {
-						nodeId,
-						width: node.width,
-						height: node.height,
-						source: "collapsed-height-setting",
-					});
-				} else {
-					const restore = node.metadata.expandedSize;
-					await this.persistSizeFields(node.file, {
-						collapsed_height: node.height,
-					});
-					node.height = restore?.height ?? sizeConfig.expandedHeight;
-					if (restore?.width) {
-						node.width = restore.width;
-					} else if (sizeConfig.expandedWidth) {
-						node.width = sizeConfig.expandedWidth;
-					}
-					console.log("[Canvas Plugin] Resize (persisted) expanded", {
-						nodeId,
-						width: node.width,
-						height: node.height,
-						source: restore ? "expandedSize" : "frontmatter/default",
-					});
-				}
-				node.metadata.collapsed = collapsed;
-				await saveCanvasData(this.app, canvasFile, canvasData);
-				console.log("[Canvas Plugin] Saved collapsed state for node", nodeId, collapsed);
-			}
-
-			// Refresh view lightly
-			const leaf = this.app.workspace
-				.getLeavesOfType("canvas")
-				.find((l) => (l.view as any)?.file?.path === canvasFile.path);
-			const view = leaf?.view as any;
-			if (view?.canvas?.requestFrame) {
-				view.canvas.requestFrame();
-			}
-		} catch (error) {
-			console.error("[Canvas Plugin] Failed to persist collapsed state", error);
-		} finally {
-			setTimeout(() => (this.isUpdatingCanvas = false), 300);
-		}
-	}
-
-	private async getSizeConfigForFile(filePath?: string): Promise<{
-		collapsedHeight: number;
-		expandedHeight: number;
-		expandedWidth?: number;
-	}> {
-		const defaults = {
-			collapsedHeight: COLLAPSED_HEIGHT_DEFAULT,
-			expandedHeight: EXPANDED_HEIGHT_DEFAULT,
-			expandedWidth: EXPANDED_WIDTH_DEFAULT as number | undefined,
-		};
-		if (!filePath) return defaults;
-
-		try {
-			const file = this.app.vault.getAbstractFileByPath(filePath);
-			if (!(file instanceof TFile)) return defaults;
-			const cache = this.app.metadataCache.getFileCache(file);
-			const fm = cache?.frontmatter as any;
-			if (!fm) return defaults;
-
-			const collapsedHeight = Number(fm.collapsed_height);
-			const expandedHeight = Number(fm.expanded_height);
-			const expandedWidth = fm.expanded_width !== undefined ? Number(fm.expanded_width) : undefined;
-
-			return {
-				collapsedHeight: !isNaN(collapsedHeight) && collapsedHeight > 0 ? collapsedHeight : defaults.collapsedHeight,
-				expandedHeight: !isNaN(expandedHeight) && expandedHeight > 0 ? expandedHeight : defaults.expandedHeight,
-				expandedWidth: !isNaN(expandedWidth || NaN) && expandedWidth! > 0 ? expandedWidth : undefined,
-			};
-		} catch {
-			return defaults;
-		}
-	}
-
-	private async getCollapsedHeightForFile(filePath: string): Promise<number> {
-		const config = await this.getSizeConfigForFile(filePath);
-		return config.collapsedHeight;
-	}
-
-	private async persistSizeFields(
-		filePath: string | undefined,
-		fields: Partial<Pick<ItemFrontmatter, "collapsed_height" | "expanded_height" | "expanded_width">>
-	): Promise<void> {
-		if (!filePath) return;
-		const file = this.app.vault.getAbstractFileByPath(filePath);
-		if (!(file instanceof TFile)) return;
-		try {
-			const content = await this.app.vault.read(file);
-			const updated = updateFrontmatter(content, fields as any);
-			await this.app.vault.modify(file, updated);
-		} catch (error) {
-			console.error("[Canvas Plugin] Failed to persist size fields", error);
-		}
-	}
-
-	private persistSizeOnResize(
-		filePath: string | undefined,
-		collapsed: boolean | undefined,
-		width: number,
-		height: number
-	): void {
-		if (!filePath) return;
-		const fields: Partial<ItemFrontmatter> = {};
-		if (collapsed) {
-			fields.collapsed_height = height;
-		} else {
-			fields.expanded_height = height;
-			fields.expanded_width = width;
-		}
-		void this.persistSizeFields(filePath, fields);
-	}
-
 	private getSelectedCanvasTextNode(): any | null {
 		const selectedEls = this.getSelectedCanvasNodeElements();
 		for (const el of selectedEls) {
@@ -1511,36 +1259,6 @@ private registerCommands(): void {
 		await this.convertCanvasNodeToStructuredItem(node);
 	}
 
-	private async toggleCurrentlySelectedCollapse(): Promise<void> {
-		const node = this.getSelectedCanvasFileNode();
-		if (!node || !node.canvas?.view?.file) {
-			console.log("[Canvas Plugin] No eligible file node for collapse toggle");
-			return;
-		}
-
-		// Get node ID from getData() to locate node in file
-		const data = node.getData?.();
-		if (!data?.id) {
-			return;
-		}
-
-		// Read metadata from canvas file (source of truth)
-		try {
-			const canvasFile = node.canvas.view.file;
-			const canvasData = await loadCanvasData(this.app, canvasFile);
-			const nodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === data.id);
-			
-			if (!nodeInFile || nodeInFile.metadata?.plugin !== "structured-canvas-notes") {
-				console.log("[Canvas Plugin] Node is not plugin-created");
-				return;
-			}
-
-			const collapsed = !!nodeInFile.metadata?.collapsed;
-			await this.toggleNodeCollapsedState(node, !collapsed);
-		} catch (err) {
-			console.error("[Canvas Plugin] Failed to read from canvas file:", err);
-		}
-	}
 
 	/**
 	 * Setup canvas node context menu using DOM events
@@ -1745,7 +1463,6 @@ private registerCommands(): void {
 		const modalOptions: StructuredItemModalOptions = {
 			showTitleInput: false,
 			showAliasInput: true,
-			showCollapsedToggle: false,
 			showTemplateSelector: false,
 			typeEditable: true,
 			modalTitle: "Convert to Structured Item",
@@ -1805,9 +1522,6 @@ private registerCommands(): void {
 				created: existingFrontmatter.created || now,
 				updated: now,
 				canvas_source: existingFrontmatter.canvas_source || "",
-				collapsed_height: existingFrontmatter.collapsed_height ?? COLLAPSED_HEIGHT_DEFAULT,
-				expanded_height: existingFrontmatter.expanded_height ?? EXPANDED_HEIGHT_DEFAULT,
-				expanded_width: existingFrontmatter.expanded_width ?? EXPANDED_WIDTH_DEFAULT,
 			};
 
 			// Update note content
@@ -1900,7 +1614,6 @@ private registerCommands(): void {
 		const modalOptions: StructuredItemModalOptions = {
 			showTitleInput: false,
 			showAliasInput: true,
-			showCollapsedToggle: false,
 			showTemplateSelector: false,
 			typeEditable: true,
 			modalTitle: "Convert to Structured Item",
@@ -1999,9 +1712,6 @@ private registerCommands(): void {
 					canvas_source: canvasFile.path,
 					vault_path: notePath,
 					notion_page_id: undefined,
-					collapsed_height: COLLAPSED_HEIGHT_DEFAULT,
-					expanded_height: EXPANDED_HEIGHT_DEFAULT,
-					expanded_width: EXPANDED_WIDTH_DEFAULT,
 				};
 
 				// Load template and replace placeholders
@@ -2043,7 +1753,7 @@ private registerCommands(): void {
 			if (existingNode) {
 				// Convert existing node in-place
 				console.log('[Canvas Plugin] Converting existing node in-place (keeping same ID)');
-				
+
 				existingNode.type = "file";
 				existingNode.file = notePath;
 				if (color) {
@@ -2053,71 +1763,50 @@ private registerCommands(): void {
 					result.type,
 					title,
 					result.effort,
-					{
-						alias,
-						collapsed: true,
-					},
+					{ alias },
 					color
 				);
-				// Apply collapsed size and set expandedSize from frontmatter
-				if (!existingNode.metadata) existingNode.metadata = {};
-				// Read expanded size from frontmatter
-				const sizeConfig = await this.getSizeConfigForFile(notePath);
-				const expandedHeight = sizeConfig.expandedHeight ?? EXPANDED_HEIGHT_DEFAULT;
-				const expandedWidth = sizeConfig.expandedWidth ?? EXPANDED_WIDTH_DEFAULT;
-				existingNode.metadata.expandedSize = { width: expandedWidth, height: expandedHeight };
-				existingNode.height = await this.getCollapsedHeightForFile(notePath);
+				existingNode.height = DEFAULT_NODE_HEIGHT;
+				existingNode.width = DEFAULT_NODE_WIDTH;
 				// Remove text property
 				delete (existingNode as any).text;
 				// Ensure styleAttributes exists for consistency
 				if (!(existingNode as any).styleAttributes) {
 					(existingNode as any).styleAttributes = {};
 				}
-			
+
 				console.log('[Canvas Plugin] Node transformed:', {
 					id: existingNode.id,
 					type: existingNode.type,
 					file: existingNode.file,
 					color: existingNode.color
 				});
-				
+
 				// Edges automatically remain valid (same node ID)
-				const connectedEdges = canvasData.edges.filter((edge: any) => 
+				const connectedEdges = canvasData.edges.filter((edge: any) =>
 					edge.fromNode === resolvedNodeId || edge.toNode === resolvedNodeId
 				);
 				console.log('[Canvas Plugin]', connectedEdges.length, 'edges remain connected (no update needed)');
 			} else {
 				// Create new node (fallback when node not found)
 				console.log('[Canvas Plugin] Node not found, creating new node');
-				
-				// Get size config
-				const sizeConfig = await this.getSizeConfigForFile(notePath);
-				const collapsedHeight = sizeConfig.collapsedHeight ?? COLLAPSED_HEIGHT_DEFAULT;
-				const expandedHeight = sizeConfig.expandedHeight ?? EXPANDED_HEIGHT_DEFAULT;
-				const expandedWidth = sizeConfig.expandedWidth ?? EXPANDED_WIDTH_DEFAULT;
-				
+
 				// Use provided position or calculate viewport center
 				const center = position || getCanvasCenter(this.app, canvasFile);
 				if (center.x === null || center.y === null || isNaN(center.x) || isNaN(center.y)) {
 					center.x = 0;
 					center.y = 0;
 				}
-				
+
 				// Build metadata
 				const metadata = this.buildCanvasMetadata(
 					result.type,
 					title,
 					result.effort,
-					{
-						alias,
-						collapsed: true,
-					},
+					{ alias },
 					color
 				);
-				
-				// Add expandedSize to metadata
-				metadata!.expandedSize = { width: expandedWidth, height: expandedHeight };
-				
+
 				// Create new node
 				const newNode: CanvasNode = {
 					id: generateNodeId(),
@@ -2125,16 +1814,16 @@ private registerCommands(): void {
 					file: notePath,
 					x: center.x,
 					y: center.y,
-					width: 400,
-					height: collapsedHeight,
+					width: DEFAULT_NODE_WIDTH,
+					height: DEFAULT_NODE_HEIGHT,
 					metadata,
 				} as any;
 				(newNode as any).styleAttributes = {};
-				
+
 				if (color) {
 					newNode.color = color;
 				}
-				
+
 				canvasData.nodes.push(newNode);
 				console.log('[Canvas Plugin] Added new node:', newNode);
 			}
@@ -2276,12 +1965,11 @@ private registerCommands(): void {
 		type: ItemType,
 		title: string,
 		effort?: string,
-		options?: { alias?: string; collapsed?: boolean },
+		options?: { alias?: string },
 		effortColor?: string
 	): CanvasNode["metadata"] {
 		const metadata: CanvasNode["metadata"] = {
 			plugin: "structured-canvas-notes",
-			collapsed: options?.collapsed ?? false,
 			alias: options?.alias ?? title,
 			shape: this.settings.shapeAccomplishment,
 			showId: this.settings.showIdInCanvas,
