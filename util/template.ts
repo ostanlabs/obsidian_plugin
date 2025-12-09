@@ -61,10 +61,16 @@ vault_path: {{vault_path}}
 notion_page_id: {{notion_page_id}}
 ---
 
-## Accomplishment Overview
-**Goal:** [One sentence describing the end state]
-**Dependencies:**
-**Status:** Not Started
+# {{title}} (Accomplishment)
+
+## Outcome
+
+Describe the final state that will be true once this is done.
+
+## Acceptance Criteria
+
+- [ ] Criterion 1
+- [ ] Criterion 2
 
 ## Tasks
 
@@ -81,6 +87,6 @@ notion_page_id: {{notion_page_id}}
 - **Status:** ⬜ Not Started
 
 ## Notes
-[Additional context]
+
 `;
 

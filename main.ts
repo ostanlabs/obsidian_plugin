@@ -18,15 +18,6 @@ interface ConvertNoteResult {
 	alias?: string;
 }
 
-interface ItemCreationResult {
-	type: ItemType;
-	effort: string;
-	title: string;
-	alias?: string;
-	collapsed?: boolean;
-	templatePath?: string;
-}
-
 import { Logger } from "./util/logger";
 import { generateId } from "./util/idGenerator";
 import {
@@ -193,9 +184,6 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 		// Observe canvas node size changes
 		this.setupCanvasResizeObserver();
 
-		// Initialize cache for all existing canvas files
-		await this.initializeCanvasNodeCache();
-
 		// Watch for canvas file modifications to detect node deletions
 		this.registerEvent(
 			this.app.vault.on("modify", async (file) => {
@@ -204,6 +192,12 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 				}
 			})
 		);
+
+		// Initialize cache after layout is ready (vault files are indexed)
+		this.app.workspace.onLayoutReady(async () => {
+			console.log('[Canvas Plugin] Layout ready, initializing canvas node cache...');
+			await this.initializeCanvasNodeCache();
+		});
 
 		await this.logger.info("Plugin initialization complete");
 	}
@@ -245,6 +239,16 @@ private registerCommands(): void {
 			await this.syncCurrentNoteToNotion();
 		},
 	});
+
+	// Command 3: Regenerate templates
+	this.addCommand({
+		id: "regenerate-templates",
+		name: "Canvas Item: Regenerate Templates",
+		callback: async () => {
+			await this.ensureTemplatesExist(true);
+			new Notice("Templates regenerated successfully");
+		},
+	});
 }
 
 	/**
@@ -256,158 +260,6 @@ private registerCommands(): void {
 			return null;
 		}
 		return activeFile;
-	}
-
-	/**
-	 * Create a note and add/update canvas node
-	 */
-	private async createItemAndAddToCanvas(
-		canvasFile: TFile,
-		itemData: ItemCreationResult,
-		existingNodeId: string | null
-	): Promise<void> {
-	try {
-		await this.logger?.info("Creating canvas item (flow: create)", itemData);
-		console.log('[Canvas Plugin] ===== START CREATION FLOW =====');
-		console.log('[Canvas Plugin] Item data:', itemData);
-
-		// Generate ID
-		const id = await generateId(this.app, this.settings);
-		console.log('[Canvas Plugin] Generated ID:', id);
-
-		// Determine note path
-		const notePath = await this.determineNotePath(canvasFile, itemData.title, id);
-		console.log('[Canvas Plugin] Note path:', notePath);
-
-		// Create frontmatter
-		const now = new Date().toISOString();
-		const frontmatter: ItemFrontmatter = {
-			type: itemData.type,
-			title: itemData.title,
-			effort: itemData.effort,
-			id,
-			status: this.normalizeStatus("Not Started"),
-			priority: this.normalizePriority("High"),
-			inProgress: false,
-			created_by_plugin: true,
-			created: now,
-			updated: now,
-			canvas_source: canvasFile.path,
-			vault_path: notePath,
-			collapsed_height: COLLAPSED_HEIGHT_DEFAULT,
-			expanded_height: EXPANDED_HEIGHT_DEFAULT,
-			expanded_width: EXPANDED_WIDTH_DEFAULT,
-		};
-
-		// Load template
-		const template = await this.loadTemplate(itemData.type, itemData.templatePath);
-
-		// Replace placeholders
-		const content = replacePlaceholders(template, frontmatter);
-
-		// Create the note file
-		await this.app.vault.create(notePath, content);
-		await this.logger?.info("Note created", { path: notePath });
-		console.log('[Canvas Plugin] Note file created successfully');
-
-		// Set flag early to prevent deletion detection during creation
-		this.isUpdatingCanvas = true;
-		console.log('[Canvas Plugin] isUpdatingCanvas set to true (creation flow)');
-
-		// Create file node directly on canvas (no text node step)
-		console.log('[Canvas Plugin] Creating file node directly on canvas');
-		
-		// Get viewport center for node position
-		const center = getCanvasCenter(this.app, canvasFile);
-		if (center.x === null || center.y === null || isNaN(center.x) || isNaN(center.y)) {
-			center.x = 0;
-			center.y = 0;
-		}
-		
-		// Get size config from frontmatter
-		const sizeConfig = await this.getSizeConfigForFile(notePath);
-		const collapsedHeight = sizeConfig.collapsedHeight ?? COLLAPSED_HEIGHT_DEFAULT;
-		const expandedHeight = sizeConfig.expandedHeight ?? EXPANDED_HEIGHT_DEFAULT;
-		const expandedWidth = sizeConfig.expandedWidth ?? EXPANDED_WIDTH_DEFAULT;
-		
-		// Get color for the node (inProgress is false for new items)
-		const color = this.resolveNodeColor(itemData.effort, false);
-
-		// Build metadata
-		const metadata = this.buildCanvasMetadata(
-			itemData.type,
-			itemData.title,
-			itemData.effort,
-			{
-				alias: itemData.alias || itemData.title,
-				collapsed: true,
-			},
-			color
-		);
-		
-		// Add expandedSize to metadata
-		metadata!.expandedSize = { width: expandedWidth, height: expandedHeight };
-		
-		// Create file node directly
-		const fileNode: CanvasNode = {
-			id: generateNodeId(),
-			type: "file",
-			file: notePath,
-			x: center.x,
-			y: center.y,
-			width: 400,
-			height: collapsedHeight,
-			metadata,
-		} as any;
-		(fileNode as any).styleAttributes = {};
-		
-		if (color) {
-			fileNode.color = color;
-		}
-		
-		// Add file node to canvas
-		const canvasData = await loadCanvasData(this.app, canvasFile);
-		canvasData.nodes.push(fileNode);
-		await saveCanvasData(this.app, canvasFile, canvasData);
-		console.log('[Canvas Plugin] File node added to canvas:', fileNode.id);
-
-		// Force reload canvas to sync Obsidian's in-memory state with file
-		// This prevents Obsidian from overwriting our changes when it auto-saves
-		console.log('[Canvas Plugin] Reloading canvas to sync in-memory state...');
-		await reloadCanvasViewsWithViewport(this.app, canvasFile);
-		console.log('[Canvas Plugin] Canvas reloaded');
-
-		// Update cache after reload (re-read from file to ensure consistency)
-		const reloadedCanvasData = await loadCanvasData(this.app, canvasFile);
-		const currentNodeIds = new Set(reloadedCanvasData.nodes.map((n) => n.id));
-		this.canvasNodeCache.set(canvasFile.path, currentNodeIds);
-		console.log('[Canvas Plugin] Cache updated with', currentNodeIds.size, 'nodes');
-
-		// Clear flag after a short delay to allow any pending events to settle
-		setTimeout(() => {
-			this.isUpdatingCanvas = false;
-			console.log('[Canvas Plugin] isUpdatingCanvas set to false (creation flow complete)');
-		}, 500);
-
-		console.log('[Canvas Plugin] ===== END CREATION FLOW =====');
-		
-		// Sync to Notion if enabled
-		if (this.shouldSyncOnCreate()) {
-			try {
-				const createdFile = this.app.vault.getAbstractFileByPath(notePath);
-				if (createdFile instanceof TFile) {
-					await this.syncFileToNotion(createdFile);
-				}
-			} catch (error) {
-				await this.logger?.error("Failed to sync to Notion", error);
-			}
-		}
-		
-		new Notice(`✅ Created ${itemData.type}: ${itemData.title} (${id})`);
-		} catch (error) {
-			await this.logger?.error("Failed to create item", error);
-			new Notice("Failed to create item: " + (error as Error).message);
-		}
 	}
 
 	/**
@@ -795,6 +647,9 @@ private registerCommands(): void {
 		this.registerDomEvent(document, "keydown", () => this.syncSelectionButtons());
 	}
 
+	// Track which nodes have had menu buttons injected to avoid repeated calls
+	private menuButtonsInjectedFor: Set<string> = new Set();
+
 	private syncSelectionButtons(): void {
 		const selectedNodes = this.getSelectedCanvasNodeElements();
 		const seenIds = new Set<string>();
@@ -809,7 +664,7 @@ private registerCommands(): void {
 			// Check type from file (async) - but don't block the loop
 			// We'll create button asynchronously if it's a text node
 			if (this.selectionButtons.has(nodeId)) continue;
-			
+
 			// Create button asynchronously (reads from file to check type)
 			this.createSelectionButton(nodeEl, canvasNode).then(button => {
 				if (button) {
@@ -819,11 +674,14 @@ private registerCommands(): void {
 				console.error("[Canvas Plugin] Failed to create selection button:", err);
 			});
 
-			// Track for menu injection
+			// Track for menu injection - only inject if not already done for this node
 			this.lastSelectedMenuNode = canvasNode;
-			this.addSelectionMenuButton(canvasNode).catch(err => 
-				console.error("[Canvas Plugin] Failed to add selection menu button:", err)
-			);
+			if (!this.menuButtonsInjectedFor.has(nodeId)) {
+				this.menuButtonsInjectedFor.add(nodeId);
+				this.addSelectionMenuButton(canvasNode).catch(err =>
+					console.error("[Canvas Plugin] Failed to add selection menu button:", err)
+				);
+			}
 		}
 
 		// Remove buttons for nodes no longer selected
@@ -834,9 +692,17 @@ private registerCommands(): void {
 			}
 		}
 
-		// If nothing selected, clear last reference
+		// Clear menu button tracking for deselected nodes
+		for (const id of this.menuButtonsInjectedFor) {
+			if (!seenIds.has(id)) {
+				this.menuButtonsInjectedFor.delete(id);
+			}
+		}
+
+		// If nothing selected, clear last reference and menu tracking
 		if (seenIds.size === 0) {
 			this.lastSelectedMenuNode = null;
+			this.menuButtonsInjectedFor.clear();
 		}
 	}
 
@@ -1188,7 +1054,7 @@ private registerCommands(): void {
 				const openButton = this.buildMenuButton(
 					"canvas-structured-items-open-menu",
 					"Open",
-					async () => this.openCanvasFileNode(filePath!),
+					async () => this.openAllSelectedFileNodes(),
 					canvasNode
 				);
 				visibleMenu.appendChild(openButton);
@@ -1285,6 +1151,47 @@ private registerCommands(): void {
 			}
 		} catch (error) {
 			console.error("[Canvas Plugin] Failed to open file from canvas node", error);
+		}
+	}
+
+	/**
+	 * Open all selected file nodes in separate tabs
+	 */
+	private async openAllSelectedFileNodes(): Promise<void> {
+		try {
+			const selectedNodes = this.getSelectedCanvasNodeElements();
+			const filePaths: string[] = [];
+
+			// Collect file paths from all selected nodes
+			for (const nodeEl of selectedNodes) {
+				const canvasNode = this.findCanvasNodeByElement(nodeEl);
+				const data = canvasNode?.getData?.();
+				if (!data?.id || !canvasNode?.canvas?.view?.file) continue;
+
+				try {
+					const canvasFile = canvasNode.canvas.view.file;
+					const canvasData = await loadCanvasData(this.app, canvasFile);
+					const nodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === data.id);
+
+					// Only include plugin-created file nodes
+					if (nodeInFile?.type === "file" &&
+						nodeInFile?.metadata?.plugin === "structured-canvas-notes" &&
+						nodeInFile?.file) {
+						filePaths.push(nodeInFile.file);
+					}
+				} catch (err) {
+					console.error("[Canvas Plugin] Failed to read node from canvas file:", err);
+				}
+			}
+
+			console.log("[Canvas Plugin] Opening", filePaths.length, "files in separate tabs");
+
+			// Open each file in a new tab
+			for (const filePath of filePaths) {
+				await this.openCanvasFileNode(filePath);
+			}
+		} catch (error) {
+			console.error("[Canvas Plugin] Failed to open selected file nodes", error);
 		}
 	}
 
@@ -1983,7 +1890,7 @@ private registerCommands(): void {
 			// Check if file already exists (e.g., from creation flow)
 			const existingFile = this.app.vault.getAbstractFileByPath(notePath);
 			if (!(existingFile instanceof TFile)) {
-				// File doesn't exist - create it
+				// File doesn't exist - create it using template
 				const now = new Date().toISOString();
 				const frontmatter: ItemFrontmatter = {
 					type: result.type,
@@ -1991,7 +1898,8 @@ private registerCommands(): void {
 					effort: result.effort,
 					id,
 					status: this.normalizeStatus("Not Started"),
-					priority: this.normalizePriority(result.type === "accomplishment" ? "High" : "Medium"),
+					priority: this.normalizePriority("High"),
+					inProgress: false,
 					created_by_plugin: true,
 					created: now,
 					updated: now,
@@ -2001,10 +1909,12 @@ private registerCommands(): void {
 					collapsed_height: COLLAPSED_HEIGHT_DEFAULT,
 					expanded_height: EXPANDED_HEIGHT_DEFAULT,
 					expanded_width: EXPANDED_WIDTH_DEFAULT,
-				} as any;
-				
-				const content = createWithFrontmatter(nodeText, frontmatter);
-				
+				};
+
+				// Load template and replace placeholders
+				const template = await this.loadTemplate(result.type);
+				const content = replacePlaceholders(template, frontmatter);
+
 				console.log('[Canvas Plugin] Creating note with content preview:', {
 					firstLines: content.split('\n').slice(0, 10).join('\n'),
 					hasFrontmatter: content.startsWith('---'),
@@ -2139,35 +2049,50 @@ private registerCommands(): void {
 			// Unified save logic for both conversion and creation
 			console.log('[Canvas Plugin] Saving canvas file...');
 			await saveCanvasData(this.app, canvasFile, canvasData);
-			console.log('[Canvas Plugin] Canvas file saved, letting Obsidian auto-detect change');
-			
-			// Update cache immediately to keep it in sync
-			const currentNodeIds = new Set(canvasData.nodes.map((n) => n.id));
+			console.log('[Canvas Plugin] Canvas file saved');
+
+			// Force reload canvas to sync Obsidian's in-memory state with file
+			// This ensures the node renders properly with file content preview
+			console.log('[Canvas Plugin] Reloading canvas to sync in-memory state...');
+			await reloadCanvasViewsWithViewport(this.app, canvasFile);
+			console.log('[Canvas Plugin] Canvas reloaded');
+
+			// Update cache after reload (re-read from file to ensure consistency)
+			const reloadedCanvasData = await loadCanvasData(this.app, canvasFile);
+			const currentNodeIds = new Set(reloadedCanvasData.nodes.map((n) => n.id));
 			this.canvasNodeCache.set(canvasFile.path, currentNodeIds);
 			console.log('[Canvas Plugin] Cache updated with', currentNodeIds.size, 'nodes');
-			
-			// Wait for Obsidian to detect and load the node
-			await new Promise(resolve => setTimeout(resolve, 300));
-			
+
 			// Keep flag true longer to prevent deletion detection during auto-refresh
 			setTimeout(() => {
 				this.isUpdatingCanvas = false;
 				console.log('[Canvas Plugin] isUpdatingCanvas set to false (delayed, conversion flow)');
-			}, 1000);
+			}, 500);
 			
 			// Log completion
 			if (existingNode) {
-				await this.logger?.info("Canvas node converted in-place", { 
+				await this.logger?.info("Canvas node converted in-place", {
 					nodeId: resolvedNodeId,
 					path: notePath,
 				});
 				new Notice(`✅ Converted to ${result.type}: ${id}`);
 			} else {
-				await this.logger?.info("Canvas node created", { 
+				await this.logger?.info("Canvas node created", {
 					path: notePath,
 				});
 				new Notice(`✅ Created ${result.type}: ${id}`);
 			}
+
+			// Refresh the selection menu buttons after conversion
+			// Wait a bit for the canvas to update, then refresh the menu
+			setTimeout(async () => {
+				// Clear old menu buttons first
+				this.clearInjectedMenuButtons();
+				// Re-inject menu buttons for the converted node
+				if (node) {
+					await this.addSelectionMenuButton(node);
+				}
+			}, 250);
 
 			// Sync to Notion if enabled
 			if (this.shouldSyncOnCreate()) {
@@ -2285,14 +2210,24 @@ private registerCommands(): void {
 	 */
 	private async initializeCanvasNodeCache(): Promise<void> {
 		try {
+			console.log('[Canvas Plugin] Initializing canvas node cache...');
 			const canvasFiles = this.app.vault.getFiles().filter(f => f.extension === "canvas");
+			console.log('[Canvas Plugin] Found', canvasFiles.length, 'canvas files:', canvasFiles.map(f => f.path));
+
 			for (const canvasFile of canvasFiles) {
 				const canvasData = await loadCanvasData(this.app, canvasFile);
+				console.log('[Canvas Plugin] Canvas data for', canvasFile.path, ':', {
+					nodeCount: canvasData.nodes?.length ?? 0,
+					edgeCount: canvasData.edges?.length ?? 0,
+					nodes: canvasData.nodes?.map((n: any) => ({ id: n.id, type: n.type, file: n.file }))
+				});
 				const nodeIds = new Set(canvasData.nodes.map((n) => n.id));
 				this.canvasNodeCache.set(canvasFile.path, nodeIds);
 				console.log('[Canvas Plugin] Initialized cache for', canvasFile.path, 'with', nodeIds.size, 'nodes');
 			}
+			console.log('[Canvas Plugin] Cache initialization complete. Total cached canvases:', this.canvasNodeCache.size);
 		} catch (error) {
+			console.error('[Canvas Plugin] Failed to initialize canvas node cache:', error);
 			await this.logger?.error("Failed to initialize canvas node cache", error);
 		}
 	}
@@ -2310,6 +2245,11 @@ private registerCommands(): void {
 		
 		try {
 			const canvasData = await loadCanvasData(this.app, canvasFile);
+			console.log('[Canvas Plugin] Loaded canvas data:', {
+				nodeCount: canvasData.nodes?.length ?? 0,
+				nodes: canvasData.nodes?.map((n: any) => ({ id: n.id, type: n.type, file: n.file }))
+			});
+
 			const currentNodeIds = new Set(canvasData.nodes.map((n) => n.id));
 			const currentFileNodes = new Set(
 				canvasData.nodes
@@ -2317,8 +2257,12 @@ private registerCommands(): void {
 					.map((n) => n.file!)
 			);
 
+			console.log('[Canvas Plugin] Current node IDs:', Array.from(currentNodeIds));
+			console.log('[Canvas Plugin] Current file nodes:', Array.from(currentFileNodes));
+
 			// Get previously cached nodes
 			const cachedNodeIds = this.canvasNodeCache.get(canvasFile.path) || new Set();
+			console.log('[Canvas Plugin] Cached node IDs:', Array.from(cachedNodeIds));
 
 			// Find deleted nodes (only if cache was previously populated)
 			const deletedNodeIds = Array.from(cachedNodeIds).filter((id) => !currentNodeIds.has(id));
@@ -2326,6 +2270,14 @@ private registerCommands(): void {
 			if (deletedNodeIds.length > 0 && cachedNodeIds.size > 0) {
 				// Only check for deletions if cache was populated (not first load)
 				console.log('[Canvas Plugin] Detected', deletedNodeIds.length, 'deleted nodes');
+
+				// Clear any selection menu buttons that might be stale
+				this.clearInjectedMenuButtons();
+				// Also clear selection buttons for deleted nodes
+				for (const nodeId of deletedNodeIds) {
+					this.removeSelectionButton(nodeId);
+				}
+
 				// Check all plugin-created files for this canvas, not just deleted node IDs
 				// (since we don't know which files corresponded to which node IDs)
 				await this.checkAndDeletePluginFile(canvasFile, currentFileNodes);
@@ -2350,38 +2302,60 @@ private registerCommands(): void {
 		currentFileNodes: Set<string>
 	): Promise<void> {
 		try {
+			console.log('[Canvas Plugin] checkAndDeletePluginFile called');
+			console.log('[Canvas Plugin] Canvas file:', canvasFile.path);
+			console.log('[Canvas Plugin] Current file nodes in canvas:', Array.from(currentFileNodes));
+
 			// Get all markdown files in the vault
 			const allFiles = this.app.vault.getMarkdownFiles();
+			console.log('[Canvas Plugin] Total markdown files in vault:', allFiles.length);
 
 			for (const file of allFiles) {
 				const content = await this.app.vault.read(file);
 				const frontmatter = parseFrontmatter(content);
 
 				// Check if this file was created by our plugin
-				if (frontmatter && isPluginCreatedNote(frontmatter)) {
+				const isPluginFile = frontmatter && isPluginCreatedNote(frontmatter);
+				if (isPluginFile) {
+					console.log('[Canvas Plugin] Found plugin-created file:', file.path);
+					console.log('[Canvas Plugin] Frontmatter:', {
+						type: frontmatter.type,
+						id: frontmatter.id,
+						canvas_source: frontmatter.canvas_source,
+						created_by_plugin: frontmatter.created_by_plugin
+					});
+
 					// Check if file is referenced in canvas_source
 					const canvasSources = Array.isArray(frontmatter.canvas_source)
 						? frontmatter.canvas_source
 						: [frontmatter.canvas_source];
 
+					console.log('[Canvas Plugin] Canvas sources for file:', canvasSources);
+					console.log('[Canvas Plugin] Current canvas path:', canvasFile.path);
+
 					// If this note references the current canvas
 					if (canvasSources.includes(canvasFile.path)) {
 						// Check if the note is still in the canvas
 						const isInCanvas = currentFileNodes.has(file.path);
+						console.log('[Canvas Plugin] Is file still in canvas?', isInCanvas);
 
-					if (!isInCanvas) {
-						// File was removed from canvas, delete it
-						await this.app.vault.trash(file, true);
-						new Notice(`🗑️ Deleted: ${file.basename}`);
-						await this.logger?.info("Plugin-created file auto-deleted", {
-							file: file.path,
-							canvas: canvasFile.path,
-						});
-					}
+						if (!isInCanvas) {
+							// File was removed from canvas, delete it
+							console.log('[Canvas Plugin] Deleting file:', file.path);
+							await this.app.vault.trash(file, true);
+							new Notice(`🗑️ Deleted: ${file.basename}`);
+							await this.logger?.info("Plugin-created file auto-deleted", {
+								file: file.path,
+								canvas: canvasFile.path,
+							});
+						}
+					} else {
+						console.log('[Canvas Plugin] File does not reference this canvas');
 					}
 				}
 			}
 		} catch (error) {
+			console.error('[Canvas Plugin] Failed to check and delete plugin file:', error);
 			await this.logger?.error("Failed to check and delete plugin file", error);
 		}
 	}

@@ -36,25 +36,11 @@ export class ConvertNoteModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 
-		contentEl.createEl("h2", { text: "Convert to Structured Item" });
-		contentEl.createEl("p", { 
+		contentEl.createEl("h2", { text: "Convert to Accomplishment" });
+		contentEl.createEl("p", {
 			text: `Current note: ${this.currentTitle}`,
 			cls: "mod-muted"
 		});
-
-		// Type selection
-		new Setting(contentEl)
-			.setName("Type")
-			.setDesc("What type of item is this?")
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("task", "Task")
-					.addOption("accomplishment", "Accomplishment")
-					.setValue(this.result.type)
-					.onChange((value) => {
-						this.result.type = value as ItemType;
-					})
-			);
 
 		// Effort selection
 		new Setting(contentEl)
