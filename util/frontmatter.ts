@@ -1,6 +1,39 @@
 import { ItemFrontmatter, ItemStatus, ItemPriority } from "../types";
 
 /**
+ * Parse a YAML value that might be a JSON array
+ * e.g., '["ACC-001", "ACC-002"]' -> ["ACC-001", "ACC-002"]
+ */
+function parseYamlValue(value: string): string | string[] | boolean | number {
+	const trimmed = value.trim();
+
+	// Try to parse as JSON array
+	if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+		try {
+			const parsed = JSON.parse(trimmed);
+			if (Array.isArray(parsed)) {
+				return parsed;
+			}
+		} catch {
+			// Not valid JSON, return as string
+		}
+	}
+
+	return trimmed;
+}
+
+/**
+ * Serialize a value for YAML frontmatter
+ * Arrays are serialized as JSON: ["ACC-001", "ACC-002"]
+ */
+function serializeYamlValue(value: unknown): string {
+	if (Array.isArray(value)) {
+		return JSON.stringify(value);
+	}
+	return String(value);
+}
+
+/**
  * Parse frontmatter from a markdown file
  */
 export function parseFrontmatter(content: string): ItemFrontmatter | null {
@@ -20,7 +53,7 @@ export function parseFrontmatter(content: string): ItemFrontmatter | null {
 		const key = line.slice(0, colonIndex).trim();
 		const value = line.slice(colonIndex + 1).trim();
 
-		frontmatter[key] = value;
+		frontmatter[key] = parseYamlValue(value);
 	}
 
 	// Validate required fields
@@ -34,11 +67,21 @@ export function parseFrontmatter(content: string): ItemFrontmatter | null {
 	}
 
 	// Convert boolean strings to actual booleans
-	if (frontmatter.inProgress !== undefined) {
+	if (frontmatter.inProgress !== undefined && typeof frontmatter.inProgress === 'string') {
 		frontmatter.inProgress = frontmatter.inProgress === "true";
 	}
-	if (frontmatter.created_by_plugin !== undefined) {
+	if (frontmatter.created_by_plugin !== undefined && typeof frontmatter.created_by_plugin === 'string') {
 		frontmatter.created_by_plugin = frontmatter.created_by_plugin === "true";
+	}
+
+	// Ensure depends_on is always an array if present
+	if (frontmatter.depends_on !== undefined) {
+		if (typeof frontmatter.depends_on === 'string') {
+			// Single value or empty string
+			frontmatter.depends_on = frontmatter.depends_on ? [frontmatter.depends_on] : [];
+		} else if (!Array.isArray(frontmatter.depends_on)) {
+			frontmatter.depends_on = [];
+		}
 	}
 
 	return frontmatter as ItemFrontmatter;
@@ -113,7 +156,7 @@ export function updateFrontmatter(
 			const key = line.slice(0, colonIndex).trim();
 			const value = line.slice(colonIndex + 1).trim();
 
-			existingFrontmatter[key] = value;
+			existingFrontmatter[key] = parseYamlValue(value);
 		}
 
 		// Extract body
@@ -127,7 +170,15 @@ export function updateFrontmatter(
 	const newFrontmatterLines: string[] = ["---"];
 	for (const [key, value] of Object.entries(mergedFrontmatter)) {
 		if (value !== undefined && value !== null) {
-			newFrontmatterLines.push(`${key}: ${value}`);
+			// Handle arrays (like depends_on)
+			if (Array.isArray(value)) {
+				// Only include non-empty arrays
+				if (value.length > 0) {
+					newFrontmatterLines.push(`${key}: ${JSON.stringify(value)}`);
+				}
+			} else {
+				newFrontmatterLines.push(`${key}: ${value}`);
+			}
 		}
 	}
 	newFrontmatterLines.push("---");
@@ -191,6 +242,11 @@ export function serializeFrontmatter(frontmatter: ItemFrontmatter): string {
 	lines.push(`updated: ${frontmatter.updated}`);
 	lines.push(`canvas_source: ${frontmatter.canvas_source}`);
 	lines.push(`vault_path: ${frontmatter.vault_path}`);
+
+	// Include depends_on if present and non-empty
+	if (frontmatter.depends_on && frontmatter.depends_on.length > 0) {
+		lines.push(`depends_on: ${JSON.stringify(frontmatter.depends_on)}`);
+	}
 
 	if (frontmatter.notion_page_id) {
 		lines.push(`notion_page_id: ${frontmatter.notion_page_id}`);

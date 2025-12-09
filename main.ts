@@ -70,6 +70,8 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	private fileAccomplishmentIdCache: Map<string, string> = new Map();
 	// Bi-directional sync polling interval
 	private notionSyncIntervalId: ReturnType<typeof setInterval> | null = null;
+	// Debounce timer for edge sync (per canvas file)
+	private edgeSyncDebounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
 	private getCanvasNodeFromEventTarget(target: EventTarget | null): any {
 		if (!(target instanceof HTMLElement)) return null;
@@ -264,6 +266,15 @@ private registerCommands(): void {
 			await this.syncAllCanvasNotesToNotion();
 		},
 	});
+
+	// Command 5: Sync canvas edges to MD depends_on fields
+	this.addCommand({
+		id: "sync-edges-to-depends-on",
+		name: "Canvas Item: Sync Edges to Dependencies",
+		callback: async () => {
+			await this.syncEdgesToDependsOnCommand();
+		},
+	});
 }
 
 	/**
@@ -275,6 +286,35 @@ private registerCommands(): void {
 			return null;
 		}
 		return activeFile;
+	}
+
+	/**
+	 * Command handler: Sync all edges in current canvas to MD depends_on fields
+	 */
+	private async syncEdgesToDependsOnCommand(): Promise<void> {
+		const canvasFile = this.getActiveCanvasFile();
+		if (!canvasFile) {
+			new Notice("Please open a canvas file first");
+			return;
+		}
+
+		new Notice("Syncing edges to dependencies...");
+
+		try {
+			// Clear any pending debounce timer for this canvas
+			const existingTimer = this.edgeSyncDebounceTimers.get(canvasFile.path);
+			if (existingTimer) {
+				clearTimeout(existingTimer);
+				this.edgeSyncDebounceTimers.delete(canvasFile.path);
+			}
+
+			// Run sync immediately
+			await this.syncEdgesToMdFiles(canvasFile);
+			new Notice("✅ Edge sync complete");
+		} catch (error) {
+			new Notice("❌ Failed to sync edges: " + (error as Error).message);
+			await this.logger?.error("Failed to sync edges command", error);
+		}
 	}
 
 	/**
@@ -2194,8 +2234,184 @@ private registerCommands(): void {
 			// Update cache
 			this.canvasNodeCache.set(canvasFile.path, currentNodeIds);
 			console.log('[Canvas Plugin] Cache updated with', currentNodeIds.size, 'nodes');
+
+			// Trigger edge sync (debounced) to update depends_on in MD files
+			this.scheduleEdgeSync(canvasFile);
 		} catch (error) {
 			await this.logger?.error("Failed to handle canvas modification", error);
+		}
+	}
+
+	/**
+	 * Schedule edge sync for a canvas file (debounced)
+	 * This batches rapid edge changes into a single sync operation
+	 */
+	private scheduleEdgeSync(canvasFile: TFile): void {
+		// Clear existing timer for this canvas
+		const existingTimer = this.edgeSyncDebounceTimers.get(canvasFile.path);
+		if (existingTimer) {
+			clearTimeout(existingTimer);
+		}
+
+		// Set new timer (500ms debounce)
+		const timer = setTimeout(async () => {
+			this.edgeSyncDebounceTimers.delete(canvasFile.path);
+			await this.syncEdgesToMdFiles(canvasFile);
+		}, 500);
+
+		this.edgeSyncDebounceTimers.set(canvasFile.path, timer);
+	}
+
+	/**
+	 * Sync canvas edges to MD file depends_on fields
+	 * Reads all edges from canvas, computes dependencies for each node,
+	 * and updates the depends_on field in each affected MD file
+	 */
+	private async syncEdgesToMdFiles(canvasFile: TFile): Promise<void> {
+		console.log('[Canvas Plugin] ===== Syncing edges to MD files =====');
+		console.log('[Canvas Plugin] Canvas:', canvasFile.path);
+
+		try {
+			const canvasData = await loadCanvasData(this.app, canvasFile);
+
+			// Build map: nodeId -> node (for quick lookup)
+			const nodeMap = new Map<string, CanvasNode>();
+			for (const node of canvasData.nodes) {
+				nodeMap.set(node.id, node);
+			}
+
+			// Build map: targetFilePath -> [dependencyAccomplishmentIds]
+			const dependenciesByFile = new Map<string, string[]>();
+
+			// Also track all plugin files in this canvas (to clear deps for files with no incoming edges)
+			const allPluginFiles = new Set<string>();
+
+			for (const node of canvasData.nodes) {
+				if (node.type === 'file' && node.file && node.metadata?.plugin === 'canvas-structured-items') {
+					allPluginFiles.add(node.file);
+				}
+			}
+
+			// Process each edge
+			for (const edge of canvasData.edges || []) {
+				const fromNode = nodeMap.get(edge.fromNode);
+				const toNode = nodeMap.get(edge.toNode);
+
+				// Skip if either node doesn't exist
+				if (!fromNode || !toNode) {
+					continue;
+				}
+
+				// Skip if either node is not a plugin-created file node
+				if (fromNode.type !== 'file' || toNode.type !== 'file') {
+					continue;
+				}
+				if (!fromNode.file || !toNode.file) {
+					continue;
+				}
+				if (fromNode.metadata?.plugin !== 'canvas-structured-items' ||
+					toNode.metadata?.plugin !== 'canvas-structured-items') {
+					continue;
+				}
+
+				// Get the accomplishment ID of the dependency (fromNode)
+				const fromFile = this.app.vault.getAbstractFileByPath(fromNode.file);
+				if (!(fromFile instanceof TFile)) {
+					continue;
+				}
+
+				const fromContent = await this.app.vault.read(fromFile);
+				const fromFrontmatter = parseFrontmatter(fromContent);
+				if (!fromFrontmatter?.id) {
+					continue;
+				}
+
+				// Add to dependencies for the target file (toNode)
+				const deps = dependenciesByFile.get(toNode.file) || [];
+				if (!deps.includes(fromFrontmatter.id)) {
+					deps.push(fromFrontmatter.id);
+				}
+				dependenciesByFile.set(toNode.file, deps);
+			}
+
+			console.log('[Canvas Plugin] Dependencies by file:', Object.fromEntries(dependenciesByFile));
+			console.log('[Canvas Plugin] All plugin files:', Array.from(allPluginFiles));
+
+			// Update MD files
+			let updatedCount = 0;
+			let clearedCount = 0;
+
+			// Set flag to prevent cascading updates
+			this.isUpdatingCanvas = true;
+
+			try {
+				// Update files that have dependencies
+				for (const [filePath, depIds] of dependenciesByFile) {
+					const updated = await this.updateDependsOnInFile(filePath, depIds);
+					if (updated) updatedCount++;
+				}
+
+				// Clear depends_on for files that no longer have incoming edges
+				for (const filePath of allPluginFiles) {
+					if (!dependenciesByFile.has(filePath)) {
+						const cleared = await this.updateDependsOnInFile(filePath, []);
+						if (cleared) clearedCount++;
+					}
+				}
+			} finally {
+				// Reset flag after a delay to allow file system to settle
+				setTimeout(() => {
+					this.isUpdatingCanvas = false;
+				}, 500);
+			}
+
+			console.log('[Canvas Plugin] Edge sync complete:', { updatedCount, clearedCount });
+		} catch (error) {
+			console.error('[Canvas Plugin] Failed to sync edges to MD files:', error);
+			await this.logger?.error("Failed to sync edges to MD files", error);
+		}
+	}
+
+	/**
+	 * Update the depends_on field in a single MD file
+	 * Returns true if the file was actually modified
+	 */
+	private async updateDependsOnInFile(filePath: string, dependencyIds: string[]): Promise<boolean> {
+		const file = this.app.vault.getAbstractFileByPath(filePath);
+		if (!(file instanceof TFile)) {
+			return false;
+		}
+
+		try {
+			const content = await this.app.vault.read(file);
+			const frontmatter = parseFrontmatter(content);
+
+			if (!frontmatter || !isPluginCreatedNote(frontmatter)) {
+				return false;
+			}
+
+			// Check if depends_on actually changed
+			const currentDeps = frontmatter.depends_on || [];
+			const sortedCurrent = [...currentDeps].sort();
+			const sortedNew = [...dependencyIds].sort();
+
+			if (JSON.stringify(sortedCurrent) === JSON.stringify(sortedNew)) {
+				// No change needed
+				return false;
+			}
+
+			// Update the file
+			const updatedContent = updateFrontmatter(content, {
+				depends_on: dependencyIds,
+				updated: new Date().toISOString(),
+			});
+
+			await this.app.vault.modify(file, updatedContent);
+			console.log('[Canvas Plugin] Updated depends_on in', filePath, ':', dependencyIds);
+			return true;
+		} catch (error) {
+			console.error('[Canvas Plugin] Failed to update depends_on in', filePath, ':', error);
+			return false;
 		}
 	}
 
