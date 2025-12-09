@@ -64,6 +64,8 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	private lastPointerNodeSize: { id: string; width: number; height: number; ref: any; el: HTMLElement } | null = null;
 	private nodeSizeCache: WeakMap<HTMLElement, { w: number; h: number }> = new WeakMap();
 	private isResizing: boolean = false;
+	// Debounce timers for MD file sync to Notion
+	private mdSyncDebounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
 	private getCanvasNodeFromEventTarget(target: EventTarget | null): any {
 		if (!(target instanceof HTMLElement)) return null;
@@ -2086,6 +2088,7 @@ private registerCommands(): void {
 
 	/**
 	 * Handle MD file modifications to update canvas node colors (e.g., inProgress flag)
+	 * and optionally sync to Notion with debouncing
 	 */
 	private async handleMdFileModification(file: TFile): Promise<void> {
 		// Skip if we're currently updating the canvas ourselves
@@ -2144,6 +2147,34 @@ private registerCommands(): void {
 						this.isUpdatingCanvas = false;
 					}, 500);
 				}
+			}
+
+			// Debounced sync to Notion (if enabled)
+			if (this.settings.notionEnabled &&
+				this.settings.autoSyncOnMdChange &&
+				!this.settings.syncOnDemandOnly &&
+				this.notionClient) {
+
+				// Clear existing debounce timer for this file
+				const existingTimer = this.mdSyncDebounceTimers.get(file.path);
+				if (existingTimer) {
+					clearTimeout(existingTimer);
+				}
+
+				// Set new debounce timer (2 seconds)
+				const timer = setTimeout(async () => {
+					this.mdSyncDebounceTimers.delete(file.path);
+					try {
+						console.log('[Canvas Plugin] Auto-syncing to Notion:', file.path);
+						await this.notionClient!.syncNote(frontmatter);
+						console.log('[Canvas Plugin] Auto-sync complete:', file.path);
+					} catch (error) {
+						console.error('[Canvas Plugin] Auto-sync failed:', error);
+						// Don't show notice for auto-sync failures to avoid spam
+					}
+				}, 2000);
+
+				this.mdSyncDebounceTimers.set(file.path, timer);
 			}
 		} catch (error) {
 			await this.logger?.error("Failed to handle MD file modification", error);
