@@ -1192,9 +1192,12 @@ private registerCommands(): void {
 			let mode: "convert" | "open" | null = null;
 			if (nodeType === "text") {
 				mode = "convert";
-			} else if (nodeType === "file") {
-				// Only show open button for plugin-created notes
-				if (metadata?.plugin === "structured-canvas-notes") {
+			} else if (nodeType === "file" && nodeInFile.file) {
+				// Check if it's a plugin-created note by checking canvas metadata OR MD frontmatter
+				const hasPluginMetadata = metadata?.plugin === "structured-canvas-notes";
+				const isPluginFile = await this.isPluginCreatedFile(nodeInFile.file);
+
+				if (hasPluginMetadata || isPluginFile) {
 					mode = "open";
 				} else {
 					// Regular file node, don't show any buttons
@@ -1241,7 +1244,7 @@ private registerCommands(): void {
 					canvasNode
 				);
 				visibleMenu.appendChild(convertButton);
-			} else if (mode === "open" && metadata?.plugin === "structured-canvas-notes") {
+			} else if (mode === "open") {
 				// Use file path from canvas file (source of truth)
 				const openButton = this.buildMenuButton(
 					"canvas-structured-items-open-menu",
@@ -1338,11 +1341,12 @@ private registerCommands(): void {
 					const canvasData = await loadCanvasData(this.app, canvasFile);
 					const nodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === data.id);
 
-					// Only include plugin-created file nodes
-					if (nodeInFile?.type === "file" &&
-						nodeInFile?.metadata?.plugin === "structured-canvas-notes" &&
-						nodeInFile?.file) {
-						filePaths.push(nodeInFile.file);
+					// Only include plugin-created file nodes (check MD frontmatter)
+					if (nodeInFile?.type === "file" && nodeInFile?.file) {
+						const isPlugin = await this.isPluginCreatedFile(nodeInFile.file);
+						if (isPlugin) {
+							filePaths.push(nodeInFile.file);
+						}
 					}
 				} catch (err) {
 					console.error("[Canvas Plugin] Failed to read node from canvas file:", err);
@@ -1723,11 +1727,14 @@ private registerCommands(): void {
 				plugin: nodeInFile.metadata?.plugin,
 			});
 			
-			// Check if node is already converted (using data from file)
-			if (nodeInFile.type === "file" && nodeInFile.metadata?.plugin === "structured-canvas-notes") {
-				console.log('[Canvas Plugin] Node is already converted, skipping conversion');
-				new Notice("This note is already a structured item");
-				return;
+			// Check if node is already converted (check MD frontmatter)
+			if (nodeInFile.type === "file" && nodeInFile.file) {
+				const isPlugin = await this.isPluginCreatedFile(nodeInFile.file);
+				if (isPlugin) {
+					console.log('[Canvas Plugin] Node is already converted, skipping conversion');
+					new Notice("This note is already a structured item");
+					return;
+				}
 			}
 			
 			// Only allow conversion of text nodes
@@ -2265,6 +2272,23 @@ private registerCommands(): void {
 	}
 
 	/**
+	 * Check if a file is a plugin-created note by reading its frontmatter
+	 */
+	private async isPluginCreatedFile(filePath: string): Promise<boolean> {
+		const file = this.app.vault.getAbstractFileByPath(filePath);
+		if (!(file instanceof TFile)) {
+			return false;
+		}
+		try {
+			const content = await this.app.vault.read(file);
+			const frontmatter = parseFrontmatter(content);
+			return frontmatter !== null && isPluginCreatedNote(frontmatter);
+		} catch {
+			return false;
+		}
+	}
+
+	/**
 	 * Sync canvas edges to MD file depends_on fields
 	 * Reads all edges from canvas, computes dependencies for each node,
 	 * and updates the depends_on field in each affected MD file
@@ -2286,13 +2310,19 @@ private registerCommands(): void {
 			const dependenciesByFile = new Map<string, string[]>();
 
 			// Also track all plugin files in this canvas (to clear deps for files with no incoming edges)
+			// Check actual frontmatter instead of relying on canvas metadata
 			const allPluginFiles = new Set<string>();
 
 			for (const node of canvasData.nodes) {
-				if (node.type === 'file' && node.file && node.metadata?.plugin === 'canvas-structured-items') {
-					allPluginFiles.add(node.file);
+				if (node.type === 'file' && node.file) {
+					const isPlugin = await this.isPluginCreatedFile(node.file);
+					if (isPlugin) {
+						allPluginFiles.add(node.file);
+					}
 				}
 			}
+
+			console.log('[Canvas Plugin] Found plugin files:', Array.from(allPluginFiles));
 
 			// Process each edge
 			for (const edge of canvasData.edges || []) {
@@ -2304,15 +2334,16 @@ private registerCommands(): void {
 					continue;
 				}
 
-				// Skip if either node is not a plugin-created file node
+				// Skip if either node is not a file node
 				if (fromNode.type !== 'file' || toNode.type !== 'file') {
 					continue;
 				}
 				if (!fromNode.file || !toNode.file) {
 					continue;
 				}
-				if (fromNode.metadata?.plugin !== 'canvas-structured-items' ||
-					toNode.metadata?.plugin !== 'canvas-structured-items') {
+
+				// Skip if either file is not a plugin-created note
+				if (!allPluginFiles.has(fromNode.file) || !allPluginFiles.has(toNode.file)) {
 					continue;
 				}
 
