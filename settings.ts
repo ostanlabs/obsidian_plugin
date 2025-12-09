@@ -221,6 +221,19 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				});
 			});
 
+		new Setting(containerEl)
+			.setName("In Progress color")
+			.setDesc("Obsidian color index for nodes marked as 'In Progress' (1=red, 2=orange, 3=yellow, 4=green, 5=cyan, 6=purple)")
+			.addText((text) =>
+				text
+					.setPlaceholder("1")
+					.setValue(this.plugin.settings.inProgressColor)
+					.onChange(async (value) => {
+						this.plugin.settings.inProgressColor = value || "1";
+						await this.plugin.saveSettings();
+					})
+			);
+
 		// Notion Integration Section
 		containerEl.createEl("h2", { text: "Notion Integration" });
 
