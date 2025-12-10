@@ -1652,6 +1652,7 @@ private registerCommands(): void {
 				priority: this.normalizePriority(
 					existingFrontmatter.priority || (result.type === "accomplishment" ? "High" : "Medium")
 				),
+				depends_on: existingFrontmatter.depends_on || [],
 				created_by_plugin: existingFrontmatter.created_by_plugin ?? true,
 				created: existingFrontmatter.created || now,
 				updated: now,
@@ -1840,6 +1841,7 @@ private registerCommands(): void {
 					status: this.normalizeStatus("Not Started"),
 					priority: this.normalizePriority("High"),
 					inProgress: false,
+					depends_on: [],
 					created_by_plugin: true,
 					created: now,
 					updated: now,
