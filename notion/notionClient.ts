@@ -380,7 +380,9 @@ export class NotionClient {
 				checkbox: frontmatter.inProgress ?? false,
 			},
 			"Time Estimate": {
-				number: frontmatter.time_estimate ?? 0,
+				number: typeof frontmatter.time_estimate === 'number'
+					? frontmatter.time_estimate
+					: (parseInt(String(frontmatter.time_estimate), 10) || 0),
 			},
 			Created: {
 				date: frontmatter.created ? {

@@ -1244,12 +1244,16 @@ private registerCommands(): void {
 					canvasNode
 				);
 				visibleMenu.appendChild(convertButton);
-			} else if (mode === "open") {
-				// Use file path from canvas file (source of truth)
+			} else if (mode === "open" && nodeInFile.file) {
+				// Capture file path at button creation time (clicking button deselects node)
+				const filePath = nodeInFile.file;
 				const openButton = this.buildMenuButton(
 					"canvas-structured-items-open-menu",
 					"Open",
-					async () => this.openAllSelectedFileNodes(),
+					async () => {
+						console.log("[Canvas Plugin] Open button clicked, opening file:", filePath);
+						await this.openCanvasFileNode(filePath);
+					},
 					canvasNode
 				);
 				visibleMenu.appendChild(openButton);
@@ -1343,10 +1347,17 @@ private registerCommands(): void {
 
 					// Only include plugin-created file nodes (check MD frontmatter)
 					if (nodeInFile?.type === "file" && nodeInFile?.file) {
+						console.log("[Canvas Plugin] Checking if file is plugin-created:", nodeInFile.file);
 						const isPlugin = await this.isPluginCreatedFile(nodeInFile.file);
+						console.log("[Canvas Plugin] isPluginCreatedFile result:", isPlugin);
 						if (isPlugin) {
 							filePaths.push(nodeInFile.file);
 						}
+					} else {
+						console.log("[Canvas Plugin] Node not a file or no file path:", {
+							type: nodeInFile?.type,
+							file: nodeInFile?.file
+						});
 					}
 				} catch (err) {
 					console.error("[Canvas Plugin] Failed to read node from canvas file:", err);
@@ -2275,15 +2286,27 @@ private registerCommands(): void {
 	 * Check if a file is a plugin-created note by reading its frontmatter
 	 */
 	private async isPluginCreatedFile(filePath: string): Promise<boolean> {
+		console.log('[Canvas Plugin] isPluginCreatedFile checking:', filePath);
 		const file = this.app.vault.getAbstractFileByPath(filePath);
 		if (!(file instanceof TFile)) {
+			console.log('[Canvas Plugin] isPluginCreatedFile: not a TFile');
 			return false;
 		}
 		try {
 			const content = await this.app.vault.read(file);
 			const frontmatter = parseFrontmatter(content);
-			return frontmatter !== null && isPluginCreatedNote(frontmatter);
-		} catch {
+			const result = frontmatter !== null && isPluginCreatedNote(frontmatter);
+			console.log('[Canvas Plugin] isPluginCreatedFile result:', {
+				hasFrontmatter: frontmatter !== null,
+				frontmatterKeys: frontmatter ? Object.keys(frontmatter) : [],
+				type: frontmatter?.type,
+				id: frontmatter?.id,
+				canvas_source: frontmatter?.canvas_source,
+				result
+			});
+			return result;
+		} catch (err) {
+			console.log('[Canvas Plugin] isPluginCreatedFile error:', err);
 			return false;
 		}
 	}
