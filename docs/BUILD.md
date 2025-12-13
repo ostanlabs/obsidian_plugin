@@ -1,4 +1,4 @@
-# Canvas Structured Items Plugin - Setup & Build Guide
+# Canvas Accomplishments Plugin - Setup & Build Guide
 
 ## Overview
 
@@ -158,7 +158,7 @@ obsidian_plugin/
 1. **Open Obsidian**
 2. **Settings → Community Plugins**
 3. **Disable Safe Mode** (if enabled)
-4. **Installed Plugins → Canvas Structured Items**
+4. **Installed Plugins → Canvas Accomplishments**
 5. **Enable the plugin**
 6. **Configure in plugin settings**
 
@@ -273,7 +273,7 @@ make dist
 ls -la main.js manifest.json
 
 # Create release archive
-zip -r canvas-structured-items-v1.0.0.zip main.js manifest.json
+zip -r canvas-accomplishments-v1.0.0.zip main.js manifest.json
 ```
 
 ## Development Workflow
@@ -291,7 +291,7 @@ zip -r canvas-structured-items-v1.0.0.zip main.js manifest.json
 - **README.md**: User documentation
 - **DEVELOPMENT.md**: Developer guide
 - **make help**: Command reference
-- **Logs**: `.obsidian/plugins/canvas-structured-items/plugin.log`
+- **Logs**: `.obsidian/plugins/canvas-accomplishments/plugin.log`
 
 ## License
 

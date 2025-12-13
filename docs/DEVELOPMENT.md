@@ -1,4 +1,4 @@
-# Canvas Structured Items - Development Guide
+# Canvas Accomplishments - Development Guide
 
 ## Quick Start
 
@@ -241,7 +241,7 @@ const mockApp: any = {
 
 ### Enable Debug Mode
 
-1. Obsidian Settings → Community Plugins → Canvas Structured Items
+1. Obsidian Settings → Community Plugins → Canvas Accomplishments
 2. Enable "Show debug info" (if available)
 3. Open Developer Tools: Ctrl+Shift+I (Cmd+Opt+I on Mac)
 
@@ -249,10 +249,10 @@ const mockApp: any = {
 
 ```bash
 # In vault
-cat .obsidian/plugins/canvas-structured-items/plugin.log
+cat .obsidian/plugins/canvas-accomplishments/plugin.log
 
 # Or tail in real-time
-tail -f .obsidian/plugins/canvas-structured-items/plugin.log
+tail -f .obsidian/plugins/canvas-accomplishments/plugin.log
 ```
 
 ### Add Debug Logging
@@ -365,7 +365,7 @@ make lint-fix
 
 ## Getting Help
 
-- Check logs: `.obsidian/plugins/canvas-structured-items/plugin.log`
+- Check logs: `.obsidian/plugins/canvas-accomplishments/plugin.log`
 - Console errors: Ctrl+Shift+I → Console tab
 - Review test files for usage examples
 - Check GitHub issues
