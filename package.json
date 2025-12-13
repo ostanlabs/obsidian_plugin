@@ -1,7 +1,7 @@
 {
-  "name": "canvas-structured-items",
+  "name": "canvas-accomplishments",
   "version": "1.0.0",
-  "description": "Obsidian plugin for creating structured Task and Accomplishment items on Canvas with Notion sync",
+  "description": "Obsidian plugin for creating and managing structured accomplishment items on Canvas with Notion sync",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
@@ -17,10 +17,11 @@
     "plugin",
     "canvas",
     "notion",
-    "tasks",
+    "accomplishments",
+    "project-management",
     "workflow"
   ],
-  "author": "",
+  "author": "Ostan Labs",
   "license": "MIT",
   "devDependencies": {
     "@types/jest": "^29.5.12",

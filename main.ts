@@ -121,7 +121,7 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 		await this.loadSettings();
 
 		// Initialize logger
-		this.logger = new Logger(this.app, "canvas-structured-items");
+		this.logger = new Logger(this.app, "canvas-accomplishments");
 		await this.logger.info("Plugin loaded");
 
 		// Initialize Notion client
@@ -930,12 +930,12 @@ private registerCommands(): void {
 			}
 
 			// Avoid duplicates
-			if (nodeEl.querySelector(".canvas-structured-items-select-btn")) {
+			if (nodeEl.querySelector(".canvas-accomplishments-select-btn")) {
 				return null;
 			}
 
 			const btn = document.createElement("button");
-			btn.className = "canvas-structured-items-select-btn";
+			btn.className = "canvas-accomplishments-select-btn";
 			btn.textContent = "Convert";
 			btn.style.position = "absolute";
 			btn.style.right = "8px";
@@ -1121,7 +1121,7 @@ private registerCommands(): void {
 		menus.forEach((menu) => {
 			menu
 				.querySelectorAll(
-					".canvas-structured-items-select-menu, .canvas-structured-items-open-menu"
+					".canvas-accomplishments-select-menu, .canvas-accomplishments-open-menu"
 				)
 				.forEach((el) => el.remove());
 		});
@@ -1230,7 +1230,7 @@ private registerCommands(): void {
 			// Remove previous injected buttons to avoid stale callbacks or duplicates
 			visibleMenu
 				.querySelectorAll(
-					".canvas-structured-items-select-menu, .canvas-structured-items-open-menu"
+					".canvas-accomplishments-select-menu, .canvas-accomplishments-open-menu"
 				)
 				.forEach((el) => el.remove());
 
@@ -1238,7 +1238,7 @@ private registerCommands(): void {
 
 			if (mode === "convert") {
 				const convertButton = this.buildMenuButton(
-					"canvas-structured-items-select-menu",
+					"canvas-accomplishments-select-menu",
 					"Convert",
 					async () => this.convertCanvasNodeToStructuredItem(canvasNode),
 					canvasNode
@@ -1248,7 +1248,7 @@ private registerCommands(): void {
 				// Capture file path at button creation time (clicking button deselects node)
 				const filePath = nodeInFile.file;
 				const openButton = this.buildMenuButton(
-					"canvas-structured-items-open-menu",
+					"canvas-accomplishments-open-menu",
 					"Open",
 					async () => {
 						console.log("[Canvas Plugin] Open button clicked, opening file:", filePath);
@@ -1494,7 +1494,7 @@ private registerCommands(): void {
 			}
 
 			// Check if we already added our item to THIS menu
-			if (menuEl.querySelector('.canvas-structured-items-convert')) {
+			if (menuEl.querySelector('.canvas-accomplishments-convert')) {
 				console.log('[Canvas Plugin] Menu item already exists in this menu');
 				return;
 			}
@@ -1544,7 +1544,7 @@ private registerCommands(): void {
 
 			// Create our menu item matching Obsidian's style
 			const item = document.createElement('div');
-			item.className = itemClass + ' canvas-structured-items-convert';
+			item.className = itemClass + ' canvas-accomplishments-convert';
 			
 			// Copy styles from first existing item if available
 			if (existingItems.length > 0) {
