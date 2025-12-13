@@ -1,12 +1,11 @@
 {
-  "id": "canvas-structured-items",
-  "name": "Canvas Structured Items",
+  "id": "canvas-accomplishments",
+  "name": "Canvas Accomplishments",
   "version": "1.0.0",
   "minAppVersion": "1.4.0",
-  "description": "Create structured Task and Accomplishment items on Canvas from templates with automatic Notion sync",
-  "author": "",
-  "authorUrl": "",
-  "fundingUrl": "",
+  "description": "Create and manage structured accomplishment items on Canvas with templates, auto-generated IDs, effort tracking, and optional Notion sync",
+  "author": "Ostan Labs",
+  "authorUrl": "https://github.com/ostanlabs",
   "isDesktopOnly": false
 }
 
