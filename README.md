@@ -1,350 +1,181 @@
-# Canvas Structured Items Plugin for Obsidian
+# Canvas Accomplishments
 
-A powerful Obsidian plugin that enables structured task and accomplishment management directly within Canvas, with seamless Notion integration.
+A powerful Obsidian plugin that enables structured accomplishment management directly within Canvas, with optional Notion integration.
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
-![Obsidian](https://img.shields.io/badge/Obsidian-0.15.0+-purple.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
+## Overview
 
-## 🎯 Overview
+Canvas Accomplishments transforms Obsidian Canvas into a project management tool by allowing you to create and manage structured accomplishment notes with:
 
-Canvas Structured Items transforms Obsidian Canvas into a powerful project management tool by allowing you to create and manage structured notes (Tasks and Accomplishments) with:
-- **Rich metadata** (type, effort, status, priority)
-- **Auto-generated IDs** (T001, A001, etc.)
-- **Visual organization** (color-coded by effort)
+- **Rich metadata** (effort, status, priority, dependencies)
+- **Auto-generated IDs** (A001, A002, etc.)
+- **Visual organization** (color-coded by effort type)
 - **Notion sync** (optional bidirectional sync)
 - **Canvas-first workflow** (create, convert, manage directly in canvas)
 
-## ✨ Key Features
+## Features
 
-### 📝 Structured Note Creation
-- Create **Tasks** and **Accomplishments** with structured frontmatter
-- Auto-generated sequential IDs (T001, T002, A001, etc.)
+### Structured Note Creation
+- Create accomplishment notes with structured frontmatter
+- Auto-generated sequential IDs with configurable prefixes and padding
 - Template-based content generation
 - Automatic folder organization
 
-### 🎨 Canvas Integration
-- Create notes directly from canvas (Command Palette or hotkeys)
+### Canvas Integration
+- Create notes directly from canvas via Command Palette
 - Convert existing text nodes to structured items (right-click menu)
 - Color-coded cards based on effort level
-- Preserve connections and positioning
-- Smooth viewport preservation during conversions
+- Preserve connections and positioning during conversions
+- Track dependencies between accomplishments via canvas edges
 
-### 🔄 Notion Sync (Optional)
-- Create/update Notion database automatically
-- Bi-directional sync on note creation or on-demand
+### Notion Sync (Optional)
+- Automatically create/update Notion database
+- Bidirectional sync on note creation or on-demand
 - Track sync status in frontmatter
-- Configure per-project databases
 
-### 🛡️ Smart File Management
+### Smart File Management
 - Auto-delete notes when removed from canvas (plugin-created notes only)
 - Confirmation dialogs for safety
 - Snake_case filename generation with collision detection
-- Frontmatter merging for existing notes
 
-### 🎯 Effort Tracking
-- Configurable effort levels (Engineering, Design, Strategy, etc.)
-- Visual color coding on canvas
-- Default effort preferences
+## Installation
 
-## 📦 Installation
+### From Community Plugins (Recommended)
 
-### Prerequisites
-- Obsidian v0.15.0 or higher
-- Node.js v16+ (for development)
-- npm or yarn
+1. Open Obsidian Settings → Community Plugins
+2. Click "Browse" and search for "Canvas Accomplishments"
+3. Click "Install" then "Enable"
 
-### Quick Start
+### Using BRAT (Beta Testing)
 
-1. **Clone the repository**
+1. Install the [BRAT plugin](https://github.com/TfTHacker/obsidian42-brat)
+2. Open BRAT settings → "Add Beta Plugin"
+3. Enter: `ostanlabs/obsidian_plugin`
+4. Enable the plugin
+
+### Manual Installation (Development)
+
+1. Clone the repository:
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/ostanlabs/obsidian_plugin.git
    cd obsidian_plugin
    ```
 
-2. **Install dependencies**
+2. Install dependencies and build:
    ```bash
-   make install
+   npm install
+   npm run build
    ```
 
-3. **Build the plugin**
+3. Copy files to your vault:
    ```bash
-   make build
+   mkdir -p /path/to/vault/.obsidian/plugins/canvas-accomplishments
+   cp main.js manifest.json /path/to/vault/.obsidian/plugins/canvas-accomplishments/
    ```
 
-4. **Deploy to your vault**
-   ```bash
-   make deploy VAULT_PATH=/path/to/your/vault
-   ```
+4. Reload Obsidian and enable the plugin in Settings → Community Plugins
 
-5. **Enable in Obsidian**
-   - Open Obsidian Settings → Community Plugins
-   - Reload plugins
-   - Enable "Canvas Structured Items"
+## Usage
 
-### Alternative: Manual Installation
+### Creating Accomplishments
 
-1. Build the plugin: `npm run build`
-2. Copy `main.js`, `manifest.json`, `styles.css` to:
-   ```
-   <vault>/.obsidian/plugins/canvas-structured-items/
-   ```
-3. Reload Obsidian
-4. Enable the plugin
+1. Open a canvas file
+2. Press `Ctrl/Cmd+P` → "Canvas Item: New Item From Template"
+3. Enter title and select effort type
+4. The accomplishment note appears on canvas with all metadata
 
-## 🚀 Usage
+### Converting Text Nodes
 
-### Creating Structured Items
+1. Create a text node on canvas with your content
+2. Right-click the node → "Convert to Accomplishment"
+3. Select effort type
+4. Node converts to a file card with structured metadata
 
-#### Method 1: Command Palette (Recommended)
-1. Open a canvas
-2. Press `Ctrl/Cmd+P` → "Create Canvas Item"
-3. Select Type, Effort, enter Title
-4. Note appears on canvas with all metadata
+### Syncing Dependencies
 
-#### Method 2: Hotkeys (Set in Settings)
-- Assign custom hotkeys to "Create Canvas Item" command
-- Quick creation with keyboard shortcuts
+Canvas edges between accomplishment nodes are automatically synced to the `depends_on` frontmatter field. Use the command "Canvas Item: Sync Edges to Dependencies" to manually sync.
 
-### Converting Existing Notes
+## Configuration
 
-#### On Canvas (Right-click)
-1. Right-click a text node in canvas
-2. Select "Convert to Structured Item"
-3. Choose Type, Effort, Parent
-4. Node converts to file card with metadata
+Open Settings → Canvas Accomplishments:
 
-#### Open Note (Command Palette)
-1. Open any note
-2. Press `Ctrl/Cmd+P` → "Convert Note to Structured Item"
-3. Configure metadata
-4. Frontmatter added/merged
-
-### File Deletion Safety
-
-When you delete a node from canvas:
-1. Plugin detects if the note was created by this plugin
-2. Shows confirmation dialog
-3. Deletes the markdown file (if confirmed)
-4. Only affects plugin-created notes (safety check)
-
-## ⚙️ Configuration
-
-### Plugin Settings
-
-Navigate to Settings → Canvas Structured Items:
-
-#### File & Folder Settings
+### File & Folder Settings
 - **Notes Base Folder**: Where notes are created (default: `Projects`)
 - **Infer Folder from Canvas**: Auto-place notes in same folder as canvas
 
-#### ID Generation
-- **Task ID Prefix**: Prefix for task IDs (default: `T`)
-- **Accomplishment ID Prefix**: Prefix for accomplishment IDs (default: `A`)
-- **ID Zero Padding**: Number of digits (default: 3) → T001, T002...
+### ID Generation
+- **ID Prefix**: Prefix for IDs (default: `A`)
+- **ID Zero Padding**: Number of digits (default: 3) → A001, A002...
 
-#### Effort Levels
-- **Effort Options**: Comma-separated list (Engineering, Design, Strategy, etc.)
+### Effort Levels
+- **Effort Options**: Comma-separated list (Business, Infra, Engineering, Research)
 - **Default Effort**: Pre-selected effort in creation modal
 
-#### Templates
-- **Use Template Folder**: Enable to select from multiple templates
-- **Template Folder Path**: Folder containing template files
-- **Task Template Path**: Default task template
-- **Accomplishment Template Path**: Default accomplishment template
-
-#### Notion Integration
-- **Enable Notion Sync**: Toggle sync on/off
-- **Integration Token**: Your Notion API token
-- **Parent Page ID**: Notion page containing databases
-- **Database Name**: Name for auto-created database
-- **Sync on Create**: Auto-sync when creating notes
-- **Sync on Demand Only**: Manual sync only
-
-### Template Placeholders
-
-Templates support these placeholders:
-- `{{id}}`: Auto-generated ID (T001, A001)
-- `{{title}}`: Note title
-- `{{type}}`: Note type (task/accomplishment)
-- `{{effort}}`: Effort level
-- `{{date}}`: Current date
-- `{{time}}`: Current time
-- `{{parent}}`: Parent note/project
-
-## 🎨 Color Coding
-
-Canvas cards are automatically color-coded by effort:
+### Color Coding
 
 | Effort | Color |
 |--------|-------|
+| Business | Purple |
+| Infra | Orange |
 | Engineering | Blue |
-| Design | Purple |
-| Strategy | Green |
-| Research | Yellow |
-| Default | Red |
+| Research | Green |
 
-Configure effort options in settings to match your workflow.
+### Notion Integration (Optional)
 
-## 📊 Notion Integration
+1. Create a Notion integration at https://www.notion.so/my-integrations
+2. Copy the integration token
+3. Enable Notion sync in plugin settings
+4. Paste token and parent page ID
+5. Click "Initialize Notion Database"
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| Canvas Item: New Item From Template | Create new accomplishment on active canvas |
+| Canvas Item: Sync Current Note to Notion | Sync the current note to Notion |
+| Canvas Item: Sync All Notes in Current Canvas to Notion | Sync all accomplishments in canvas |
+| Canvas Item: Sync Edges to Dependencies | Sync canvas edges to depends_on fields |
+
+## Development
 
 ### Setup
 
-1. **Create Notion Integration**
-   - Visit https://www.notion.so/my-integrations
-   - Create new integration
-   - Copy "Internal Integration Token"
-
-2. **Configure Plugin**
-   - Paste token in settings
-   - Set Parent Page ID (from Notion page URL)
-   - Set Database Name
-
-3. **Connect Database to Page**
-   - In Notion, click "..." on your database
-   - "Connections" → Add your integration
-
-### Sync Behavior
-
-**Automatic (if enabled):**
-- New notes sync on creation
-- Updates tracked in frontmatter
-
-**Manual:**
-- Command Palette → "Sync Note to Notion"
-- Updates existing Notion pages if `notion_page_id` exists
-- Creates new pages if not synced yet
-
-### Database Schema
-
-The plugin auto-creates a Notion database with:
-- **Title**: Note title
-- **ID**: Unique identifier (T001, A001)
-- **Type**: Select (Task/Accomplishment)
-- **Status**: Select (Not Started, In Progress, Completed, Blocked)
-- **Effort**: Select (Engineering, Design, Strategy, etc.)
-- **Priority**: Select (Low, Medium, High, Critical)
-- **Parent**: Text (parent project/note)
-- **File Path**: Text (Obsidian file path)
-
-## 🧪 Development
-
-### Project Structure
-
-```
-obsidian_plugin/
-├── main.ts              # Plugin entry point
-├── types.ts             # TypeScript interfaces
-├── settings.ts          # Settings UI
-├── ui/                  # Modal components
-│   ├── ItemCreationModal.ts
-│   ├── ConvertNoteModal.ts
-│   └── DeleteConfirmModal.ts
-├── util/                # Utility functions
-│   ├── canvas.ts        # Canvas JSON manipulation
-│   ├── frontmatter.ts   # YAML frontmatter handling
-│   ├── idGenerator.ts   # ID generation
-│   ├── logger.ts        # Logging utility
-│   ├── template.ts      # Template processing
-│   └── fileNaming.ts    # Filename generation
-├── notion/              # Notion API integration
-│   └── notionClient.ts
-└── tests/               # Test suites
+```bash
+git clone https://github.com/ostanlabs/obsidian_plugin.git
+cd obsidian_plugin
+npm install
 ```
 
 ### Build Commands
 
 ```bash
-# Install dependencies
-make install
-
-# Development build (with watch)
-make dev
-
-# Production build
-make build
-
-# Run tests
-make test
-
-# Lint code
-make lint
-
-# Format code
-make format
-
-# Deploy to vault
-make deploy VAULT_PATH=/path/to/vault
-
-# Clean build artifacts
-make clean
+npm run build      # Production build
+npm run dev        # Development build with watch
+npm test           # Run tests
+npm run lint       # Lint code
 ```
 
-### Running Tests
+### Project Structure
 
-```bash
-# Run all tests
-npm test
-
-# Run with coverage
-npm run test:coverage
-
-# Watch mode
-npm run test:watch
+```
+├── main.ts              # Plugin entry point
+├── types.ts             # TypeScript interfaces
+├── settings.ts          # Settings UI
+├── ui/                  # Modal components
+├── util/                # Utility functions
+├── notion/              # Notion API integration
+└── tests/               # Test suites
 ```
 
-## 🐛 Troubleshooting
+## Contributing
 
-### Canvas nodes not movable
-- Ensure Obsidian is reloaded after plugin installation
-- Check console for errors (Ctrl/Cmd+Shift+I)
+Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-### Properties not showing
-- Verify frontmatter format in markdown file
-- Ensure Obsidian is version 0.15.0+
-
-### Notion sync failing
-- Check integration token validity
-- Verify database connection in Notion
-- Check parent page permissions
-
-### Notes not deleting
-- Only plugin-created notes auto-delete
-- Check `created_by_plugin: true` in frontmatter
-
-## 📚 Additional Documentation
-
-- [**GETTING_STARTED.md**](GETTING_STARTED.md): Quick start guide
-- [**DEVELOPMENT.md**](DEVELOPMENT.md): Developer setup and workflows
-- [**ARCHITECTURE.md**](ARCHITECTURE.md): Technical architecture details
-- [**NEW_FEATURES.md**](NEW_FEATURES.md): Recent feature additions
-- [**CANVAS_NODES.md**](CANVAS_NODES.md): Canvas node behavior details
-
-## 🤝 Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes with tests
-4. Run linters: `make lint`
-5. Submit a pull request
-
-## 📄 License
+## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
+## Support
 
-- Built for the Obsidian community
-- Uses [@notionhq/client](https://github.com/makenotion/notion-sdk-js)
-- Inspired by productivity workflows in engineering teams
-
-## 📮 Support
-
-- **Issues**: Report bugs via GitHub Issues
-- **Discussions**: Feature requests and questions
-- **Documentation**: All docs in this repository
-
----
-
-**Made with ❤️ for better project management in Obsidian**
+- **Issues**: Report bugs via [GitHub Issues](https://github.com/ostanlabs/obsidian_plugin/issues)
+- **Documentation**: See the [docs](docs/) folder for detailed guides

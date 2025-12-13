@@ -1,6 +1,6 @@
-# Getting Started with Canvas Structured Items
+# Getting Started with Canvas Accomplishments
 
-Welcome! This guide will help you build and start using the Canvas Structured Items plugin for Obsidian.
+Welcome! This guide will help you build and start using the Canvas Accomplishments plugin for Obsidian.
 
 ## Prerequisites
 
@@ -37,7 +37,7 @@ The script will:
 1. Open Obsidian
 2. Go to **Settings → Community Plugins**
 3. If needed, click **Turn off Safe Mode**
-4. Find **Canvas Structured Items** in the installed plugins list
+4. Find **Canvas Accomplishments** in the installed plugins list
 5. Click the toggle to **enable** it
 6. (Optional) Click the gear icon to configure settings
 
@@ -80,7 +80,7 @@ Open the newly created note to see:
 
 ### Customize Templates
 
-1. Go to **Settings → Canvas Structured Items → Templates**
+1. Go to **Settings → Canvas Accomplishments → Templates**
 2. Note the template paths (e.g., `Templates/canvas-task-template.md`)
 3. Open these files in your vault and customize them
 4. Your changes will be used for all future items
@@ -142,7 +142,7 @@ Want to sync your items to Notion? Here's how:
 
 ### 3. Configure Plugin
 
-1. In Obsidian: **Settings → Canvas Structured Items**
+1. In Obsidian: **Settings → Canvas Accomplishments**
 2. Scroll to **Notion Integration** section
 3. Toggle **"Enable Notion sync"** to ON
 4. Paste your **Integration Token**
@@ -196,7 +196,7 @@ Suggested shortcuts:
 
 Add your own categories:
 
-1. **Settings → Canvas Structured Items → Effort Avenues**
+1. **Settings → Canvas Accomplishments → Effort Avenues**
 2. Edit the list (one per line):
    ```
    Business
@@ -211,13 +211,13 @@ Add your own categories:
 
 Prefer different IDs?
 
-1. **Settings → Canvas Structured Items → ID Generation**
+1. **Settings → Canvas Accomplishments → ID Generation**
 2. Change prefixes: `T` → `TASK`, `A` → `GOAL`
 3. Change padding: `3` → `4` (for `0001` instead of `001`)
 
 ### 3. Auto-Create Notes in Canvas Folder
 
-1. **Settings → Canvas Structured Items → General**
+1. **Settings → Canvas Accomplishments → General**
 2. Enable **"Infer base folder from canvas location"**
 
 Now notes are created in the same folder as your canvas!
@@ -228,7 +228,7 @@ Having issues? Check the logs:
 
 ```bash
 # In your vault
-cat .obsidian/plugins/canvas-structured-items/plugin.log
+cat .obsidian/plugins/canvas-accomplishments/plugin.log
 ```
 
 Or in Obsidian:
@@ -289,7 +289,7 @@ After installation, here's where things are:
 your-vault/
 ├── .obsidian/
 │   └── plugins/
-│       └── canvas-structured-items/
+│       └── canvas-accomplishments/
 │           ├── main.js              # Built plugin
 │           ├── manifest.json        # Plugin info
 │           └── plugin.log           # Logs
@@ -310,7 +310,7 @@ your-vault/
 
 ## Get Help
 
-- Check **logs**: `.obsidian/plugins/canvas-structured-items/plugin.log`
+- Check **logs**: `.obsidian/plugins/canvas-accomplishments/plugin.log`
 - Open **console**: `Ctrl+Shift+I` → Console tab
 - Review **README.md** for detailed documentation
 - Create an issue on GitHub (if available)
@@ -325,5 +325,5 @@ Now that you're set up, try:
 4. **Set up Notion sync** to track items in a dashboard
 5. **Explore settings** to configure the plugin to your liking
 
-Enjoy using Canvas Structured Items! 🚀
+Enjoy using Canvas Accomplishments! 🚀
 

@@ -1,4 +1,4 @@
-# Canvas Structured Items - Architecture
+# Canvas Accomplishments - Architecture
 
 ## System Architecture
 
@@ -11,7 +11,7 @@
                             │ Read/Write JSON
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                   Canvas Structured Items Plugin                 │
+│                   Canvas Accomplishments Plugin                  │
 │                                                                   │
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │                     Main Plugin (main.ts)                 │   │

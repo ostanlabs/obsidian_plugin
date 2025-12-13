@@ -1,4 +1,4 @@
-# Contributing to Canvas Structured Items
+# Contributing to Canvas Accomplishments
 
 Thank you for your interest in contributing! This document provides guidelines and instructions for contributing to the project.
 
@@ -318,5 +318,5 @@ Contributors will be:
 
 ---
 
-Thank you for contributing to Canvas Structured Items! 🎉
+Thank you for contributing to Canvas Accomplishments! 🎉
 
