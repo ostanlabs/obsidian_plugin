@@ -3,7 +3,7 @@
   "name": "Canvas Accomplishments",
   "version": "1.0.0",
   "minAppVersion": "1.4.0",
-  "description": "Create and manage structured accomplishment items on Canvas with templates, auto-generated IDs, effort tracking, and optional Notion sync",
+  "description": "Create and manage structured accomplishment items on Canvas with templates, auto-generated IDs, effort tracking, and optional Notion sync.",
   "author": "Ostan Labs",
   "authorUrl": "https://github.com/ostanlabs",
   "isDesktopOnly": false
