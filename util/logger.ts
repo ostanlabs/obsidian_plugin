@@ -1,5 +1,4 @@
 import { App } from "obsidian";
-import { join } from "path";
 
 /**
  * Logger utility for the plugin
@@ -18,7 +17,7 @@ export class Logger {
 		this.logFilePath = `.obsidian/plugins/${pluginName}/${logFileName}`;
 	}
 
-	private formatMessage(level: string, message: string, data?: any): string {
+	private formatMessage(level: string, message: string, data?: unknown): string {
 		const timestamp = new Date().toISOString();
 		let formatted = `[${timestamp}] [${level}] ${message}`;
 
@@ -61,25 +60,25 @@ export class Logger {
 		}
 	}
 
-	async info(message: string, data?: any): Promise<void> {
+	async info(message: string, data?: unknown): Promise<void> {
 		const formatted = this.formatMessage("INFO", message, data);
-		console.info(formatted);
+		console.debug(formatted);
 		await this.writeToFile(formatted);
 	}
 
-	async warn(message: string, data?: any): Promise<void> {
+	async warn(message: string, data?: unknown): Promise<void> {
 		const formatted = this.formatMessage("WARN", message, data);
 		console.warn(formatted);
 		await this.writeToFile(formatted);
 	}
 
-	async error(message: string, data?: any): Promise<void> {
+	async error(message: string, data?: unknown): Promise<void> {
 		const formatted = this.formatMessage("ERROR", message, data);
 		console.error(formatted);
 		await this.writeToFile(formatted);
 	}
 
-	async debug(message: string, data?: any): Promise<void> {
+	async debug(message: string, data?: unknown): Promise<void> {
 		const formatted = this.formatMessage("DEBUG", message, data);
 		console.debug(formatted);
 		await this.writeToFile(formatted);

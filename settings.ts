@@ -15,7 +15,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		// General Section
-		containerEl.createEl("h2", { text: "General Settings" });
+		new Setting(containerEl).setName("General settings").setHeading();
 
 		new Setting(containerEl)
 			.setName("Notes base folder")
@@ -45,7 +45,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			);
 
 		// Templates Section
-		containerEl.createEl("h2", { text: "Templates" });
+		new Setting(containerEl).setName("Templates").setHeading();
 
 		new Setting(containerEl)
 			.setName("Accomplishment template path")
@@ -101,7 +101,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			);
 
 		// IDs Section
-		containerEl.createEl("h2", { text: "ID Generation" });
+		new Setting(containerEl).setName("ID generation").setHeading();
 
 		new Setting(containerEl)
 			.setName("Accomplishment ID prefix")
@@ -133,7 +133,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			);
 
 		// Effort Avenues Section
-		containerEl.createEl("h2", { text: "Effort Avenues" });
+		new Setting(containerEl).setName("Effort avenues").setHeading();
 
 		new Setting(containerEl)
 			.setName("Effort options")
@@ -166,7 +166,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			});
 
 		// Canvas Display Section
-		containerEl.createEl("h2", { text: "Canvas Display" });
+		new Setting(containerEl).setName("Canvas display").setHeading();
 
 		new Setting(containerEl)
 			.setName("Show ID on cards")
@@ -235,7 +235,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			);
 
 		// Notion Integration Section
-		containerEl.createEl("h2", { text: "Notion Integration" });
+		new Setting(containerEl).setName("Notion integration").setHeading();
 
 		new Setting(containerEl)
 			.setName("Enable Notion sync")

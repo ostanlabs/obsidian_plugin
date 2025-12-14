@@ -1,7 +1,45 @@
 import { Client } from "@notionhq/client";
-import { Notice, requestUrl, RequestUrlParam } from "obsidian";
+import { requestUrl, RequestUrlParam } from "obsidian";
 import { CanvasItemFromTemplateSettings, ItemFrontmatter } from "../types";
 import { Logger } from "../util/logger";
+
+/**
+ * Notion property value types
+ */
+type NotionPropertyValue =
+	| { title: Array<{ text: { content: string } }> }
+	| { select: { name: string } | null }
+	| { rich_text: Array<{ text: { content: string } }> }
+	| { checkbox: boolean }
+	| { number: number }
+	| { date: { start: string } | null }
+	| { relation: Array<{ id: string }> };
+
+/**
+ * Notion properties object
+ */
+type NotionProperties = Record<string, NotionPropertyValue>;
+
+/**
+ * Notion page result from API
+ */
+interface NotionPageResult {
+	id: string;
+	object: "page";
+	properties: Record<string, unknown>;
+	last_edited_time?: string;
+	created_time?: string;
+}
+
+/**
+ * Notion block result from API
+ */
+interface NotionBlockResult {
+	id: string;
+	object: "block";
+	type: string;
+	[key: string]: unknown;
+}
 
 /**
  * Custom fetch implementation using Obsidian's requestUrl to bypass CORS
@@ -27,15 +65,15 @@ function obsidianFetch(url: string, init?: RequestInit): Promise<Response> {
 			statusText: String(response.status),
 			headers: new Headers(response.headers),
 			url,
-			json: async () => response.json,
-			text: async () => response.text,
-			blob: async () => new Blob([response.arrayBuffer]),
-			arrayBuffer: async () => response.arrayBuffer,
-			bytes: async () => new Uint8Array(response.arrayBuffer),
+			json: () => Promise.resolve(response.json),
+			text: () => Promise.resolve(response.text),
+			blob: () => Promise.resolve(new Blob([response.arrayBuffer])),
+			arrayBuffer: () => Promise.resolve(response.arrayBuffer),
+			bytes: () => Promise.resolve(new Uint8Array(response.arrayBuffer)),
 			clone: () => { throw new Error("clone not implemented"); },
 			body: null,
 			bodyUsed: false,
-			formData: async () => { throw new Error("formData not implemented"); },
+			formData: () => Promise.reject(new Error("formData not implemented")),
 			redirected: false,
 			type: "basic" as ResponseType,
 		} as unknown as Response;
@@ -318,8 +356,8 @@ export class NotionClient {
 	/**
 	 * Build Notion properties from frontmatter
 	 */
-	private buildProperties(frontmatter: ItemFrontmatter): any {
-		const properties: any = {
+	private buildProperties(frontmatter: ItemFrontmatter): NotionProperties {
+		const properties: NotionProperties = {
 			Name: {
 				title: [
 					{
@@ -408,7 +446,7 @@ export class NotionClient {
 	 * Build Notion properties with dependency relations
 	 * This is used when we have the page IDs for dependencies
 	 */
-	buildPropertiesWithRelations(frontmatter: ItemFrontmatter, dependencyPageIds: string[]): any {
+	buildPropertiesWithRelations(frontmatter: ItemFrontmatter, dependencyPageIds: string[]): NotionProperties {
 		const properties = this.buildProperties(frontmatter);
 
 		if (dependencyPageIds.length > 0) {
@@ -529,7 +567,7 @@ export class NotionClient {
 	 * Query all pages in the database
 	 * Used for bi-directional sync and finding pages by accomplishment ID
 	 */
-	async queryAllPages(): Promise<any[]> {
+	async queryAllPages(): Promise<NotionPageResult[]> {
 		if (!this.client) {
 			throw new Error("Notion client not initialized");
 		}
@@ -539,7 +577,7 @@ export class NotionClient {
 		}
 
 		try {
-			const pages: any[] = [];
+			const pages: NotionPageResult[] = [];
 			let hasMore = true;
 			let startCursor: string | undefined;
 
@@ -550,7 +588,7 @@ export class NotionClient {
 					page_size: 100,
 				});
 
-				pages.push(...response.results);
+				pages.push(...(response.results as NotionPageResult[]));
 				hasMore = response.has_more;
 				startCursor = response.next_cursor ?? undefined;
 			}
@@ -566,7 +604,7 @@ export class NotionClient {
 	/**
 	 * Find a page by accomplishment ID
 	 */
-	async findPageByAccomplishmentId(accomplishmentId: string): Promise<any | null> {
+	async findPageByAccomplishmentId(accomplishmentId: string): Promise<NotionPageResult | null> {
 		if (!this.client) {
 			throw new Error("Notion client not initialized");
 		}
@@ -587,7 +625,7 @@ export class NotionClient {
 			});
 
 			if (response.results.length > 0) {
-				return response.results[0];
+				return response.results[0] as NotionPageResult;
 			}
 			return null;
 		} catch (error) {
@@ -622,7 +660,7 @@ export class NotionClient {
 	/**
 	 * Get a page by ID with all properties
 	 */
-	async getPage(pageId: string): Promise<any> {
+	async getPage(pageId: string): Promise<NotionPageResult> {
 		if (!this.client) {
 			throw new Error("Notion client not initialized");
 		}
@@ -631,7 +669,7 @@ export class NotionClient {
 			const page = await this.client.pages.retrieve({
 				page_id: pageId,
 			});
-			return page;
+			return page as NotionPageResult;
 		} catch (error) {
 			this.logger.error("Failed to get page", error);
 			throw error;
@@ -641,13 +679,13 @@ export class NotionClient {
 	/**
 	 * Get page content (blocks)
 	 */
-	async getPageContent(pageId: string): Promise<any[]> {
+	async getPageContent(pageId: string): Promise<NotionBlockResult[]> {
 		if (!this.client) {
 			throw new Error("Notion client not initialized");
 		}
 
 		try {
-			const blocks: any[] = [];
+			const blocks: NotionBlockResult[] = [];
 			let hasMore = true;
 			let startCursor: string | undefined;
 
@@ -658,7 +696,7 @@ export class NotionClient {
 					page_size: 100,
 				});
 
-				blocks.push(...response.results);
+				blocks.push(...(response.results as NotionBlockResult[]));
 				hasMore = response.has_more;
 				startCursor = response.next_cursor ?? undefined;
 			}
@@ -672,8 +710,9 @@ export class NotionClient {
 
 	/**
 	 * Update page content (replace all blocks)
+	 * @param blocks - Array of block objects to append (using unknown to allow Notion SDK's BlockObjectRequest)
 	 */
-	async updatePageContent(pageId: string, blocks: any[]): Promise<void> {
+	async updatePageContent(pageId: string, blocks: unknown[]): Promise<void> {
 		if (!this.client) {
 			throw new Error("Notion client not initialized");
 		}
@@ -689,9 +728,10 @@ export class NotionClient {
 
 			// Then, add new blocks
 			if (blocks.length > 0) {
+				// Cast to expected type - blocks come from markdownToNotionBlocks which creates valid block objects
 				await this.client.blocks.children.append({
 					block_id: pageId,
-					children: blocks,
+					children: blocks as Parameters<typeof this.client.blocks.children.append>[0]["children"],
 				});
 			}
 

@@ -1,4 +1,5 @@
-import { App, TFile, normalizePath } from "obsidian";
+import { App, normalizePath } from "obsidian";
+import { ItemFrontmatter } from "../types";
 
 /**
  * Convert a string to snake_case
@@ -35,12 +36,12 @@ export function sanitizeFilename(filename: string): string {
  * @param extension File extension (e.g., "md")
  * @returns Vault-relative path to unique filename
  */
-export async function generateUniqueFilename(
+export function generateUniqueFilename(
 	app: App,
 	folderPath: string,
 	baseName: string,
 	extension: string
-): Promise<string> {
+): string {
 	// Sanitize the base name to remove invalid characters
 	const sanitizedBaseName = sanitizeFilename(baseName);
 
@@ -60,13 +61,13 @@ export async function generateUniqueFilename(
 /**
  * Check if a note was created by our plugin
  */
-export function isPluginCreatedNote(frontmatter: any): boolean {
+export function isPluginCreatedNote(frontmatter: Partial<ItemFrontmatter> | undefined): boolean {
 	return !!(
 		frontmatter &&
 		frontmatter.type &&
 		frontmatter.id &&
 		frontmatter.canvas_source &&
-		(frontmatter.type === "task" || frontmatter.type === "accomplishment")
+		(frontmatter.type === "accomplishment")
 	);
 }
 

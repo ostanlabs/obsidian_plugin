@@ -1,4 +1,4 @@
-import { App, Plugin, TFile, Notice, normalizePath, TFolder, Menu, MenuItem } from "obsidian";
+import { Plugin, TFile, Notice, normalizePath, Menu, MenuItem } from "obsidian";
 import {
 	CanvasItemFromTemplateSettings,
 	DEFAULT_SETTINGS,
@@ -6,6 +6,13 @@ import {
 	ItemType,
 	ItemStatus,
 	ItemPriority,
+	InternalCanvasNode,
+	InternalCanvas,
+	CanvasNodeResult,
+	NotionBlock,
+	NotionRichText,
+	NotionPage,
+	CanvasEdge,
 } from "./types";
 import { CanvasStructuredItemsSettingTab } from "./settings";
 import { StructuredItemModal, StructuredItemResult, StructuredItemModalOptions } from "./ui/StructuredItemModal";
@@ -58,10 +65,10 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	// Track selection overlay buttons
 	private selectionButtons: Map<string, HTMLElement> = new Map();
 	// Track last selected text node for menu injection
-	private lastSelectedMenuNode: any = null;
+	private lastSelectedMenuNode: InternalCanvasNode | null = null;
 	private selectionMenuIntervalId: number | null = null;
 	// Track node size for resize detection
-	private lastPointerNodeSize: { id: string; width: number; height: number; ref: any; el: HTMLElement } | null = null;
+	private lastPointerNodeSize: { id: string; width: number; height: number; ref: InternalCanvasNode; el: HTMLElement } | null = null;
 	private nodeSizeCache: WeakMap<HTMLElement, { w: number; h: number }> = new WeakMap();
 	private isResizing: boolean = false;
 	// Debounce timers for MD file sync to Notion
@@ -73,7 +80,7 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	// Debounce timer for edge sync (per canvas file)
 	private edgeSyncDebounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
-	private getCanvasNodeFromEventTarget(target: EventTarget | null): any {
+	private getCanvasNodeFromEventTarget(target: EventTarget | null): CanvasNodeResult | null {
 		if (!(target instanceof HTMLElement)) return null;
 		const selectors = [".canvas-node", ".canvas-card"];
 		for (const sel of selectors) {
@@ -102,7 +109,7 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 					if (!prev || prev.w !== w || prev.h !== h) {
 						this.nodeSizeCache.set(el, { w, h });
 						this.isResizing = true;
-						console.log("[Canvas Plugin] isResizing -> true (observer size change)");
+						console.debug("[Canvas Plugin] isResizing -> true (observer size change)");
 					}
 				}
 			}
@@ -140,7 +147,7 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	this.registerEvent(
 		this.app.workspace.on("file-menu", (menu, file) => {
 			if (file instanceof TFile && file.extension === "canvas") {
-				console.log("[Canvas Plugin] Canvas context menu opened (right-click on canvas file)", {
+				console.debug("[Canvas Plugin] Canvas context menu opened (right-click on canvas file)", {
 					canvasPath: file.path,
 				});
 				this.addCanvasContextMenu(menu, file);
@@ -196,7 +203,7 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 
 		// Initialize cache after layout is ready (vault files are indexed)
 		this.app.workspace.onLayoutReady(async () => {
-			console.log('[Canvas Plugin] Layout ready, initializing caches...');
+			console.debug('[Canvas Plugin] Layout ready, initializing caches...');
 			await this.initializeCanvasNodeCache();
 			await this.initializeFileAccomplishmentIdCache();
 			// Start bi-directional sync polling if enabled
@@ -209,7 +216,7 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	onunload() {
 		// Stop bi-directional sync polling
 		this.stopNotionSyncPolling();
-		this.logger?.info("Plugin unloaded");
+		void this.logger?.info("Plugin unloaded");
 	}
 
 	async loadSettings() {
@@ -400,7 +407,7 @@ private registerCommands(): void {
 		options?: { alias?: string },
 		inProgress?: boolean
 	): Promise<void> {
-		console.log('[Canvas Plugin] updateCanvas called:', {
+		console.debug('[Canvas Plugin] updateCanvas called:', {
 			canvasPath: canvasFile.path,
 			notePath,
 			existingNodeId,
@@ -411,18 +418,18 @@ private registerCommands(): void {
 	const color = this.resolveNodeColor(effort, inProgress);
 	const metadata = this.buildCanvasMetadata(type, title, effort, options, color);
 
-	console.log('[Canvas Plugin] ===== START updateCanvas =====');
-	console.log('[Canvas Plugin] Canvas file:', canvasFile.path);
-	console.log('[Canvas Plugin] Note path:', notePath);
-	console.log('[Canvas Plugin] Existing node ID:', existingNodeId);
-	console.log('[Canvas Plugin] Metadata:', metadata);
+	console.debug('[Canvas Plugin] ===== START updateCanvas =====');
+	console.debug('[Canvas Plugin] Canvas file:', canvasFile.path);
+	console.debug('[Canvas Plugin] Note path:', notePath);
+	console.debug('[Canvas Plugin] Existing node ID:', existingNodeId);
+	console.debug('[Canvas Plugin] Metadata:', metadata);
 
 	// Set flag to prevent deletion detection during our update
 	this.isUpdatingCanvas = true;
-	console.log('[Canvas Plugin] isUpdatingCanvas set to true');
+	console.debug('[Canvas Plugin] isUpdatingCanvas set to true');
 
 	// Always use file-based approach (same as conversion flow) to ensure metadata is set
-	console.log('[Canvas Plugin] Using file-based approach (write + reload)');
+	console.debug('[Canvas Plugin] Using file-based approach (write + reload)');
 
 	// Load canvas data
 	const canvasData = await loadCanvasData(this.app, canvasFile);
@@ -437,12 +444,12 @@ private registerCommands(): void {
 				existingNode.color = color;
 			}
 			existingNode.metadata = metadata;
-			console.log('[Canvas Plugin] Updated existing node:', existingNode.id);
+			console.debug('[Canvas Plugin] Updated existing node:', existingNode.id);
 		}
 	} else {
 		// Create new node at center
 		const center = getCanvasCenter(this.app, canvasFile);
-		console.log('[Canvas Plugin] Center position:', center);
+		console.debug('[Canvas Plugin] Center position:', center);
 
 		// Ensure valid coordinates
 		if (center.x === null || center.y === null || isNaN(center.x) || isNaN(center.y)) {
@@ -469,24 +476,24 @@ private registerCommands(): void {
 		}
 
 		canvasData.nodes.push(newNode);
-		console.log('[Canvas Plugin] Added new node:', newNode);
+		console.debug('[Canvas Plugin] Added new node:', newNode);
 	}
 
 	// Save the canvas file
-	console.log('[Canvas Plugin] Saving canvas file...');
+	console.debug('[Canvas Plugin] Saving canvas file...');
 	await saveCanvasData(this.app, canvasFile, canvasData);
-	console.log('[Canvas Plugin] Canvas file saved successfully');
+	console.debug('[Canvas Plugin] Canvas file saved successfully');
 
 	// Don't reload - let Obsidian detect the change and refresh automatically
-	console.log('[Canvas Plugin] Letting Obsidian auto-detect canvas file change');
+	console.debug('[Canvas Plugin] Letting Obsidian auto-detect canvas file change');
 
 	// Keep the flag true for a bit to prevent deletion detection during auto-refresh
 	setTimeout(() => {
 		this.isUpdatingCanvas = false;
-		console.log('[Canvas Plugin] isUpdatingCanvas set to false (delayed)');
+		console.debug('[Canvas Plugin] isUpdatingCanvas set to false (delayed)');
 	}, 500);
 
-	console.log('[Canvas Plugin] ===== END updateCanvas =====');
+	console.debug('[Canvas Plugin] ===== END updateCanvas =====');
 	new Notice(`✅ Item created and added to canvas!`, 4000);
 }
 
@@ -830,7 +837,7 @@ private registerCommands(): void {
 	 * Add a selection overlay button to convert text nodes without right-click
 	 */
 	private setupCanvasSelectionButton(): void {
-		console.log("[Canvas Plugin] Setting up selection watcher");
+		console.debug("[Canvas Plugin] Setting up selection watcher");
 		// Periodically check selection to keep buttons in sync
 		const interval = window.setInterval(() => this.syncSelectionButtons(), 400);
 		this.registerInterval(interval);
@@ -849,7 +856,8 @@ private registerCommands(): void {
 
 		for (const nodeEl of selectedNodes) {
 			const canvasNode = this.findCanvasNodeByElement(nodeEl);
-			const data = canvasNode?.getData?.();
+			if (!canvasNode) continue;
+			const data = canvasNode.getData?.();
 			const nodeId = data?.id;
 			if (!nodeId) continue;
 			seenIds.add(nodeId);
@@ -899,7 +907,7 @@ private registerCommands(): void {
 		}
 	}
 
-	private async createSelectionButton(nodeEl: HTMLElement, canvasNode: any): Promise<HTMLElement | null> {
+	private async createSelectionButton(nodeEl: HTMLElement, canvasNode: InternalCanvasNode): Promise<HTMLElement | null> {
 		try {
 			// Get node ID from getData() to locate node in file
 			const data = canvasNode?.getData?.();
@@ -912,10 +920,10 @@ private registerCommands(): void {
 
 			let nodeInFile: CanvasNode | undefined;
 			try {
-				const canvasFile = canvasNode.canvas.view.file;
+				const canvasFile = canvasNode.canvas.view.file as TFile;
 				const canvasData = await loadCanvasData(this.app, canvasFile);
 				nodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === data.id);
-				
+
 				if (!nodeInFile) {
 					return null;
 				}
@@ -937,28 +945,15 @@ private registerCommands(): void {
 			const btn = document.createElement("button");
 			btn.className = "canvas-accomplishments-select-btn";
 			btn.textContent = "Convert";
-			btn.style.position = "absolute";
-			btn.style.right = "8px";
-			btn.style.bottom = "8px";
-			btn.style.padding = "6px 10px";
-			btn.style.borderRadius = "6px";
-			btn.style.border = "1px solid var(--background-modifier-border)";
-			btn.style.background = "var(--background-secondary, #f2f3f5)";
-			btn.style.color = "var(--text-normal)";
-			btn.style.cursor = "pointer";
-			btn.style.boxShadow = "0 2px 6px rgba(0,0,0,0.08)";
-			btn.style.zIndex = "9999";
+			// Styles are defined in styles.css
 
 			// Ensure nodeEl can host absolutely-positioned child
-			if (getComputedStyle(nodeEl).position === "static") {
-				nodeEl.style.position = "relative";
-			}
-			nodeEl.style.overflow = "visible";
+			nodeEl.addClass("canvas-accomplishments-node-container");
 
 			btn.addEventListener("click", async (e) => {
 				e.preventDefault();
 				e.stopPropagation();
-				console.log("[Canvas Plugin] Selection button clicked for node", data?.id);
+				console.debug("[Canvas Plugin] Selection button clicked for node", data?.id);
 				await this.convertCanvasNodeToStructuredItem(canvasNode);
 			});
 
@@ -987,11 +982,11 @@ private registerCommands(): void {
 			if (!wrapped) {
 				if (this.isResizing) {
 					// Ignore outside click immediately after resize
-					console.log("[Canvas Plugin] Outside click ignored because isResizing=true");
+					console.debug("[Canvas Plugin] Outside click ignored because isResizing=true");
 					this.isResizing = false;
 					return;
 				}
-				console.log("[Canvas Plugin] Click outside canvas node");
+				console.debug("[Canvas Plugin] Click outside canvas node");
 				this.clearInjectedMenuButtons();
 				return;
 			}
@@ -1000,7 +995,7 @@ private registerCommands(): void {
 			const data = canvasNode?.getData?.();
 			if (!data) return;
 
-			console.log("[Canvas Plugin] Canvas node clicked", {
+			console.debug("[Canvas Plugin] Canvas node clicked", {
 				id: data.id,
 				type: data.type,
 				file: data.file,
@@ -1037,7 +1032,7 @@ private registerCommands(): void {
 			const { id, width: oldW, height: oldH, ref, el } = this.lastPointerNodeSize;
 			setTimeout(() => {
 				if (this.isResizing) {
-					console.log("[Canvas Plugin] isResizing -> false (mouseup)");
+					console.debug("[Canvas Plugin] isResizing -> false (mouseup)");
 				}
 				this.isResizing = false;
 				const latest = ref?.getData?.();
@@ -1062,7 +1057,7 @@ private registerCommands(): void {
 					newH !== undefined &&
 					(newW !== oldW || newH !== oldH)
 				) {
-					console.log("[Canvas Plugin] Node resized", {
+					console.debug("[Canvas Plugin] Node resized", {
 						id,
 						oldWidth: oldW,
 						oldHeight: oldH,
@@ -1101,9 +1096,9 @@ private registerCommands(): void {
 			) {
 				if (!this.isResizing) {
 					this.isResizing = true;
-					console.log("[Canvas Plugin] isResizing -> true (detected size change)");
+					console.debug("[Canvas Plugin] isResizing -> true (detected size change)");
 				}
-				console.log("[Canvas Plugin] Node resizing (mousemove)", {
+				console.debug("[Canvas Plugin] Node resizing (mousemove)", {
 					id,
 					oldWidth: prevW,
 					oldHeight: prevH,
@@ -1145,12 +1140,12 @@ private registerCommands(): void {
 	/**
 	 * Inject a convert button into the selection toolbar (canvas-card-menu) for text nodes
 	 */
-	private async addSelectionMenuButton(canvasNode: any): Promise<void> {
+	private async addSelectionMenuButton(canvasNode: InternalCanvasNode): Promise<void> {
 		try {
 			// Get node ID from getData() - we need this to locate the node in the file
 			const data = canvasNode?.getData?.();
 			if (!data || !data.id) {
-				console.log("[Canvas Plugin] No data found for node");
+				console.debug("[Canvas Plugin] No data found for node");
 				return;
 			}
 
@@ -1158,17 +1153,17 @@ private registerCommands(): void {
 			// getData() may be stale, especially after conversions
 			let nodeInFile: CanvasNode | undefined;
 			if (!canvasNode?.canvas?.view?.file) {
-				console.log("[Canvas Plugin] Cannot access canvas file");
+				console.debug("[Canvas Plugin] Cannot access canvas file");
 				return;
 			}
 
 			try {
-				const canvasFile = canvasNode.canvas.view.file;
+				const canvasFile = canvasNode.canvas.view.file as TFile;
 				const canvasData = await loadCanvasData(this.app, canvasFile);
 				nodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === data.id);
 				
 				if (!nodeInFile) {
-					console.log("[Canvas Plugin] Node not found in canvas file:", data.id);
+					console.debug("[Canvas Plugin] Node not found in canvas file:", data.id);
 					return;
 				}
 			} catch (err) {
@@ -1181,7 +1176,7 @@ private registerCommands(): void {
 			const metadata = nodeInFile.metadata;
 			const filePath = nodeInFile.file;
 
-			console.log("[Canvas Plugin] Determining mode for node:", {
+			console.debug("[Canvas Plugin] Determining mode for node:", {
 				id: nodeInFile.id,
 				type: nodeType,
 				hasMetadata: !!metadata,
@@ -1201,13 +1196,13 @@ private registerCommands(): void {
 					mode = "open";
 				} else {
 					// Regular file node, don't show any buttons
-					console.log("[Canvas Plugin] File node is not plugin-created, skipping");
+					console.debug("[Canvas Plugin] File node is not plugin-created, skipping");
 					return;
 				}
 			}
 
 			if (!mode) {
-				console.log("[Canvas Plugin] No mode determined for node type:", data.type);
+				console.debug("[Canvas Plugin] No mode determined for node type:", data.type);
 				return;
 			}
 
@@ -1223,7 +1218,7 @@ private registerCommands(): void {
 			}
 
 			if (!visibleMenu) {
-				console.log("[Canvas Plugin] No visible selection menu found for node", nodeInFile.id);
+				console.debug("[Canvas Plugin] No visible selection menu found for node", nodeInFile.id);
 				return;
 			}
 
@@ -1234,7 +1229,7 @@ private registerCommands(): void {
 				)
 				.forEach((el) => el.remove());
 
-			console.log("[Canvas Plugin] Injecting selection menu buttons for node", nodeInFile.id, "mode", mode);
+			console.debug("[Canvas Plugin] Injecting selection menu buttons for node", nodeInFile.id, "mode", mode);
 
 			if (mode === "convert") {
 				const convertButton = this.buildMenuButton(
@@ -1251,7 +1246,7 @@ private registerCommands(): void {
 					"canvas-accomplishments-open-menu",
 					"Open",
 					async () => {
-						console.log("[Canvas Plugin] Open button clicked, opening file:", filePath);
+						console.debug("[Canvas Plugin] Open button clicked, opening file:", filePath);
 						await this.openCanvasFileNode(filePath);
 					},
 					canvasNode
@@ -1267,21 +1262,38 @@ private registerCommands(): void {
 		className: string,
 		labelText: string,
 		onClick: () => void | Promise<void>,
-		canvasNode: any
+		canvasNode: InternalCanvasNode
 	): HTMLElement {
 		const item = document.createElement("div");
-		item.className = `${className} clickable-icon`;
-		item.style.display = "flex";
-		item.style.alignItems = "center";
-		item.style.gap = "6px";
-		item.style.cursor = "pointer";
+		item.className = `${className} clickable-icon canvas-accomplishments-menu-item`;
 
 		const iconDiv = document.createElement("div");
-		iconDiv.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-			<path d="M14.5 22H18a2 2 0 0 0 2-2V7.5L14.5 2H6a2 2 0 0 0-2 2v4"></path>
-			<polyline points="14 2 14 8 20 8"></polyline>
-			<circle cx="7" cy="14" r="3"></circle>
-		</svg>`;
+		iconDiv.addClass("canvas-accomplishments-menu-icon");
+		const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+		svg.setAttribute("width", "16");
+		svg.setAttribute("height", "16");
+		svg.setAttribute("viewBox", "0 0 24 24");
+		svg.setAttribute("fill", "none");
+		svg.setAttribute("stroke", "currentColor");
+		svg.setAttribute("stroke-width", "2");
+		svg.setAttribute("stroke-linecap", "round");
+		svg.setAttribute("stroke-linejoin", "round");
+
+		const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+		path.setAttribute("d", "M14.5 22H18a2 2 0 0 0 2-2V7.5L14.5 2H6a2 2 0 0 0-2 2v4");
+		svg.appendChild(path);
+
+		const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+		polyline.setAttribute("points", "14 2 14 8 20 8");
+		svg.appendChild(polyline);
+
+		const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+		circle.setAttribute("cx", "7");
+		circle.setAttribute("cy", "14");
+		circle.setAttribute("r", "3");
+		svg.appendChild(circle);
+
+		iconDiv.appendChild(svg);
 		item.appendChild(iconDiv);
 
 		const label = document.createElement("span");
@@ -1302,12 +1314,12 @@ private registerCommands(): void {
 	private async openCanvasFileNode(filePath?: string): Promise<void> {
 		try {
 			if (!filePath) {
-				console.log("[Canvas Plugin] No file path to open");
+				console.debug("[Canvas Plugin] No file path to open");
 				return;
 			}
 			const file = this.app.vault.getAbstractFileByPath(filePath);
 			if (!file || !(file instanceof TFile)) {
-				console.log("[Canvas Plugin] File not found", filePath);
+				console.debug("[Canvas Plugin] File not found", filePath);
 				return;
 			}
 			const workspace = this.app.workspace;
@@ -1341,20 +1353,20 @@ private registerCommands(): void {
 				if (!data?.id || !canvasNode?.canvas?.view?.file) continue;
 
 				try {
-					const canvasFile = canvasNode.canvas.view.file;
+					const canvasFile = canvasNode.canvas.view.file as TFile;
 					const canvasData = await loadCanvasData(this.app, canvasFile);
 					const nodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === data.id);
 
 					// Only include plugin-created file nodes (check MD frontmatter)
 					if (nodeInFile?.type === "file" && nodeInFile?.file) {
-						console.log("[Canvas Plugin] Checking if file is plugin-created:", nodeInFile.file);
+						console.debug("[Canvas Plugin] Checking if file is plugin-created:", nodeInFile.file);
 						const isPlugin = await this.isPluginCreatedFile(nodeInFile.file);
-						console.log("[Canvas Plugin] isPluginCreatedFile result:", isPlugin);
+						console.debug("[Canvas Plugin] isPluginCreatedFile result:", isPlugin);
 						if (isPlugin) {
 							filePaths.push(nodeInFile.file);
 						}
 					} else {
-						console.log("[Canvas Plugin] Node not a file or no file path:", {
+						console.debug("[Canvas Plugin] Node not a file or no file path:", {
 							type: nodeInFile?.type,
 							file: nodeInFile?.file
 						});
@@ -1364,7 +1376,7 @@ private registerCommands(): void {
 				}
 			}
 
-			console.log("[Canvas Plugin] Opening", filePaths.length, "files in separate tabs");
+			console.debug("[Canvas Plugin] Opening", filePaths.length, "files in separate tabs");
 
 			// Open each file in a new tab
 			for (const filePath of filePaths) {
@@ -1375,7 +1387,7 @@ private registerCommands(): void {
 		}
 	}
 
-	private getSelectedCanvasTextNode(): any | null {
+	private getSelectedCanvasTextNode(): InternalCanvasNode | null {
 		const selectedEls = this.getSelectedCanvasNodeElements();
 		for (const el of selectedEls) {
 			const node = this.findCanvasNodeByElement(el);
@@ -1387,7 +1399,7 @@ private registerCommands(): void {
 		return null;
 	}
 
-	private getSelectedCanvasFileNode(): any | null {
+	private getSelectedCanvasFileNode(): InternalCanvasNode | null {
 		const selectedEls = this.getSelectedCanvasNodeElements();
 		for (const el of selectedEls) {
 			const node = this.findCanvasNodeByElement(el);
@@ -1402,7 +1414,7 @@ private registerCommands(): void {
 	private async convertCurrentlySelectedTextNode(): Promise<void> {
 		const node = this.getSelectedCanvasTextNode();
 		if (!node) {
-			console.log("[Canvas Plugin] No selected text node to convert");
+			console.debug("[Canvas Plugin] No selected text node to convert");
 			return;
 		}
 		await this.convertCanvasNodeToStructuredItem(node);
@@ -1414,7 +1426,7 @@ private registerCommands(): void {
 	 */
 	private setupCanvasNodeContextMenu(): void {
 		// Store current node for menu actions
-		let currentContextNode: any = null;
+		let currentContextNode: InternalCanvasNode | null = null;
 		
 		// Use contextmenu event on document to catch all right-clicks
 		this.registerDomEvent(document, 'contextmenu', (evt: MouseEvent) => {
@@ -1423,39 +1435,40 @@ private registerCommands(): void {
 			const nodeEl = target.closest('.canvas-node') as HTMLElement;
 			
 			if (nodeEl) {
-				console.log('[Canvas Plugin] Right-click detected on canvas node');
+				console.debug('[Canvas Plugin] Right-click detected on canvas node');
 				
 				// Find and store the actual node object
 				currentContextNode = this.findCanvasNodeByElement(nodeEl);
-				
+
 				if (!currentContextNode) {
-					console.log('[Canvas Plugin] Could not find node object');
+					console.debug('[Canvas Plugin] Could not find node object');
 					return;
 				}
-				
-				console.log('[Canvas Plugin] Stored node reference:', currentContextNode.id);
-				
+
+				const nodeRef = currentContextNode;
+				console.debug('[Canvas Plugin] Stored node reference:', nodeRef.getData?.()?.id);
+
 				// Wait for menu to appear, then add our item
-				setTimeout(() => this.addCanvasNodeMenuItemToDOM(currentContextNode).catch(err => 
+				setTimeout(() => this.addCanvasNodeMenuItemToDOM(nodeRef).catch(err =>
 					console.error('[Canvas Plugin] Failed to add menu item:', err)
 				), 50);
-				setTimeout(() => this.addCanvasNodeMenuItemToDOM(currentContextNode).catch(err => 
+				setTimeout(() => this.addCanvasNodeMenuItemToDOM(nodeRef).catch(err =>
 					console.error('[Canvas Plugin] Failed to add menu item:', err)
 				), 100);
 			}
 		});
 
-		console.log('[Canvas Plugin] Canvas node context menu setup complete');
+		console.debug('[Canvas Plugin] Canvas node context menu setup complete');
 	}
 
 	/**
 	 * Find canvas node object by its DOM element
 	 */
-	private findCanvasNodeByElement(nodeEl: HTMLElement): any {
+	private findCanvasNodeByElement(nodeEl: HTMLElement): InternalCanvasNode | null {
 		const leaves = this.app.workspace.getLeavesOfType("canvas");
-		
+
 		for (const leaf of leaves) {
-			const canvasView = leaf.view as any;
+			const canvasView = leaf.view as { canvas?: InternalCanvas };
 			const canvas = canvasView?.canvas;
 			if (!canvas) continue;
 
@@ -1466,14 +1479,14 @@ private registerCommands(): void {
 				}
 			}
 		}
-		
+
 		return null;
 	}
 
 	/**
 	 * Add our menu item to the DOM menu
 	 */
-	private async addCanvasNodeMenuItemToDOM(targetNode: any): Promise<void> {
+	private async addCanvasNodeMenuItemToDOM(targetNode: InternalCanvasNode): Promise<void> {
 		try {
 			// Find the visible canvas menu
 			let menuEl: HTMLElement | null = null;
@@ -1489,37 +1502,37 @@ private registerCommands(): void {
 			}
 
 			if (!menuEl) {
-				console.log('[Canvas Plugin] No visible canvas-card-menu found');
+				console.debug('[Canvas Plugin] No visible canvas-card-menu found');
 				return;
 			}
 
 			// Check if we already added our item to THIS menu
 			if (menuEl.querySelector('.canvas-accomplishments-convert')) {
-				console.log('[Canvas Plugin] Menu item already exists in this menu');
+				console.debug('[Canvas Plugin] Menu item already exists in this menu');
 				return;
 			}
 
 			// Get node ID from getData() to locate node in file
 			const nodeData = targetNode.getData?.();
 			if (!nodeData?.id) {
-				console.log('[Canvas Plugin] No node ID found');
+				console.debug('[Canvas Plugin] No node ID found');
 				return;
 			}
 
 			// Read node type from canvas file (source of truth)
 			if (!targetNode?.canvas?.view?.file) {
-				console.log('[Canvas Plugin] Cannot access canvas file');
+				console.debug('[Canvas Plugin] Cannot access canvas file');
 				return;
 			}
 
 			let nodeInFile: CanvasNode | undefined;
 			try {
-				const canvasFile = targetNode.canvas.view.file;
+				const canvasFile = targetNode.canvas.view.file as TFile;
 				const canvasData = await loadCanvasData(this.app, canvasFile);
 				nodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === nodeData.id);
 				
 				if (!nodeInFile) {
-					console.log('[Canvas Plugin] Node not found in canvas file:', nodeData.id);
+					console.debug('[Canvas Plugin] Node not found in canvas file:', nodeData.id);
 					return;
 				}
 			} catch (err) {
@@ -1529,11 +1542,11 @@ private registerCommands(): void {
 
 			// Only show menu item for text nodes
 			if (nodeInFile.type !== "text") {
-				console.log('[Canvas Plugin] Not a text node, type:', nodeInFile.type);
+				console.debug('[Canvas Plugin] Not a text node, type:', nodeInFile.type);
 				return;
 			}
 
-			console.log('[Canvas Plugin] Adding menu item for text node:', nodeInFile.id);
+			console.debug('[Canvas Plugin] Adding menu item for text node:', nodeInFile.id);
 
 			// Find existing menu items to match their style
 			const existingItems = menuEl.querySelectorAll('div[class*="clickable"]');
@@ -1545,44 +1558,50 @@ private registerCommands(): void {
 			// Create our menu item matching Obsidian's style
 			const item = document.createElement('div');
 			item.className = itemClass + ' canvas-accomplishments-convert';
-			
-			// Copy styles from first existing item if available
-			if (existingItems.length > 0) {
-				const referenceItem = existingItems[0] as HTMLElement;
-				const computedStyle = window.getComputedStyle(referenceItem);
-				item.style.cssText = `
-					padding: ${computedStyle.padding};
-					cursor: pointer;
-					display: ${computedStyle.display};
-					align-items: ${computedStyle.alignItems};
-					gap: ${computedStyle.gap};
-					font-size: ${computedStyle.fontSize};
-					color: ${computedStyle.color};
-				`;
-			}
-			
-			item.setAttribute('aria-label', 'Convert to Structured Item');
-			
-			// Create icon
+			// Styles are inherited from the itemClass which matches Obsidian's native menu items
+
+			item.setAttribute('aria-label', 'Convert to structured item');
+
+			// Create icon using setIcon from Obsidian API would be better, but for SVG:
 			const iconDiv = document.createElement('div');
-			iconDiv.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-				<path d="M14.5 22H18a2 2 0 0 0 2-2V7.5L14.5 2H6a2 2 0 0 0-2 2v4"></path>
-				<polyline points="14 2 14 8 20 8"></polyline>
-				<circle cx="7" cy="14" r="3"></circle>
-			</svg>`;
-			
+			iconDiv.addClass('canvas-accomplishments-menu-icon');
+			const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+			svg.setAttribute('width', '18');
+			svg.setAttribute('height', '18');
+			svg.setAttribute('viewBox', '0 0 24 24');
+			svg.setAttribute('fill', 'none');
+			svg.setAttribute('stroke', 'currentColor');
+			svg.setAttribute('stroke-width', '2');
+			svg.setAttribute('stroke-linecap', 'round');
+			svg.setAttribute('stroke-linejoin', 'round');
+
+			const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+			path.setAttribute('d', 'M14.5 22H18a2 2 0 0 0 2-2V7.5L14.5 2H6a2 2 0 0 0-2 2v4');
+			svg.appendChild(path);
+
+			const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+			polyline.setAttribute('points', '14 2 14 8 20 8');
+			svg.appendChild(polyline);
+
+			const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+			circle.setAttribute('cx', '7');
+			circle.setAttribute('cy', '14');
+			circle.setAttribute('r', '3');
+			svg.appendChild(circle);
+
+			iconDiv.appendChild(svg);
 			item.appendChild(iconDiv);
-			
+
 			// Add click handler with the correct node reference
 			item.addEventListener('click', async (e) => {
 				e.preventDefault();
 				e.stopPropagation();
-				
-				console.log('[Canvas Plugin] Menu item clicked, converting node:', targetNode.id);
-				
-				// Close the menu
-				menuEl!.style.display = 'none';
-				
+
+				console.debug('[Canvas Plugin] Menu item clicked, converting node:', targetNode.getData?.()?.id);
+
+				// Close the menu by hiding it
+				menuEl?.addClass('is-hidden');
+
 				// Convert the node (use the captured targetNode, not a lookup)
 				await this.convertCanvasNodeToStructuredItem(targetNode);
 			});
@@ -1590,7 +1609,7 @@ private registerCommands(): void {
 			// Add to menu
 			menuEl.appendChild(item);
 
-			console.log('[Canvas Plugin] Added context menu item');
+			console.debug('[Canvas Plugin] Added context menu item');
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to add context menu item:', error);
 		}
@@ -1645,7 +1664,7 @@ private registerCommands(): void {
 	private async performNoteConversion(
 		file: TFile,
 		result: ConvertNoteResult,
-		existingFrontmatter: any,
+		existingFrontmatter: Partial<ItemFrontmatter>,
 		body: string
 	): Promise<void> {
 		try {
@@ -1672,6 +1691,7 @@ private registerCommands(): void {
 				created: existingFrontmatter.created || now,
 				updated: now,
 				canvas_source: existingFrontmatter.canvas_source || "",
+				vault_path: existingFrontmatter.vault_path || file.path,
 			};
 
 			// Update note content
@@ -1699,17 +1719,17 @@ private registerCommands(): void {
 	/**
 	 * Convert a canvas text node to a structured item file
 	 */
-	private async convertCanvasNodeToStructuredItem(node: any): Promise<void> {
+	private async convertCanvasNodeToStructuredItem(node: InternalCanvasNode): Promise<void> {
 		try {
 			// Get node ID from getData() - we need this to locate the node in the file
 			const nodeData = node.getData();
 			if (!nodeData?.id) {
-				console.log('[Canvas Plugin] No node ID found');
+				console.debug('[Canvas Plugin] No node ID found');
 				return;
 			}
 
 			const canvasView = node.canvas?.view;
-			const canvasFile = canvasView?.file;
+			const canvasFile = canvasView?.file as TFile | undefined;
 
 			if (!canvasFile) {
 				new Notice("Could not find canvas file");
@@ -1723,7 +1743,7 @@ private registerCommands(): void {
 				nodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === nodeData.id);
 				
 				if (!nodeInFile) {
-					console.log('[Canvas Plugin] Node not found in canvas file:', nodeData.id);
+					console.debug('[Canvas Plugin] Node not found in canvas file:', nodeData.id);
 					return;
 				}
 			} catch (err) {
@@ -1731,7 +1751,7 @@ private registerCommands(): void {
 				return;
 			}
 
-			console.log('[Canvas Plugin] convertCanvasNodeToStructuredItem called for node:', {
+			console.debug('[Canvas Plugin] convertCanvasNodeToStructuredItem called for node:', {
 				id: nodeInFile.id,
 				type: nodeInFile.type,
 				hasMetadata: !!nodeInFile.metadata,
@@ -1742,7 +1762,7 @@ private registerCommands(): void {
 			if (nodeInFile.type === "file" && nodeInFile.file) {
 				const isPlugin = await this.isPluginCreatedFile(nodeInFile.file);
 				if (isPlugin) {
-					console.log('[Canvas Plugin] Node is already converted, skipping conversion');
+					console.debug('[Canvas Plugin] Node is already converted, skipping conversion');
 					new Notice("This note is already a structured item");
 					return;
 				}
@@ -1750,7 +1770,7 @@ private registerCommands(): void {
 			
 			// Only allow conversion of text nodes
 			if (nodeInFile.type !== "text") {
-				console.log('[Canvas Plugin] Node is not a text node, cannot convert:', nodeInFile.type);
+				console.debug('[Canvas Plugin] Node is not a text node, cannot convert:', nodeInFile.type);
 				new Notice("Only text nodes can be converted to structured items");
 				return;
 			}
@@ -1799,7 +1819,7 @@ private registerCommands(): void {
 	 * If node exists, converts it; if node is null but nodeId provided, finds and converts it; if neither, creates a new node
 	 */
 	private async performCanvasNodeConversion(
-		node: any | null,
+		node: InternalCanvasNode | null,
 		canvasFile: TFile,
 		result: ConvertNoteResult,
 		nodeText: string,
@@ -1820,7 +1840,7 @@ private registerCommands(): void {
 			if (existingNotePath) {
 				// Use provided path (file already created in creation flow)
 				notePath = existingNotePath;
-				console.log('[Canvas Plugin] Using existing note path:', notePath);
+				console.debug('[Canvas Plugin] Using existing note path:', notePath);
 
 				// Read ID from existing file's frontmatter
 				const existingFile = this.app.vault.getAbstractFileByPath(notePath);
@@ -1828,7 +1848,7 @@ private registerCommands(): void {
 					const fileContent = await this.app.vault.read(existingFile);
 					const parsed = parseFrontmatter(fileContent);
 					id = parsed?.id || await generateId(this.app, this.settings);
-					console.log('[Canvas Plugin] Read ID from existing file:', id);
+					console.debug('[Canvas Plugin] Read ID from existing file:', id);
 				} else {
 					id = await generateId(this.app, this.settings);
 				}
@@ -1843,7 +1863,7 @@ private registerCommands(): void {
 					title,
 					"md"
 				);
-				console.log('[Canvas Plugin] Generated new note path:', notePath);
+				console.debug('[Canvas Plugin] Generated new note path:', notePath);
 			}
 
 			// Check if file already exists (e.g., from creation flow)
@@ -1872,7 +1892,7 @@ private registerCommands(): void {
 				const template = await this.loadTemplate(result.type);
 				const content = replacePlaceholders(template, frontmatter);
 
-				console.log('[Canvas Plugin] Creating note with content preview:', {
+				console.debug('[Canvas Plugin] Creating note with content preview:', {
 					firstLines: content.split('\n').slice(0, 10).join('\n'),
 					hasFrontmatter: content.startsWith('---'),
 					totalLines: content.split('\n').length
@@ -1881,7 +1901,7 @@ private registerCommands(): void {
 				await this.app.vault.create(notePath, content);
 				await this.logger?.info("Note created from canvas node", { path: notePath });
 			} else {
-				console.log('[Canvas Plugin] Note file already exists, skipping creation:', notePath);
+				console.debug('[Canvas Plugin] Note file already exists, skipping creation:', notePath);
 			}
 
 			// Get color for the node (inProgress is false for new conversions)
@@ -1906,7 +1926,7 @@ private registerCommands(): void {
 			
 			if (existingNode) {
 				// Convert existing node in-place
-				console.log('[Canvas Plugin] Converting existing node in-place (keeping same ID)');
+				console.debug('[Canvas Plugin] Converting existing node in-place (keeping same ID)');
 
 				existingNode.type = "file";
 				existingNode.file = notePath;
@@ -1929,7 +1949,7 @@ private registerCommands(): void {
 					(existingNode as any).styleAttributes = {};
 				}
 
-				console.log('[Canvas Plugin] Node transformed:', {
+				console.debug('[Canvas Plugin] Node transformed:', {
 					id: existingNode.id,
 					type: existingNode.type,
 					file: existingNode.file,
@@ -1937,13 +1957,13 @@ private registerCommands(): void {
 				});
 
 				// Edges automatically remain valid (same node ID)
-				const connectedEdges = canvasData.edges.filter((edge: any) =>
+				const connectedEdges = canvasData.edges.filter((edge: CanvasEdge) =>
 					edge.fromNode === resolvedNodeId || edge.toNode === resolvedNodeId
 				);
-				console.log('[Canvas Plugin]', connectedEdges.length, 'edges remain connected (no update needed)');
+				console.debug('[Canvas Plugin]', connectedEdges.length, 'edges remain connected (no update needed)');
 			} else {
 				// Create new node (fallback when node not found)
-				console.log('[Canvas Plugin] Node not found, creating new node');
+				console.debug('[Canvas Plugin] Node not found, creating new node');
 
 				// Use provided position or calculate viewport center
 				const center = position || getCanvasCenter(this.app, canvasFile);
@@ -1979,30 +1999,30 @@ private registerCommands(): void {
 				}
 
 				canvasData.nodes.push(newNode);
-				console.log('[Canvas Plugin] Added new node:', newNode);
+				console.debug('[Canvas Plugin] Added new node:', newNode);
 			}
 			
 			// Unified save logic for both conversion and creation
-			console.log('[Canvas Plugin] Saving canvas file...');
+			console.debug('[Canvas Plugin] Saving canvas file...');
 			await saveCanvasData(this.app, canvasFile, canvasData);
-			console.log('[Canvas Plugin] Canvas file saved');
+			console.debug('[Canvas Plugin] Canvas file saved');
 
 			// Force reload canvas to sync Obsidian's in-memory state with file
 			// This ensures the node renders properly with file content preview
-			console.log('[Canvas Plugin] Reloading canvas to sync in-memory state...');
+			console.debug('[Canvas Plugin] Reloading canvas to sync in-memory state...');
 			await reloadCanvasViewsWithViewport(this.app, canvasFile);
-			console.log('[Canvas Plugin] Canvas reloaded');
+			console.debug('[Canvas Plugin] Canvas reloaded');
 
 			// Update cache after reload (re-read from file to ensure consistency)
 			const reloadedCanvasData = await loadCanvasData(this.app, canvasFile);
 			const currentNodeIds = new Set(reloadedCanvasData.nodes.map((n) => n.id));
 			this.canvasNodeCache.set(canvasFile.path, currentNodeIds);
-			console.log('[Canvas Plugin] Cache updated with', currentNodeIds.size, 'nodes');
+			console.debug('[Canvas Plugin] Cache updated with', currentNodeIds.size, 'nodes');
 
 			// Keep flag true longer to prevent deletion detection during auto-refresh
 			setTimeout(() => {
 				this.isUpdatingCanvas = false;
-				console.log('[Canvas Plugin] isUpdatingCanvas set to false (delayed, conversion flow)');
+				console.debug('[Canvas Plugin] isUpdatingCanvas set to false (delayed, conversion flow)');
 			}, 500);
 			
 			// Log completion
@@ -2145,22 +2165,22 @@ private registerCommands(): void {
 	 */
 	private async initializeCanvasNodeCache(): Promise<void> {
 		try {
-			console.log('[Canvas Plugin] Initializing canvas node cache...');
+			console.debug('[Canvas Plugin] Initializing canvas node cache...');
 			const canvasFiles = this.app.vault.getFiles().filter(f => f.extension === "canvas");
-			console.log('[Canvas Plugin] Found', canvasFiles.length, 'canvas files:', canvasFiles.map(f => f.path));
+			console.debug('[Canvas Plugin] Found', canvasFiles.length, 'canvas files:', canvasFiles.map(f => f.path));
 
 			for (const canvasFile of canvasFiles) {
 				const canvasData = await loadCanvasData(this.app, canvasFile);
-				console.log('[Canvas Plugin] Canvas data for', canvasFile.path, ':', {
+				console.debug('[Canvas Plugin] Canvas data for', canvasFile.path, ':', {
 					nodeCount: canvasData.nodes?.length ?? 0,
 					edgeCount: canvasData.edges?.length ?? 0,
-					nodes: canvasData.nodes?.map((n: any) => ({ id: n.id, type: n.type, file: n.file }))
+					nodes: canvasData.nodes?.map((n: CanvasNode) => ({ id: n.id, type: n.type, file: n.file }))
 				});
 				const nodeIds = new Set(canvasData.nodes.map((n) => n.id));
 				this.canvasNodeCache.set(canvasFile.path, nodeIds);
-				console.log('[Canvas Plugin] Initialized cache for', canvasFile.path, 'with', nodeIds.size, 'nodes');
+				console.debug('[Canvas Plugin] Initialized cache for', canvasFile.path, 'with', nodeIds.size, 'nodes');
 			}
-			console.log('[Canvas Plugin] Cache initialization complete. Total cached canvases:', this.canvasNodeCache.size);
+			console.debug('[Canvas Plugin] Cache initialization complete. Total cached canvases:', this.canvasNodeCache.size);
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to initialize canvas node cache:', error);
 			await this.logger?.error("Failed to initialize canvas node cache", error);
@@ -2172,7 +2192,7 @@ private registerCommands(): void {
 	 */
 	private async initializeFileAccomplishmentIdCache(): Promise<void> {
 		try {
-			console.log('[Canvas Plugin] Initializing file accomplishment ID cache...');
+			console.debug('[Canvas Plugin] Initializing file accomplishment ID cache...');
 			const mdFiles = this.app.vault.getMarkdownFiles();
 			let cachedCount = 0;
 
@@ -2190,7 +2210,7 @@ private registerCommands(): void {
 				}
 			}
 
-			console.log('[Canvas Plugin] File accomplishment ID cache initialized with', cachedCount, 'entries');
+			console.debug('[Canvas Plugin] File accomplishment ID cache initialized with', cachedCount, 'entries');
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to initialize file accomplishment ID cache:', error);
 			await this.logger?.error("Failed to initialize file accomplishment ID cache", error);
@@ -2198,21 +2218,21 @@ private registerCommands(): void {
 	}
 
 	private async handleCanvasModification(canvasFile: TFile): Promise<void> {
-		console.log('[Canvas Plugin] ===== Canvas modification detected =====');
-		console.log('[Canvas Plugin] Canvas file:', canvasFile.path);
-		console.log('[Canvas Plugin] isUpdatingCanvas flag:', this.isUpdatingCanvas);
+		console.debug('[Canvas Plugin] ===== Canvas modification detected =====');
+		console.debug('[Canvas Plugin] Canvas file:', canvasFile.path);
+		console.debug('[Canvas Plugin] isUpdatingCanvas flag:', this.isUpdatingCanvas);
 	
 		// Skip if we're currently updating the canvas ourselves
 		if (this.isUpdatingCanvas) {
-			console.log('[Canvas Plugin] Skipping modification handler - we are updating');
+			console.debug('[Canvas Plugin] Skipping modification handler - we are updating');
 			return;
 		}
 		
 		try {
 			const canvasData = await loadCanvasData(this.app, canvasFile);
-			console.log('[Canvas Plugin] Loaded canvas data:', {
+			console.debug('[Canvas Plugin] Loaded canvas data:', {
 				nodeCount: canvasData.nodes?.length ?? 0,
-				nodes: canvasData.nodes?.map((n: any) => ({ id: n.id, type: n.type, file: n.file }))
+				nodes: canvasData.nodes?.map((n: CanvasNode) => ({ id: n.id, type: n.type, file: n.file }))
 			});
 
 			const currentNodeIds = new Set(canvasData.nodes.map((n) => n.id));
@@ -2222,19 +2242,19 @@ private registerCommands(): void {
 					.map((n) => n.file!)
 			);
 
-			console.log('[Canvas Plugin] Current node IDs:', Array.from(currentNodeIds));
-			console.log('[Canvas Plugin] Current file nodes:', Array.from(currentFileNodes));
+			console.debug('[Canvas Plugin] Current node IDs:', Array.from(currentNodeIds));
+			console.debug('[Canvas Plugin] Current file nodes:', Array.from(currentFileNodes));
 
 			// Get previously cached nodes
 			const cachedNodeIds = this.canvasNodeCache.get(canvasFile.path) || new Set();
-			console.log('[Canvas Plugin] Cached node IDs:', Array.from(cachedNodeIds));
+			console.debug('[Canvas Plugin] Cached node IDs:', Array.from(cachedNodeIds));
 
 			// Find deleted nodes (only if cache was previously populated)
 			const deletedNodeIds = Array.from(cachedNodeIds).filter((id) => !currentNodeIds.has(id));
 
 			if (deletedNodeIds.length > 0 && cachedNodeIds.size > 0) {
 				// Only check for deletions if cache was populated (not first load)
-				console.log('[Canvas Plugin] Detected', deletedNodeIds.length, 'deleted nodes');
+				console.debug('[Canvas Plugin] Detected', deletedNodeIds.length, 'deleted nodes');
 
 				// Clear any selection menu buttons that might be stale
 				this.clearInjectedMenuButtons();
@@ -2248,12 +2268,12 @@ private registerCommands(): void {
 				await this.checkAndDeletePluginFile(canvasFile, currentFileNodes);
 			} else if (cachedNodeIds.size === 0) {
 				// Cache was empty, this might be first load - just update cache
-				console.log('[Canvas Plugin] Cache was empty, initializing with current nodes');
+				console.debug('[Canvas Plugin] Cache was empty, initializing with current nodes');
 			}
 
 			// Update cache
 			this.canvasNodeCache.set(canvasFile.path, currentNodeIds);
-			console.log('[Canvas Plugin] Cache updated with', currentNodeIds.size, 'nodes');
+			console.debug('[Canvas Plugin] Cache updated with', currentNodeIds.size, 'nodes');
 
 			// Trigger edge sync (debounced) to update depends_on in MD files
 			this.scheduleEdgeSync(canvasFile);
@@ -2286,17 +2306,17 @@ private registerCommands(): void {
 	 * Check if a file is a plugin-created note by reading its frontmatter
 	 */
 	private async isPluginCreatedFile(filePath: string): Promise<boolean> {
-		console.log('[Canvas Plugin] isPluginCreatedFile checking:', filePath);
+		console.debug('[Canvas Plugin] isPluginCreatedFile checking:', filePath);
 		const file = this.app.vault.getAbstractFileByPath(filePath);
 		if (!(file instanceof TFile)) {
-			console.log('[Canvas Plugin] isPluginCreatedFile: not a TFile');
+			console.debug('[Canvas Plugin] isPluginCreatedFile: not a TFile');
 			return false;
 		}
 		try {
 			const content = await this.app.vault.read(file);
 			const frontmatter = parseFrontmatter(content);
 			const result = frontmatter !== null && isPluginCreatedNote(frontmatter);
-			console.log('[Canvas Plugin] isPluginCreatedFile result:', {
+			console.debug('[Canvas Plugin] isPluginCreatedFile result:', {
 				hasFrontmatter: frontmatter !== null,
 				frontmatterKeys: frontmatter ? Object.keys(frontmatter) : [],
 				type: frontmatter?.type,
@@ -2306,7 +2326,7 @@ private registerCommands(): void {
 			});
 			return result;
 		} catch (err) {
-			console.log('[Canvas Plugin] isPluginCreatedFile error:', err);
+			console.debug('[Canvas Plugin] isPluginCreatedFile error:', err);
 			return false;
 		}
 	}
@@ -2317,8 +2337,8 @@ private registerCommands(): void {
 	 * and updates the depends_on field in each affected MD file
 	 */
 	private async syncEdgesToMdFiles(canvasFile: TFile): Promise<void> {
-		console.log('[Canvas Plugin] ===== Syncing edges to MD files =====');
-		console.log('[Canvas Plugin] Canvas:', canvasFile.path);
+		console.debug('[Canvas Plugin] ===== Syncing edges to MD files =====');
+		console.debug('[Canvas Plugin] Canvas:', canvasFile.path);
 
 		try {
 			const canvasData = await loadCanvasData(this.app, canvasFile);
@@ -2345,7 +2365,7 @@ private registerCommands(): void {
 				}
 			}
 
-			console.log('[Canvas Plugin] Found plugin files:', Array.from(allPluginFiles));
+			console.debug('[Canvas Plugin] Found plugin files:', Array.from(allPluginFiles));
 
 			// Process each edge
 			for (const edge of canvasData.edges || []) {
@@ -2390,8 +2410,8 @@ private registerCommands(): void {
 				dependenciesByFile.set(toNode.file, deps);
 			}
 
-			console.log('[Canvas Plugin] Dependencies by file:', Object.fromEntries(dependenciesByFile));
-			console.log('[Canvas Plugin] All plugin files:', Array.from(allPluginFiles));
+			console.debug('[Canvas Plugin] Dependencies by file:', Object.fromEntries(dependenciesByFile));
+			console.debug('[Canvas Plugin] All plugin files:', Array.from(allPluginFiles));
 
 			// Update MD files
 			let updatedCount = 0;
@@ -2421,7 +2441,7 @@ private registerCommands(): void {
 				}, 500);
 			}
 
-			console.log('[Canvas Plugin] Edge sync complete:', { updatedCount, clearedCount });
+			console.debug('[Canvas Plugin] Edge sync complete:', { updatedCount, clearedCount });
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to sync edges to MD files:', error);
 			await this.logger?.error("Failed to sync edges to MD files", error);
@@ -2463,7 +2483,7 @@ private registerCommands(): void {
 			});
 
 			await this.app.vault.modify(file, updatedContent);
-			console.log('[Canvas Plugin] Updated depends_on in', filePath, ':', dependencyIds);
+			console.debug('[Canvas Plugin] Updated depends_on in', filePath, ':', dependencyIds);
 			return true;
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to update depends_on in', filePath, ':', error);
@@ -2521,7 +2541,7 @@ private registerCommands(): void {
 
 			// Check if color needs to be updated
 			if (node.color !== newColor) {
-				console.log('[Canvas Plugin] Updating node color for', file.path, 'from', node.color, 'to', newColor);
+				console.debug('[Canvas Plugin] Updating node color for', file.path, 'from', node.color, 'to', newColor);
 
 				// Update the node color
 				node.color = newColor;
@@ -2555,9 +2575,9 @@ private registerCommands(): void {
 				const timer = setTimeout(async () => {
 					this.mdSyncDebounceTimers.delete(file.path);
 					try {
-						console.log('[Canvas Plugin] Auto-syncing to Notion:', file.path);
+						console.debug('[Canvas Plugin] Auto-syncing to Notion:', file.path);
 						await this.notionClient!.syncNote(frontmatter);
-						console.log('[Canvas Plugin] Auto-sync complete:', file.path);
+						console.debug('[Canvas Plugin] Auto-sync complete:', file.path);
 					} catch (error) {
 						console.error('[Canvas Plugin] Auto-sync failed:', error);
 						// Don't show notice for auto-sync failures to avoid spam
@@ -2584,7 +2604,7 @@ private registerCommands(): void {
 			// Get the accomplishment ID from cache
 			const accomplishmentId = this.fileAccomplishmentIdCache.get(file.path);
 			if (!accomplishmentId) {
-				console.log('[Canvas Plugin] No cached accomplishment ID for deleted file:', file.path);
+				console.debug('[Canvas Plugin] No cached accomplishment ID for deleted file:', file.path);
 				return;
 			}
 
@@ -2594,14 +2614,14 @@ private registerCommands(): void {
 			// Find the Notion page by accomplishment ID
 			const page = await this.notionClient.findPageByAccomplishmentId(accomplishmentId);
 			if (!page) {
-				console.log('[Canvas Plugin] No Notion page found for accomplishment:', accomplishmentId);
+				console.debug('[Canvas Plugin] No Notion page found for accomplishment:', accomplishmentId);
 				return;
 			}
 
 			// Archive the page
-			console.log('[Canvas Plugin] Archiving Notion page for deleted file:', file.path, 'accomplishment:', accomplishmentId);
+			console.debug('[Canvas Plugin] Archiving Notion page for deleted file:', file.path, 'accomplishment:', accomplishmentId);
 			await this.notionClient.archivePage(page.id);
-			console.log('[Canvas Plugin] Notion page archived successfully');
+			console.debug('[Canvas Plugin] Notion page archived successfully');
 			new Notice(`Notion page archived for deleted note: ${accomplishmentId}`);
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to archive Notion page:', error);
@@ -2617,13 +2637,13 @@ private registerCommands(): void {
 		currentFileNodes: Set<string>
 	): Promise<void> {
 		try {
-			console.log('[Canvas Plugin] checkAndDeletePluginFile called');
-			console.log('[Canvas Plugin] Canvas file:', canvasFile.path);
-			console.log('[Canvas Plugin] Current file nodes in canvas:', Array.from(currentFileNodes));
+			console.debug('[Canvas Plugin] checkAndDeletePluginFile called');
+			console.debug('[Canvas Plugin] Canvas file:', canvasFile.path);
+			console.debug('[Canvas Plugin] Current file nodes in canvas:', Array.from(currentFileNodes));
 
 			// Get all markdown files in the vault
 			const allFiles = this.app.vault.getMarkdownFiles();
-			console.log('[Canvas Plugin] Total markdown files in vault:', allFiles.length);
+			console.debug('[Canvas Plugin] Total markdown files in vault:', allFiles.length);
 
 			for (const file of allFiles) {
 				const content = await this.app.vault.read(file);
@@ -2632,8 +2652,8 @@ private registerCommands(): void {
 				// Check if this file was created by our plugin
 				const isPluginFile = frontmatter && isPluginCreatedNote(frontmatter);
 				if (isPluginFile) {
-					console.log('[Canvas Plugin] Found plugin-created file:', file.path);
-					console.log('[Canvas Plugin] Frontmatter:', {
+					console.debug('[Canvas Plugin] Found plugin-created file:', file.path);
+					console.debug('[Canvas Plugin] Frontmatter:', {
 						type: frontmatter.type,
 						id: frontmatter.id,
 						canvas_source: frontmatter.canvas_source,
@@ -2645,19 +2665,19 @@ private registerCommands(): void {
 						? frontmatter.canvas_source
 						: [frontmatter.canvas_source];
 
-					console.log('[Canvas Plugin] Canvas sources for file:', canvasSources);
-					console.log('[Canvas Plugin] Current canvas path:', canvasFile.path);
+					console.debug('[Canvas Plugin] Canvas sources for file:', canvasSources);
+					console.debug('[Canvas Plugin] Current canvas path:', canvasFile.path);
 
 					// If this note references the current canvas
 					if (canvasSources.includes(canvasFile.path)) {
 						// Check if the note is still in the canvas
 						const isInCanvas = currentFileNodes.has(file.path);
-						console.log('[Canvas Plugin] Is file still in canvas?', isInCanvas);
+						console.debug('[Canvas Plugin] Is file still in canvas?', isInCanvas);
 
 						if (!isInCanvas) {
 							// File was removed from canvas, delete it
-							console.log('[Canvas Plugin] Deleting file:', file.path);
-							await this.app.vault.trash(file, true);
+							console.debug('[Canvas Plugin] Deleting file:', file.path);
+							await this.app.fileManager.trashFile(file);
 							new Notice(`🗑️ Deleted: ${file.basename}`);
 							await this.logger?.info("Plugin-created file auto-deleted", {
 								file: file.path,
@@ -2665,7 +2685,7 @@ private registerCommands(): void {
 							});
 						}
 					} else {
-						console.log('[Canvas Plugin] File does not reference this canvas');
+						console.debug('[Canvas Plugin] File does not reference this canvas');
 					}
 				}
 			}
@@ -2684,7 +2704,7 @@ private registerCommands(): void {
 		}
 
 		const intervalMs = this.settings.notionSyncIntervalMinutes * 60 * 1000;
-		console.log('[Canvas Plugin] Starting Notion sync polling every', this.settings.notionSyncIntervalMinutes, 'minutes');
+		console.debug('[Canvas Plugin] Starting Notion sync polling every', this.settings.notionSyncIntervalMinutes, 'minutes');
 
 		this.notionSyncIntervalId = setInterval(async () => {
 			await this.pollNotionForChanges();
@@ -2698,7 +2718,7 @@ private registerCommands(): void {
 		if (this.notionSyncIntervalId) {
 			clearInterval(this.notionSyncIntervalId);
 			this.notionSyncIntervalId = null;
-			console.log('[Canvas Plugin] Stopped Notion sync polling');
+			console.debug('[Canvas Plugin] Stopped Notion sync polling');
 		}
 	}
 
@@ -2723,7 +2743,7 @@ private registerCommands(): void {
 		}
 
 		try {
-			console.log('[Canvas Plugin] Polling Notion for changes...');
+			console.debug('[Canvas Plugin] Polling Notion for changes...');
 			const pages = await this.notionClient.queryAllPages();
 
 			let updatedCount = 0;
@@ -2731,7 +2751,8 @@ private registerCommands(): void {
 			for (const page of pages) {
 				try {
 					// Get accomplishment ID from page
-					const idProperty = page.properties?.ID;
+					const notionPage = page as NotionPage;
+					const idProperty = notionPage.properties?.ID;
 					const accomplishmentId = idProperty?.rich_text?.[0]?.plain_text;
 					if (!accomplishmentId) continue;
 
@@ -2743,7 +2764,8 @@ private registerCommands(): void {
 					if (!(localFile instanceof TFile)) continue;
 
 					// Compare timestamps
-					const notionUpdated = new Date(page.last_edited_time).getTime();
+					if (!notionPage.last_edited_time) continue;
+					const notionUpdated = new Date(notionPage.last_edited_time).getTime();
 					const content = await this.app.vault.read(localFile);
 					const frontmatter = parseFrontmatter(content);
 					if (!frontmatter) continue;
@@ -2752,7 +2774,7 @@ private registerCommands(): void {
 
 					// If Notion is newer, update local file
 					if (notionUpdated > localUpdated + 1000) { // 1 second buffer
-						console.log('[Canvas Plugin] Notion page is newer, updating local file:', localFilePath);
+						console.debug('[Canvas Plugin] Notion page is newer, updating local file:', localFilePath);
 						await this.updateLocalFileFromNotion(localFile, page);
 						updatedCount++;
 					}
@@ -2762,9 +2784,9 @@ private registerCommands(): void {
 			}
 
 			if (updatedCount > 0) {
-				console.log('[Canvas Plugin] Updated', updatedCount, 'local files from Notion');
+				console.debug('[Canvas Plugin] Updated', updatedCount, 'local files from Notion');
 			} else {
-				console.log('[Canvas Plugin] No changes from Notion');
+				console.debug('[Canvas Plugin] No changes from Notion');
 			}
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to poll Notion:', error);
@@ -2786,7 +2808,7 @@ private registerCommands(): void {
 	/**
 	 * Update local file from Notion page data
 	 */
-	private async updateLocalFileFromNotion(file: TFile, page: any): Promise<void> {
+	private async updateLocalFileFromNotion(file: TFile, page: NotionPage): Promise<void> {
 		try {
 			const content = await this.app.vault.read(file);
 			const frontmatter = parseFrontmatter(content);
@@ -2794,6 +2816,7 @@ private registerCommands(): void {
 
 			// Extract properties from Notion page
 			const props = page.properties;
+			if (!props) return;
 
 			// Update frontmatter from Notion properties
 			if (props.Title?.title?.[0]?.plain_text) {
@@ -2816,7 +2839,9 @@ private registerCommands(): void {
 			}
 
 			// Update the updated timestamp
-			frontmatter.updated = new Date(page.last_edited_time).toISOString();
+			if (page.last_edited_time) {
+				frontmatter.updated = new Date(page.last_edited_time).toISOString();
+			}
 
 			// Get body content from Notion blocks
 			const blocks = await this.notionClient!.getPageContent(page.id);
@@ -2829,7 +2854,7 @@ private registerCommands(): void {
 			this.isUpdatingCanvas = true; // Prevent triggering auto-sync back to Notion
 			try {
 				await this.app.vault.modify(file, newContent);
-				console.log('[Canvas Plugin] Updated local file from Notion:', file.path);
+				console.debug('[Canvas Plugin] Updated local file from Notion:', file.path);
 
 				// Update canvas node color if inProgress changed
 				await this.handleMdFileModification(file);
@@ -2860,33 +2885,34 @@ private registerCommands(): void {
 	/**
 	 * Convert Notion blocks to markdown
 	 */
-	private notionBlocksToMarkdown(blocks: any[]): string {
+	private notionBlocksToMarkdown(blocks: NotionBlock[]): string {
 		const lines: string[] = [];
 
 		for (const block of blocks) {
 			switch (block.type) {
 				case "heading_1":
-					lines.push(`# ${this.richTextToPlain(block.heading_1.rich_text)}`);
+					lines.push(`# ${this.richTextToPlain(block.heading_1?.rich_text || [])}`);
 					break;
 				case "heading_2":
-					lines.push(`## ${this.richTextToPlain(block.heading_2.rich_text)}`);
+					lines.push(`## ${this.richTextToPlain(block.heading_2?.rich_text || [])}`);
 					break;
 				case "heading_3":
-					lines.push(`### ${this.richTextToPlain(block.heading_3.rich_text)}`);
+					lines.push(`### ${this.richTextToPlain(block.heading_3?.rich_text || [])}`);
 					break;
 				case "paragraph":
-					lines.push(this.richTextToPlain(block.paragraph.rich_text));
+					lines.push(this.richTextToPlain(block.paragraph?.rich_text || []));
 					break;
 				case "bulleted_list_item":
-					lines.push(`- ${this.richTextToPlain(block.bulleted_list_item.rich_text)}`);
+					lines.push(`- ${this.richTextToPlain(block.bulleted_list_item?.rich_text || [])}`);
 					break;
 				case "numbered_list_item":
-					lines.push(`1. ${this.richTextToPlain(block.numbered_list_item.rich_text)}`);
+					lines.push(`1. ${this.richTextToPlain(block.numbered_list_item?.rich_text || [])}`);
 					break;
-				case "to_do":
-					const checked = block.to_do.checked ? "x" : " ";
-					lines.push(`- [${checked}] ${this.richTextToPlain(block.to_do.rich_text)}`);
+				case "to_do": {
+					const checked = block.to_do?.checked ? "x" : " ";
+					lines.push(`- [${checked}] ${this.richTextToPlain(block.to_do?.rich_text || [])}`);
 					break;
+				}
 				case "divider":
 					lines.push("---");
 					break;
@@ -2902,7 +2928,7 @@ private registerCommands(): void {
 	/**
 	 * Convert Notion rich text to plain text
 	 */
-	private richTextToPlain(richText: any[]): string {
+	private richTextToPlain(richText: NotionRichText[]): string {
 		if (!richText || !Array.isArray(richText)) return "";
 		return richText.map(rt => rt.plain_text || "").join("");
 	}

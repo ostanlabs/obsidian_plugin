@@ -1,14 +1,14 @@
-import { App, TFile } from "obsidian";
+import { App } from "obsidian";
 import { CanvasItemFromTemplateSettings } from "../types";
 
 /**
  * Generate a unique ID for a new accomplishment
  * Scans existing notes to find the highest ID and increments
  */
-export async function generateId(
+export function generateId(
 	app: App,
 	settings: CanvasItemFromTemplateSettings
-): Promise<string> {
+): string {
 	const prefix = settings.idPrefixAccomplishment;
 	const padLength = settings.idZeroPadLength;
 
@@ -43,10 +43,10 @@ export async function generateId(
 /**
  * Find the highest ID currently in use (for display/debugging)
  */
-export async function findHighestId(
+export function findHighestId(
 	app: App,
 	prefix: string
-): Promise<number> {
+): number {
 	const files = app.vault.getMarkdownFiles();
 	let maxId = 0;
 

@@ -5,7 +5,7 @@
 /**
  * Notion block types we support
  */
-export type NotionBlockType = 
+export type NotionBlockType =
 	| "heading_1"
 	| "heading_2"
 	| "heading_3"
@@ -16,10 +16,42 @@ export type NotionBlockType =
 	| "divider";
 
 /**
+ * Notion rich text segment
+ */
+interface NotionRichTextSegment {
+	type: "text";
+	text: { content: string };
+	plain_text?: string;
+	annotations?: {
+		bold?: boolean;
+		italic?: boolean;
+		strikethrough?: boolean;
+		underline?: boolean;
+		code?: boolean;
+	};
+}
+
+/**
+ * Notion block structure
+ */
+interface NotionBlock {
+	object: "block";
+	type: NotionBlockType;
+	heading_1?: { rich_text: NotionRichTextSegment[] };
+	heading_2?: { rich_text: NotionRichTextSegment[] };
+	heading_3?: { rich_text: NotionRichTextSegment[] };
+	paragraph?: { rich_text: NotionRichTextSegment[] };
+	bulleted_list_item?: { rich_text: NotionRichTextSegment[] };
+	numbered_list_item?: { rich_text: NotionRichTextSegment[] };
+	to_do?: { rich_text: NotionRichTextSegment[]; checked: boolean };
+	divider?: Record<string, never>;
+}
+
+/**
  * Parse markdown body (without frontmatter) into Notion blocks
  */
-export function markdownToNotionBlocks(markdown: string): any[] {
-	const blocks: any[] = [];
+export function markdownToNotionBlocks(markdown: string): NotionBlock[] {
+	const blocks: NotionBlock[] = [];
 	const lines = markdown.split("\n");
 	
 	let i = 0;
@@ -114,12 +146,12 @@ export function markdownToNotionBlocks(markdown: string): any[] {
 /**
  * Convert Notion blocks back to markdown
  */
-export function notionBlocksToMarkdown(blocks: any[]): string {
+export function notionBlocksToMarkdown(blocks: NotionBlock[]): string {
 	const lines: string[] = [];
-	
+
 	for (const block of blocks) {
 		const type = block.type;
-		
+
 		switch (type) {
 			case "heading_1":
 				lines.push(`# ${extractRichText(block.heading_1?.rich_text)}`);
@@ -130,29 +162,31 @@ export function notionBlocksToMarkdown(blocks: any[]): string {
 			case "heading_3":
 				lines.push(`### ${extractRichText(block.heading_3?.rich_text)}`);
 				break;
-			case "paragraph":
+			case "paragraph": {
 				const text = extractRichText(block.paragraph?.rich_text);
 				if (text) {
 					lines.push(text);
 				}
 				lines.push(""); // Add blank line after paragraph
 				break;
+			}
 			case "bulleted_list_item":
 				lines.push(`- ${extractRichText(block.bulleted_list_item?.rich_text)}`);
 				break;
 			case "numbered_list_item":
 				lines.push(`1. ${extractRichText(block.numbered_list_item?.rich_text)}`);
 				break;
-			case "to_do":
+			case "to_do": {
 				const checked = block.to_do?.checked ? "x" : " ";
 				lines.push(`- [${checked}] ${extractRichText(block.to_do?.rich_text)}`);
 				break;
+			}
 			case "divider":
 				lines.push("---");
 				break;
 			default:
 				// Unknown block type, try to extract any text
-				console.log(`[Content Sync] Unknown block type: ${type}`);
+				console.debug(`[Content Sync] Unknown block type: ${type}`);
 		}
 	}
 	
@@ -162,7 +196,7 @@ export function notionBlocksToMarkdown(blocks: any[]): string {
 /**
  * Extract plain text from Notion rich_text array
  */
-function extractRichText(richText: any[] | undefined): string {
+function extractRichText(richText: NotionRichTextSegment[] | undefined): string {
 	if (!richText || !Array.isArray(richText)) {
 		return "";
 	}
@@ -172,11 +206,11 @@ function extractRichText(richText: any[] | undefined): string {
 /**
  * Create rich_text array for Notion
  */
-function createRichText(text: string): any[] {
+function createRichText(text: string): NotionRichTextSegment[] {
 	// Parse bold (**text**) and italic (*text* or _text_)
-	const segments: any[] = [];
-	let remaining = text;
-	
+	const segments: NotionRichTextSegment[] = [];
+	const remaining = text;
+
 	// Simple approach: just create plain text for now
 	// TODO: Add support for bold, italic, code, links
 	if (remaining) {
@@ -185,11 +219,11 @@ function createRichText(text: string): any[] {
 			text: { content: remaining },
 		});
 	}
-	
+
 	return segments;
 }
 
-function createHeading1Block(text: string): any {
+function createHeading1Block(text: string): NotionBlock {
 	return {
 		object: "block",
 		type: "heading_1",
@@ -199,7 +233,7 @@ function createHeading1Block(text: string): any {
 	};
 }
 
-function createHeading2Block(text: string): any {
+function createHeading2Block(text: string): NotionBlock {
 	return {
 		object: "block",
 		type: "heading_2",
@@ -209,7 +243,7 @@ function createHeading2Block(text: string): any {
 	};
 }
 
-function createHeading3Block(text: string): any {
+function createHeading3Block(text: string): NotionBlock {
 	return {
 		object: "block",
 		type: "heading_3",
@@ -219,7 +253,7 @@ function createHeading3Block(text: string): any {
 	};
 }
 
-function createParagraphBlock(text: string): any {
+function createParagraphBlock(text: string): NotionBlock {
 	return {
 		object: "block",
 		type: "paragraph",
@@ -229,7 +263,7 @@ function createParagraphBlock(text: string): any {
 	};
 }
 
-function createBulletedListBlock(text: string): any {
+function createBulletedListBlock(text: string): NotionBlock {
 	return {
 		object: "block",
 		type: "bulleted_list_item",
@@ -239,7 +273,7 @@ function createBulletedListBlock(text: string): any {
 	};
 }
 
-function createNumberedListBlock(text: string): any {
+function createNumberedListBlock(text: string): NotionBlock {
 	return {
 		object: "block",
 		type: "numbered_list_item",
@@ -249,7 +283,7 @@ function createNumberedListBlock(text: string): any {
 	};
 }
 
-function createToDoBlock(text: string, checked: boolean): any {
+function createToDoBlock(text: string, checked: boolean): NotionBlock {
 	return {
 		object: "block",
 		type: "to_do",
@@ -260,7 +294,7 @@ function createToDoBlock(text: string, checked: boolean): any {
 	};
 }
 
-function createDividerBlock(): any {
+function createDividerBlock(): NotionBlock {
 	return {
 		object: "block",
 		type: "divider",
