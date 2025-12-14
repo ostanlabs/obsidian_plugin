@@ -59,14 +59,14 @@ export async function saveCanvasData(
 	data: CanvasData
 ): Promise<void> {
 	const content = JSON.stringify(data, null, 2);
-	console.log('[Canvas Plugin] Saving canvas data:', {
+	console.debug('[Canvas Plugin] Saving canvas data:', {
 		path: canvasFile.path,
 		nodeCount: data.nodes.length,
 		fileNodeCount: data.nodes.filter(n => n.type === 'file').length,
 		lastNode: data.nodes[data.nodes.length - 1]
 	});
 	await app.vault.modify(canvasFile, content);
-	console.log('[Canvas Plugin] Canvas saved successfully');
+	console.debug('[Canvas Plugin] Canvas saved successfully');
 }
 
 /**
@@ -255,19 +255,19 @@ export async function closeCanvasViews(app: App, canvasFile: TFile): Promise<Wor
 	const leaves = app.workspace.getLeavesOfType("canvas");
 	const closedLeaves: WorkspaceLeaf[] = [];
 	
-	console.log('[Canvas Plugin] closeCanvasViews:', {
+	console.debug('[Canvas Plugin] closeCanvasViews:', {
 		totalCanvasLeaves: leaves.length,
 		targetFile: canvasFile.path
 	});
 	
 	for (const leaf of leaves) {
 		const view = leaf.view as any;
-		console.log('[Canvas Plugin] Checking leaf:', {
+		console.debug('[Canvas Plugin] Checking leaf:', {
 			viewType: leaf.view?.getViewType(),
 			viewFile: view.file?.path
 		});
 		if (view.file?.path === canvasFile.path) {
-			console.log('[Canvas Plugin] Closing matching canvas view');
+			console.debug('[Canvas Plugin] Closing matching canvas view');
 			closedLeaves.push(leaf);
 			await leaf.setViewState({
 				type: "empty",
@@ -275,7 +275,7 @@ export async function closeCanvasViews(app: App, canvasFile: TFile): Promise<Wor
 		}
 	}
 	
-	console.log('[Canvas Plugin] Closed', closedLeaves.length, 'canvas views');
+	console.debug('[Canvas Plugin] Closed', closedLeaves.length, 'canvas views');
 	return closedLeaves;
 }
 
@@ -334,12 +334,12 @@ export function captureCanvasViewport(app: App, canvasFile: TFile): CanvasViewpo
 				y: view.canvas.y ?? 0,
 				zoom: view.canvas.zoom ?? 1,
 			};
-			console.log('[Canvas Plugin] Captured viewport:', viewport);
+			console.debug('[Canvas Plugin] Captured viewport:', viewport);
 			return viewport;
 		}
 	}
 
-	console.log('[Canvas Plugin] No canvas view found to capture viewport');
+	console.debug('[Canvas Plugin] No canvas view found to capture viewport');
 	return null;
 }
 
@@ -363,7 +363,7 @@ export async function restoreCanvasViewport(
 					// Try to set viewport using setViewport if available
 					if (typeof view.canvas.setViewport === 'function') {
 						view.canvas.setViewport(viewport.x, viewport.y, viewport.zoom);
-						console.log('[Canvas Plugin] Restored viewport via setViewport:', viewport);
+						console.debug('[Canvas Plugin] Restored viewport via setViewport:', viewport);
 						return true;
 					}
 
@@ -382,7 +382,7 @@ export async function restoreCanvasViewport(
 						view.canvas.markViewportChanged();
 					}
 
-					console.log('[Canvas Plugin] Restored viewport via direct properties:', viewport);
+					console.debug('[Canvas Plugin] Restored viewport via direct properties:', viewport);
 					return true;
 				} catch (error) {
 					console.warn('[Canvas Plugin] Failed to restore viewport:', error);
@@ -410,7 +410,7 @@ export async function reloadCanvasViewsWithViewport(app: App, canvasFile: TFile)
 	const closedLeaves = await closeCanvasViews(app, canvasFile);
 
 	if (closedLeaves.length === 0) {
-		console.log('[Canvas Plugin] No canvas views to reload');
+		console.debug('[Canvas Plugin] No canvas views to reload');
 		return;
 	}
 

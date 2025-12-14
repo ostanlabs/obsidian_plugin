@@ -77,3 +77,120 @@ export interface ItemFrontmatter {
 	notion_page_id?: string;
 }
 
+/**
+ * Internal canvas node data (from getData())
+ * This is not part of the public Obsidian API
+ */
+export interface InternalCanvasNodeData {
+	id: string;
+	type: "text" | "file" | "link" | "group";
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	color?: string;
+	text?: string;
+	file?: string;
+	url?: string;
+	label?: string;
+	metadata?: {
+		plugin?: string;
+		collapsed?: boolean;
+		alias?: string;
+		shape?: string;
+		effortColor?: string;
+		showId?: boolean;
+		expandedFields?: string[];
+		expandedSize?: { width: number; height: number };
+		[key: string]: unknown;
+	};
+}
+
+/**
+ * Internal canvas node object (runtime representation)
+ * This is not part of the public Obsidian API
+ */
+export interface InternalCanvasNode {
+	nodeEl: HTMLElement;
+	getData: () => InternalCanvasNodeData;
+	setData?: (data: Partial<InternalCanvasNodeData>) => void;
+	setColor?: (color: string) => void;
+	render?: () => void;
+	canvas?: InternalCanvas & { view?: { file?: unknown } };
+}
+
+/**
+ * Internal canvas object
+ * This is not part of the public Obsidian API
+ */
+export interface InternalCanvas {
+	nodes: Map<string, InternalCanvasNode>;
+	data?: { nodes: InternalCanvasNodeData[] };
+	requestSave?: () => void;
+}
+
+/**
+ * Result from getCanvasNodeFromEventTarget
+ */
+export interface CanvasNodeResult {
+	node: InternalCanvasNode;
+	el: HTMLElement;
+}
+
+/**
+ * Notion rich text element
+ */
+export interface NotionRichText {
+	type: string;
+	text?: { content: string };
+	plain_text?: string;
+}
+
+/**
+ * Notion block element
+ */
+export interface NotionBlock {
+	type: string;
+	paragraph?: { rich_text: NotionRichText[] };
+	heading_1?: { rich_text: NotionRichText[] };
+	heading_2?: { rich_text: NotionRichText[] };
+	heading_3?: { rich_text: NotionRichText[] };
+	bulleted_list_item?: { rich_text: NotionRichText[] };
+	numbered_list_item?: { rich_text: NotionRichText[] };
+	to_do?: { rich_text: NotionRichText[]; checked?: boolean };
+	code?: { rich_text: NotionRichText[]; language?: string };
+	quote?: { rich_text: NotionRichText[] };
+}
+
+/**
+ * Notion page response (partial)
+ */
+export interface NotionPage {
+	id: string;
+	properties?: {
+		Title?: { title?: NotionRichText[] };
+		ID?: { rich_text?: NotionRichText[] };
+		Status?: { select?: { name?: string } };
+		Priority?: { select?: { name?: string } };
+		Effort?: { select?: { name?: string } };
+		"Time Estimate"?: { number?: number };
+		"In Progress"?: { checkbox?: boolean };
+		"Depends On"?: { multi_select?: Array<{ name?: string }> };
+		[key: string]: unknown;
+	};
+	last_edited_time?: string;
+}
+
+/**
+ * Canvas edge data
+ */
+export interface CanvasEdge {
+	id: string;
+	fromNode: string;
+	toNode: string;
+	fromSide?: string;
+	toSide?: string;
+	color?: string;
+	label?: string;
+}
+

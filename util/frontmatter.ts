@@ -1,6 +1,11 @@
 import { ItemFrontmatter, ItemStatus, ItemPriority } from "../types";
 
 /**
+ * Parsed frontmatter with string index signature for dynamic access
+ */
+type ParsedFrontmatter = Record<string, string | string[] | boolean | number | undefined>;
+
+/**
  * Parse a YAML value that might be a JSON array
  * e.g., '["ACC-001", "ACC-002"]' -> ["ACC-001", "ACC-002"]
  */
@@ -44,7 +49,7 @@ export function parseFrontmatter(content: string): ItemFrontmatter | null {
 
 	const frontmatterText = match[1];
 	const lines = frontmatterText.split("\n");
-	const frontmatter: any = {};
+	const frontmatter: ParsedFrontmatter = {};
 
 	for (const line of lines) {
 		const colonIndex = line.indexOf(":");
@@ -84,7 +89,7 @@ export function parseFrontmatter(content: string): ItemFrontmatter | null {
 		}
 	}
 
-	return frontmatter as ItemFrontmatter;
+	return frontmatter as unknown as ItemFrontmatter;
 }
 
 /**
@@ -92,7 +97,7 @@ export function parseFrontmatter(content: string): ItemFrontmatter | null {
  * Returns both frontmatter and body content separately
  */
 export function parseFrontmatterAndBody(content: string): {
-	frontmatter: any;
+	frontmatter: ParsedFrontmatter;
 	body: string;
 } {
 	const frontmatterRegex = /^---\n([\s\S]*?)\n---\n?/;
@@ -107,7 +112,7 @@ export function parseFrontmatterAndBody(content: string): {
 
 	const frontmatterText = match[1];
 	const lines = frontmatterText.split("\n");
-	const frontmatter: any = {};
+	const frontmatter: ParsedFrontmatter = {};
 
 	for (const line of lines) {
 		const colonIndex = line.indexOf(":");
@@ -142,7 +147,7 @@ export function updateFrontmatter(
 	const match = content.match(frontmatterRegex);
 
 	let body = content;
-	let existingFrontmatter: any = {};
+	let existingFrontmatter: ParsedFrontmatter = {};
 
 	if (match) {
 		// Parse existing frontmatter

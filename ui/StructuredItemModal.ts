@@ -52,7 +52,7 @@ export class StructuredItemModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 
-		contentEl.createEl("h2", { text: this.options.modalTitle });
+		new Setting(contentEl).setName(this.options.modalTitle).setHeading();
 
 		// Show current title as context if not editable
 		if (!this.options.showTitleInput && this.options.currentTitle) {
@@ -140,24 +140,16 @@ export class StructuredItemModal extends Modal {
 		// Show Notion sync status if enabled
 		if (this.settings.notionEnabled && this.settings.notionDatabaseId) {
 			const notionInfo = contentEl.createEl("div", {
-				cls: "notion-sync-info",
+				cls: "notion-sync-info canvas-accomplishments-notion-info",
 			});
 			notionInfo.createEl("small", {
 				text: "✓ Will sync to Notion",
 				cls: "notion-sync-enabled",
 			});
-			notionInfo.style.marginTop = "1rem";
-			notionInfo.style.padding = "0.5rem";
-			notionInfo.style.backgroundColor = "var(--background-modifier-success)";
-			notionInfo.style.borderRadius = "4px";
 		}
 
 		// Buttons
-		const buttonContainer = contentEl.createDiv({ cls: "modal-button-container" });
-		buttonContainer.style.display = "flex";
-		buttonContainer.style.justifyContent = "flex-end";
-		buttonContainer.style.gap = "0.5rem";
-		buttonContainer.style.marginTop = "1.5rem";
+		const buttonContainer = contentEl.createDiv({ cls: "modal-button-container canvas-accomplishments-button-container" });
 
 		const cancelButton = buttonContainer.createEl("button", { text: "Cancel" });
 		cancelButton.addEventListener("click", () => {
@@ -176,7 +168,7 @@ export class StructuredItemModal extends Modal {
 	/**
 	 * Load available templates from the template folder
 	 */
-	private async loadTemplates(): Promise<void> {
+	private loadTemplates(): void {
 		this.availableTemplates = [];
 
 		const folder = this.app.vault.getAbstractFileByPath(
