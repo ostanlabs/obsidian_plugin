@@ -194,3 +194,45 @@ export interface CanvasEdge {
 	label?: string;
 }
 
+/**
+ * Internal canvas object (view's canvas property)
+ * This is not part of the public Obsidian API
+ */
+export interface InternalCanvasObject {
+	x?: number;
+	y?: number;
+	zoom?: number;
+	wrapperEl?: HTMLElement;
+	setViewport?: (x: number, y: number, zoom: number) => void;
+	requestFrame?: () => void;
+	markViewportChanged?: () => void;
+}
+
+/**
+ * Internal canvas view (runtime representation)
+ * This is not part of the public Obsidian API
+ */
+export interface InternalCanvasView {
+	file?: { path: string };
+	canvas?: InternalCanvasObject;
+}
+
+/**
+ * Extended CanvasNode with styleAttributes (Obsidian-specific)
+ */
+export interface ExtendedCanvasNode {
+	id: string;
+	type: "text" | "file" | "link" | "group";
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	color?: string;
+	text?: string;
+	file?: string;
+	url?: string;
+	label?: string;
+	metadata?: Record<string, unknown>;
+	styleAttributes?: Record<string, unknown>;
+}
+

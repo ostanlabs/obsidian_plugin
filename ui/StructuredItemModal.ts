@@ -64,7 +64,7 @@ export class StructuredItemModal extends Modal {
 
 		// Load available templates if template folder is enabled
 		if (this.options.showTemplateSelector && this.settings.useTemplateFolder) {
-			await this.loadTemplates();
+			this.loadTemplates();
 		}
 
 		// Template selector (if enabled and templates are available)

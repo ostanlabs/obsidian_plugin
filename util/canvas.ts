@@ -1,4 +1,5 @@
 import { App, TFile, WorkspaceLeaf } from "obsidian";
+import { InternalCanvasView } from "../types";
 
 /**
  * Canvas node types from Obsidian Canvas format
@@ -26,6 +27,7 @@ export interface CanvasNode {
 		expandedSize?: { width: number; height: number };
 		[key: string]: unknown;
 	};
+	styleAttributes?: Record<string, unknown>;
 }
 
 export interface CanvasEdge {
@@ -155,36 +157,36 @@ export function getCanvasCenter(app: App, canvasFile?: TFile): { x: number; y: n
 		try {
 			const leaves = app.workspace.getLeavesOfType("canvas");
 			const canvasLeaf = leaves.find(leaf => {
-				const view = leaf.view as any;
+				const view = leaf.view as InternalCanvasView;
 				return view.file?.path === canvasFile.path;
 			});
-			
+
 			if (canvasLeaf) {
-				const view = canvasLeaf.view as any;
+				const view = canvasLeaf.view as InternalCanvasView;
 				if (view.canvas) {
 					// Get the current viewport position and dimensions
 					const x = view.canvas.x ?? 0;
 					const y = view.canvas.y ?? 0;
 					const zoom = view.canvas.zoom ?? 1;
-					
+
 					// Get the canvas container dimensions
 					const container = view.canvas.wrapperEl;
 					if (container) {
 						const rect = container.getBoundingClientRect();
 						const viewportWidth = rect.width / zoom;
 						const viewportHeight = rect.height / zoom;
-						
+
 						// Calculate the center of the visible viewport
 						const centerX = x + viewportWidth / 2;
 						const centerY = y + viewportHeight / 2;
-						
+
 						// Add small randomization to avoid exact stacking
 						const randomOffsetX = Math.floor(Math.random() * 100) - 50;
 						const randomOffsetY = Math.floor(Math.random() * 100) - 50;
-						
-						return { 
-							x: centerX + randomOffsetX, 
-							y: centerY + randomOffsetY 
+
+						return {
+							x: centerX + randomOffsetX,
+							y: centerY + randomOffsetY
 						};
 					}
 				}
@@ -261,7 +263,7 @@ export async function closeCanvasViews(app: App, canvasFile: TFile): Promise<Wor
 	});
 	
 	for (const leaf of leaves) {
-		const view = leaf.view as any;
+		const view = leaf.view as InternalCanvasView;
 		console.debug('[Canvas Plugin] Checking leaf:', {
 			viewType: leaf.view?.getViewType(),
 			viewFile: view.file?.path
@@ -327,7 +329,7 @@ export function captureCanvasViewport(app: App, canvasFile: TFile): CanvasViewpo
 	const leaves = app.workspace.getLeavesOfType("canvas");
 
 	for (const leaf of leaves) {
-		const view = leaf.view as any;
+		const view = leaf.view as InternalCanvasView;
 		if (view.file?.path === canvasFile.path && view.canvas) {
 			const viewport: CanvasViewport = {
 				x: view.canvas.x ?? 0,
@@ -357,29 +359,30 @@ export async function restoreCanvasViewport(
 		const leaves = app.workspace.getLeavesOfType("canvas");
 
 		for (const leaf of leaves) {
-			const view = leaf.view as any;
+			const view = leaf.view as InternalCanvasView;
 			if (view.file?.path === canvasFile.path && view.canvas) {
 				try {
+					const canvas = view.canvas;
 					// Try to set viewport using setViewport if available
-					if (typeof view.canvas.setViewport === 'function') {
-						view.canvas.setViewport(viewport.x, viewport.y, viewport.zoom);
+					if (typeof canvas.setViewport === 'function') {
+						canvas.setViewport(viewport.x, viewport.y, viewport.zoom);
 						console.debug('[Canvas Plugin] Restored viewport via setViewport:', viewport);
 						return true;
 					}
 
 					// Fallback: set properties directly
-					view.canvas.x = viewport.x;
-					view.canvas.y = viewport.y;
-					view.canvas.zoom = viewport.zoom;
+					canvas.x = viewport.x;
+					canvas.y = viewport.y;
+					canvas.zoom = viewport.zoom;
 
 					// Request a frame update to apply changes
-					if (typeof view.canvas.requestFrame === 'function') {
-						view.canvas.requestFrame();
+					if (typeof canvas.requestFrame === 'function') {
+						canvas.requestFrame();
 					}
 
 					// Also try markViewportChanged if available
-					if (typeof view.canvas.markViewportChanged === 'function') {
-						view.canvas.markViewportChanged();
+					if (typeof canvas.markViewportChanged === 'function') {
+						canvas.markViewportChanged();
 					}
 
 					console.debug('[Canvas Plugin] Restored viewport via direct properties:', viewport);
