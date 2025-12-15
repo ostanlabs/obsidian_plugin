@@ -184,9 +184,11 @@ export function notionBlocksToMarkdown(blocks: NotionBlock[]): string {
 			case "divider":
 				lines.push("---");
 				break;
-			default:
+			default: {
 				// Unknown block type, try to extract any text
-				console.debug(`[Content Sync] Unknown block type: ${type}`);
+				const unknownType: string = type;
+				console.debug(`[Content Sync] Unknown block type: ${unknownType}`);
+			}
 		}
 	}
 	

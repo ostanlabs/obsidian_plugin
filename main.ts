@@ -13,6 +13,7 @@ import {
 	NotionRichText,
 	NotionPage,
 	CanvasEdge,
+	InternalCanvasView,
 } from "./types";
 import { CanvasStructuredItemsSettingTab } from "./settings";
 import { StructuredItemModal, StructuredItemResult, StructuredItemModalOptions } from "./ui/StructuredItemModal";
@@ -84,7 +85,7 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 		if (!(target instanceof HTMLElement)) return null;
 		const selectors = [".canvas-node", ".canvas-card"];
 		for (const sel of selectors) {
-			const el = target.closest(sel) as HTMLElement | null;
+			const el = target.closest<HTMLElement>(sel);
 			if (el) {
 				const node = this.findCanvasNodeByElement(el);
 				return node ? { node, el } : null;
@@ -240,7 +241,7 @@ private registerCommands(): void {
 	// Command 1: Initialize Notion database
 	this.addCommand({
 		id: "initialize-notion-database",
-		name: "Canvas Item: Initialize Notion Database",
+		name: "Canvas item: Initialize Notion database",
 		callback: async () => {
 			await this.initializeNotionDatabase();
 		},
@@ -249,7 +250,7 @@ private registerCommands(): void {
 	// Command 2: Sync current note to Notion
 	this.addCommand({
 		id: "sync-current-note-to-notion",
-		name: "Canvas Item: Sync Current Note to Notion",
+		name: "Canvas item: Sync current note to Notion",
 		callback: async () => {
 			await this.syncCurrentNoteToNotion();
 		},
@@ -258,7 +259,7 @@ private registerCommands(): void {
 	// Command 3: Regenerate templates
 	this.addCommand({
 		id: "regenerate-templates",
-		name: "Canvas Item: Regenerate Templates",
+		name: "Canvas item: Regenerate templates",
 		callback: async () => {
 			await this.ensureTemplatesExist(true);
 			new Notice("Templates regenerated successfully");
@@ -268,7 +269,7 @@ private registerCommands(): void {
 	// Command 4: Sync all notes in current canvas to Notion
 	this.addCommand({
 		id: "sync-canvas-notes-to-notion",
-		name: "Canvas Item: Sync All Notes in Current Canvas to Notion",
+		name: "Canvas item: Sync all notes in current canvas to Notion",
 		callback: async () => {
 			await this.syncAllCanvasNotesToNotion();
 		},
@@ -277,7 +278,7 @@ private registerCommands(): void {
 	// Command 5: Sync canvas edges to MD depends_on fields
 	this.addCommand({
 		id: "sync-edges-to-depends-on",
-		name: "Canvas Item: Sync Edges to Dependencies",
+		name: "Canvas item: Sync edges to dependencies",
 		callback: async () => {
 			await this.syncEdgesToDependsOnCommand();
 		},
@@ -467,10 +468,9 @@ private registerCommands(): void {
 			width: DEFAULT_NODE_WIDTH,
 			height: DEFAULT_NODE_HEIGHT,
 			metadata,
-		} as any; // Use 'as any' to allow styleAttributes (Obsidian-specific field)
+			styleAttributes: {},
+		};
 
-		// Add styleAttributes to align with converted nodes
-		(newNode as any).styleAttributes = {};
 		if (color) {
 			newNode.color = color;
 		}
@@ -827,8 +827,8 @@ private registerCommands(): void {
 			item
 				.setTitle("Convert to Structured Item")
 				.setIcon("file-box")
-				.onClick(async () => {
-					await this.convertNoteToStructuredItem(file);
+				.onClick(() => {
+					void this.convertNoteToStructuredItem(file);
 				});
 		});
 	}
@@ -914,14 +914,14 @@ private registerCommands(): void {
 			if (!data?.id) return null;
 
 			// Read node type from canvas file (source of truth)
-			if (!canvasNode?.canvas?.view?.file) {
+			const viewFile = canvasNode?.canvas?.view?.file;
+			if (!viewFile || !(viewFile instanceof TFile)) {
 				return null;
 			}
 
 			let nodeInFile: CanvasNode | undefined;
 			try {
-				const canvasFile = canvasNode.canvas.view.file as TFile;
-				const canvasData = await loadCanvasData(this.app, canvasFile);
+				const canvasData = await loadCanvasData(this.app, viewFile);
 				nodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === data.id);
 
 				if (!nodeInFile) {
@@ -999,7 +999,7 @@ private registerCommands(): void {
 				id: data.id,
 				type: data.type,
 				file: data.file,
-				textPreview: data.text ? (data.text as string).split("\n")[0]?.slice(0, 80) : undefined,
+				textPreview: data.text ? String(data.text).split("\n")[0]?.slice(0, 80) : undefined,
 				metadataPlugin: data.metadata?.plugin,
 			});
 
@@ -1152,16 +1152,16 @@ private registerCommands(): void {
 			// Read ALL node data from canvas file (source of truth)
 			// getData() may be stale, especially after conversions
 			let nodeInFile: CanvasNode | undefined;
-			if (!canvasNode?.canvas?.view?.file) {
+			const viewFile = canvasNode?.canvas?.view?.file;
+			if (!viewFile || !(viewFile instanceof TFile)) {
 				console.debug("[Canvas Plugin] Cannot access canvas file");
 				return;
 			}
 
 			try {
-				const canvasFile = canvasNode.canvas.view.file as TFile;
-				const canvasData = await loadCanvasData(this.app, canvasFile);
+				const canvasData = await loadCanvasData(this.app, viewFile);
 				nodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === data.id);
-				
+
 				if (!nodeInFile) {
 					console.debug("[Canvas Plugin] Node not found in canvas file:", data.id);
 					return;
@@ -1209,7 +1209,7 @@ private registerCommands(): void {
 			const menus = document.querySelectorAll<HTMLElement>(".canvas-card-menu");
 			let visibleMenu: HTMLElement | null = null;
 			for (let i = 0; i < menus.length; i++) {
-				const el = menus[i] as HTMLElement;
+				const el = menus[i];
 				const style = window.getComputedStyle(el);
 				if (style.display !== "none" && style.visibility !== "hidden") {
 					visibleMenu = el;
@@ -1324,7 +1324,7 @@ private registerCommands(): void {
 			}
 			const workspace = this.app.workspace;
 			const existingLeaf = workspace.getLeavesOfType("markdown").find((leaf) => {
-				const view = leaf.view as any;
+				const view = leaf.view as InternalCanvasView;
 				return view.file?.path === file.path;
 			});
 
@@ -1350,11 +1350,11 @@ private registerCommands(): void {
 			for (const nodeEl of selectedNodes) {
 				const canvasNode = this.findCanvasNodeByElement(nodeEl);
 				const data = canvasNode?.getData?.();
-				if (!data?.id || !canvasNode?.canvas?.view?.file) continue;
+				const viewFile = canvasNode?.canvas?.view?.file;
+				if (!data?.id || !viewFile || !(viewFile instanceof TFile)) continue;
 
 				try {
-					const canvasFile = canvasNode.canvas.view.file as TFile;
-					const canvasData = await loadCanvasData(this.app, canvasFile);
+					const canvasData = await loadCanvasData(this.app, viewFile);
 					const nodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === data.id);
 
 					// Only include plugin-created file nodes (check MD frontmatter)
@@ -1520,17 +1520,17 @@ private registerCommands(): void {
 			}
 
 			// Read node type from canvas file (source of truth)
-			if (!targetNode?.canvas?.view?.file) {
+			const viewFile = targetNode?.canvas?.view?.file;
+			if (!viewFile || !(viewFile instanceof TFile)) {
 				console.debug('[Canvas Plugin] Cannot access canvas file');
 				return;
 			}
 
 			let nodeInFile: CanvasNode | undefined;
 			try {
-				const canvasFile = targetNode.canvas.view.file as TFile;
-				const canvasData = await loadCanvasData(this.app, canvasFile);
+				const canvasData = await loadCanvasData(this.app, viewFile);
 				nodeInFile = canvasData.nodes.find((n: CanvasNode) => n.id === nodeData.id);
-				
+
 				if (!nodeInFile) {
 					console.debug('[Canvas Plugin] Node not found in canvas file:', nodeData.id);
 					return;
@@ -1729,9 +1729,9 @@ private registerCommands(): void {
 			}
 
 			const canvasView = node.canvas?.view;
-			const canvasFile = canvasView?.file as TFile | undefined;
+			const canvasFile = canvasView?.file;
 
-			if (!canvasFile) {
+			if (!canvasFile || !(canvasFile instanceof TFile)) {
 				new Notice("Could not find canvas file");
 				return;
 			}
@@ -1943,10 +1943,10 @@ private registerCommands(): void {
 				existingNode.height = DEFAULT_NODE_HEIGHT;
 				existingNode.width = DEFAULT_NODE_WIDTH;
 				// Remove text property
-				delete (existingNode as any).text;
+				delete existingNode.text;
 				// Ensure styleAttributes exists for consistency
-				if (!(existingNode as any).styleAttributes) {
-					(existingNode as any).styleAttributes = {};
+				if (!existingNode.styleAttributes) {
+					existingNode.styleAttributes = {};
 				}
 
 				console.debug('[Canvas Plugin] Node transformed:', {
@@ -1991,8 +1991,8 @@ private registerCommands(): void {
 					width: DEFAULT_NODE_WIDTH,
 					height: DEFAULT_NODE_HEIGHT,
 					metadata,
-				} as any;
-				(newNode as any).styleAttributes = {};
+					styleAttributes: {},
+				};
 
 				if (color) {
 					newNode.color = color;
@@ -2041,12 +2041,12 @@ private registerCommands(): void {
 
 			// Refresh the selection menu buttons after conversion
 			// Wait a bit for the canvas to update, then refresh the menu
-			setTimeout(async () => {
+			setTimeout(() => {
 				// Clear old menu buttons first
 				this.clearInjectedMenuButtons();
 				// Re-inject menu buttons for the converted node
 				if (node) {
-					await this.addSelectionMenuButton(node);
+					void this.addSelectionMenuButton(node);
 				}
 			}, 250);
 
@@ -2294,9 +2294,9 @@ private registerCommands(): void {
 		}
 
 		// Set new timer (500ms debounce)
-		const timer = setTimeout(async () => {
+		const timer = setTimeout(() => {
 			this.edgeSyncDebounceTimers.delete(canvasFile.path);
-			await this.syncEdgesToMdFiles(canvasFile);
+			void this.syncEdgesToMdFiles(canvasFile);
 		}, 500);
 
 		this.edgeSyncDebounceTimers.set(canvasFile.path, timer);
@@ -2572,16 +2572,16 @@ private registerCommands(): void {
 				}
 
 				// Set new debounce timer (2 seconds)
-				const timer = setTimeout(async () => {
+				const timer = setTimeout(() => {
 					this.mdSyncDebounceTimers.delete(file.path);
-					try {
-						console.debug('[Canvas Plugin] Auto-syncing to Notion:', file.path);
-						await this.notionClient!.syncNote(frontmatter);
-						console.debug('[Canvas Plugin] Auto-sync complete:', file.path);
-					} catch (error) {
-						console.error('[Canvas Plugin] Auto-sync failed:', error);
-						// Don't show notice for auto-sync failures to avoid spam
-					}
+					this.notionClient!.syncNote(frontmatter)
+						.then(() => {
+							console.debug('[Canvas Plugin] Auto-sync complete:', file.path);
+						})
+						.catch((error: unknown) => {
+							console.error('[Canvas Plugin] Auto-sync failed:', error);
+							// Don't show notice for auto-sync failures to avoid spam
+						});
 				}, 2000);
 
 				this.mdSyncDebounceTimers.set(file.path, timer);

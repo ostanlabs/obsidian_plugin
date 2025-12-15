@@ -14,8 +14,8 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 
 		containerEl.empty();
 
-		// General Section
-		new Setting(containerEl).setName("General settings").setHeading();
+		// Basic options section
+		new Setting(containerEl).setName("Basic options").setHeading();
 
 		new Setting(containerEl)
 			.setName("Notes base folder")
@@ -24,9 +24,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				text
 					.setPlaceholder("Projects")
 					.setValue(this.plugin.settings.notesBaseFolder)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.notesBaseFolder = value;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					})
 			);
 
@@ -38,9 +38,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.inferBaseFolderFromCanvas)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.inferBaseFolderFromCanvas = value;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					})
 			);
 
@@ -54,9 +54,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				text
 					.setPlaceholder("Templates/canvas-accomplishment-template.md")
 					.setValue(this.plugin.settings.accomplishmentTemplatePath)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.accomplishmentTemplatePath = value;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					})
 			);
 
@@ -68,9 +68,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.useTemplateFolder)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.useTemplateFolder = value;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 						this.display(); // Refresh to show/hide folder setting
 					})
 			);
@@ -83,9 +83,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 					text
 						.setPlaceholder("Templates")
 						.setValue(this.plugin.settings.templateFolder)
-						.onChange(async (value) => {
+						.onChange((value) => {
 							this.plugin.settings.templateFolder = value;
-							await this.plugin.saveSettings();
+							void this.plugin.saveSettings();
 						})
 				);
 		}
@@ -110,9 +110,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				text
 					.setPlaceholder("A")
 					.setValue(this.plugin.settings.idPrefixAccomplishment)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.idPrefixAccomplishment = value;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					})
 			);
 
@@ -123,11 +123,11 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				text
 					.setPlaceholder("3")
 					.setValue(String(this.plugin.settings.idZeroPadLength))
-					.onChange(async (value) => {
+					.onChange((value) => {
 						const num = parseInt(value);
 						if (!isNaN(num) && num > 0) {
 							this.plugin.settings.idZeroPadLength = num;
-							await this.plugin.saveSettings();
+							void this.plugin.saveSettings();
 						}
 					})
 			);
@@ -142,12 +142,12 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				text.inputEl.rows = 6;
 				text.inputEl.cols = 30;
 				text.setValue(this.plugin.settings.effortOptions.join("\n")).onChange(
-					async (value) => {
+					(value) => {
 						this.plugin.settings.effortOptions = value
 							.split("\n")
 							.map((s) => s.trim())
 							.filter((s) => s.length > 0);
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					}
 				);
 			});
@@ -159,9 +159,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				this.plugin.settings.effortOptions.forEach((effort) => {
 					dropdown.addOption(effort, effort);
 				});
-				dropdown.setValue(this.plugin.settings.defaultEffort).onChange(async (value) => {
+				dropdown.setValue(this.plugin.settings.defaultEffort).onChange((value) => {
 					this.plugin.settings.defaultEffort = value;
-					await this.plugin.saveSettings();
+					void this.plugin.saveSettings();
 				});
 			});
 
@@ -174,9 +174,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.showIdInCanvas)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.showIdInCanvas = value;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					})
 			);
 
@@ -187,9 +187,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				text
 					.setPlaceholder("accomplishment")
 					.setValue(this.plugin.settings.shapeAccomplishment)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.shapeAccomplishment = value || "accomplishment";
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					})
 			);
 
@@ -203,7 +203,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 					Object.entries(this.plugin.settings.effortColorMap)
 						.map(([effort, color]) => `${effort}:${color}`)
 						.join("\n")
-				).onChange(async (value) => {
+				).onChange((value) => {
 					const map: Record<string, string> = {};
 					value
 						.split("\n")
@@ -217,7 +217,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 						});
 					// Only update if we parsed something, otherwise keep existing mapping
 					this.plugin.settings.effortColorMap = Object.keys(map).length > 0 ? map : this.plugin.settings.effortColorMap;
-					await this.plugin.saveSettings();
+					void this.plugin.saveSettings();
 				});
 			});
 
@@ -228,9 +228,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				text
 					.setPlaceholder("1")
 					.setValue(this.plugin.settings.inProgressColor)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.inProgressColor = value || "1";
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					})
 			);
 
@@ -241,9 +241,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			.setName("Enable Notion sync")
 			.setDesc("Enable syncing items to Notion database")
 			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.notionEnabled).onChange(async (value) => {
+				toggle.setValue(this.plugin.settings.notionEnabled).onChange((value) => {
 					this.plugin.settings.notionEnabled = value;
-					await this.plugin.saveSettings();
+					void this.plugin.saveSettings();
 					this.display(); // Refresh to show/hide conditional settings
 				})
 			);
@@ -256,9 +256,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 					text.inputEl.type = "password";
 					text.setPlaceholder("secret_...")
 						.setValue(this.plugin.settings.notionIntegrationToken)
-						.onChange(async (value) => {
+						.onChange((value) => {
 							this.plugin.settings.notionIntegrationToken = value;
-							await this.plugin.saveSettings();
+							void this.plugin.saveSettings();
 						});
 				});
 
@@ -269,9 +269,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 					text
 						.setPlaceholder("abc123...")
 						.setValue(this.plugin.settings.notionParentPageId)
-						.onChange(async (value) => {
+						.onChange((value) => {
 							this.plugin.settings.notionParentPageId = value;
-							await this.plugin.saveSettings();
+							void this.plugin.saveSettings();
 						})
 				);
 
@@ -282,9 +282,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 					text
 						.setPlaceholder("Obsidian Canvas Items")
 						.setValue(this.plugin.settings.notionDatabaseName)
-						.onChange(async (value) => {
+						.onChange((value) => {
 							this.plugin.settings.notionDatabaseName = value;
-							await this.plugin.saveSettings();
+							void this.plugin.saveSettings();
 						})
 				);
 
@@ -293,9 +293,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				.setDesc("Notion database ID (filled after initialization)")
 				.addText((text) => {
 					text.setValue(this.plugin.settings.notionDatabaseId).onChange(
-						async (value) => {
+						(value) => {
 							this.plugin.settings.notionDatabaseId = value;
-							await this.plugin.saveSettings();
+							void this.plugin.saveSettings();
 						}
 					);
 				});
@@ -307,8 +307,8 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 					button
 						.setButtonText("Initialize")
 						.setCta()
-						.onClick(async () => {
-							await this.plugin.initializeNotionDatabase();
+						.onClick(() => {
+							void this.plugin.initializeNotionDatabase();
 						})
 				);
 
@@ -318,9 +318,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				.addToggle((toggle) =>
 					toggle
 						.setValue(this.plugin.settings.syncOnNoteCreate)
-						.onChange(async (value) => {
+						.onChange((value) => {
 							this.plugin.settings.syncOnNoteCreate = value;
-							await this.plugin.saveSettings();
+							void this.plugin.saveSettings();
 						})
 				);
 
@@ -330,9 +330,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				.addToggle((toggle) =>
 					toggle
 						.setValue(this.plugin.settings.syncOnDemandOnly)
-						.onChange(async (value) => {
+						.onChange((value) => {
 							this.plugin.settings.syncOnDemandOnly = value;
-							await this.plugin.saveSettings();
+							void this.plugin.saveSettings();
 						})
 				);
 
@@ -342,9 +342,9 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				.addToggle((toggle) =>
 					toggle
 						.setValue(this.plugin.settings.autoSyncOnMdChange)
-						.onChange(async (value) => {
+						.onChange((value) => {
 							this.plugin.settings.autoSyncOnMdChange = value;
-							await this.plugin.saveSettings();
+							void this.plugin.saveSettings();
 						})
 				);
 		}
