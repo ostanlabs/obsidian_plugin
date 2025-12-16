@@ -143,7 +143,7 @@ export class StructuredItemModal extends Modal {
 				cls: "notion-sync-info canvas-accomplishments-notion-info",
 			});
 			notionInfo.createEl("small", {
-				text: "✓ Will sync to Notion",
+				text: "✓ will sync to Notion",
 				cls: "notion-sync-enabled",
 			});
 		}

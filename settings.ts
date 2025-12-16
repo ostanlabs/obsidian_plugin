@@ -14,8 +14,8 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 
 		containerEl.empty();
 
-		// Basic options section
-		new Setting(containerEl).setName("Basic options").setHeading();
+		// Basic section
+		new Setting(containerEl).setName("Basics").setHeading();
 
 		new Setting(containerEl)
 			.setName("Notes base folder")
@@ -105,7 +105,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Accomplishment ID prefix")
-			.setDesc("Prefix for accomplishment IDs (e.g., 'A' for A001)")
+			.setDesc("Prefix for accomplishment ids (e.g., 'a' for a001)")
 			.addText((text) =>
 				text
 					.setPlaceholder("A")
@@ -118,7 +118,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("ID zero-padding length")
-			.setDesc("Number of digits to use for IDs (e.g., 3 for 001)")
+			.setDesc("Number of digits to use for ids (e.g., 3 for 001)")
 			.addText((text) =>
 				text
 					.setPlaceholder("3")
@@ -185,7 +185,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			.setDesc("Shape name to write into canvas metadata for accomplishments")
 			.addText((text) =>
 				text
-					.setPlaceholder("accomplishment")
+					.setPlaceholder("Accomplishment")
 					.setValue(this.plugin.settings.shapeAccomplishment)
 					.onChange((value) => {
 						this.plugin.settings.shapeAccomplishment = value || "accomplishment";
@@ -195,7 +195,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Effort color map")
-			.setDesc("One mapping per line: Effort:ColorId (Obsidian color index or hex)")
+			.setDesc("One mapping per line: effort:colorid (Obsidian color index or hex)")
 			.addTextArea((text) => {
 				text.inputEl.rows = 6;
 				text.inputEl.cols = 30;
@@ -222,8 +222,8 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
-			.setName("In Progress color")
-			.setDesc("Obsidian color index for nodes marked as 'In Progress' (1=red, 2=orange, 3=yellow, 4=green, 5=cyan, 6=purple)")
+			.setName("In progress color")
+			.setDesc("Obsidian color index for nodes marked as 'in progress' (1=red, 2=orange, 3=yellow, 4=green, 5=cyan, 6=purple)")
 			.addText((text) =>
 				text
 					.setPlaceholder("1")
@@ -254,7 +254,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				.setDesc("Notion internal integration token")
 				.addText((text) => {
 					text.inputEl.type = "password";
-					text.setPlaceholder("secret_...")
+					text.setPlaceholder("Secret_...")
 						.setValue(this.plugin.settings.notionIntegrationToken)
 						.onChange((value) => {
 							this.plugin.settings.notionIntegrationToken = value;
@@ -267,7 +267,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				.setDesc("Notion page ID where the database will be created")
 				.addText((text) =>
 					text
-						.setPlaceholder("abc123...")
+						.setPlaceholder("Abc123...")
 						.setValue(this.plugin.settings.notionParentPageId)
 						.onChange((value) => {
 							this.plugin.settings.notionParentPageId = value;
@@ -280,7 +280,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				.setDesc("Name for the Notion database")
 				.addText((text) =>
 					text
-						.setPlaceholder("Obsidian Canvas Items")
+						.setPlaceholder("Obsidian canvas items")
 						.setValue(this.plugin.settings.notionDatabaseName)
 						.onChange((value) => {
 							this.plugin.settings.notionDatabaseName = value;
@@ -337,8 +337,8 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				);
 
 			new Setting(containerEl)
-				.setName("Auto-sync on MD file change")
-				.setDesc("Automatically sync to Notion when a markdown file is modified (with 2s debounce)")
+				.setName("Auto-sync on md file change")
+				.setDesc("Automatically sync to Notion when a Markdown file is modified (with 2s debounce)")
 				.addToggle((toggle) =>
 					toggle
 						.setValue(this.plugin.settings.autoSyncOnMdChange)
