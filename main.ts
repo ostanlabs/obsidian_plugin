@@ -241,7 +241,7 @@ private registerCommands(): void {
 	// Command 1: Initialize Notion database
 	this.addCommand({
 		id: "initialize-notion-database",
-		name: "Canvas item: Initialize Notion database",
+		name: "Canvas item: initialize Notion database",
 		callback: async () => {
 			await this.initializeNotionDatabase();
 		},
@@ -250,7 +250,7 @@ private registerCommands(): void {
 	// Command 2: Sync current note to Notion
 	this.addCommand({
 		id: "sync-current-note-to-notion",
-		name: "Canvas item: Sync current note to Notion",
+		name: "Canvas item: sync current note to Notion",
 		callback: async () => {
 			await this.syncCurrentNoteToNotion();
 		},
@@ -259,7 +259,7 @@ private registerCommands(): void {
 	// Command 3: Regenerate templates
 	this.addCommand({
 		id: "regenerate-templates",
-		name: "Canvas item: Regenerate templates",
+		name: "Canvas item: regenerate templates",
 		callback: async () => {
 			await this.ensureTemplatesExist(true);
 			new Notice("Templates regenerated successfully");
@@ -269,7 +269,7 @@ private registerCommands(): void {
 	// Command 4: Sync all notes in current canvas to Notion
 	this.addCommand({
 		id: "sync-canvas-notes-to-notion",
-		name: "Canvas item: Sync all notes in current canvas to Notion",
+		name: "Canvas item: sync all notes in current canvas to Notion",
 		callback: async () => {
 			await this.syncAllCanvasNotesToNotion();
 		},
@@ -278,7 +278,7 @@ private registerCommands(): void {
 	// Command 5: Sync canvas edges to MD depends_on fields
 	this.addCommand({
 		id: "sync-edges-to-depends-on",
-		name: "Canvas item: Sync edges to dependencies",
+		name: "Canvas item: sync edges to dependencies",
 		callback: async () => {
 			await this.syncEdgesToDependsOnCommand();
 		},
@@ -318,7 +318,7 @@ private registerCommands(): void {
 
 			// Run sync immediately
 			await this.syncEdgesToMdFiles(canvasFile);
-			new Notice("✅ Edge sync complete");
+			new Notice("✅ edge sync complete");
 		} catch (error) {
 			new Notice("❌ Failed to sync edges: " + (error as Error).message);
 			await this.logger?.error("Failed to sync edges command", error);
@@ -494,7 +494,7 @@ private registerCommands(): void {
 	}, 500);
 
 	console.debug('[Canvas Plugin] ===== END updateCanvas =====');
-	new Notice(`✅ Item created and added to canvas!`, 4000);
+	new Notice("✅ item created and added to canvas!", 4000);
 }
 
 	/**
@@ -567,7 +567,7 @@ private registerCommands(): void {
 	private async syncCurrentNoteToNotion(): Promise<void> {
 		const activeFile = this.app.workspace.getActiveFile();
 		if (!activeFile || activeFile.extension !== "md") {
-			new Notice("No active markdown note");
+			new Notice("No active Markdown note");
 			return;
 		}
 
@@ -584,7 +584,7 @@ private registerCommands(): void {
 		}
 
 		if (!this.settings.notionDatabaseId) {
-			new Notice("Notion database not initialized. Run 'Initialize Notion Database' first.");
+			new Notice("Notion database not initialized. Run 'initialize Notion database' first.");
 			return;
 		}
 
@@ -594,7 +594,7 @@ private registerCommands(): void {
 			const frontmatter = parseFrontmatter(content);
 
 			if (!frontmatter) {
-				new Notice("This note does not have valid Canvas Item frontmatter");
+				new Notice("This note does not have valid canvas item frontmatter");
 				return;
 			}
 
@@ -633,7 +633,7 @@ private registerCommands(): void {
 		}
 
 		if (!this.notionClient.isDatabaseInitialized()) {
-			new Notice("Notion database not initialized. Run 'Initialize Notion Database' first.");
+			new Notice("Notion database not initialized. Run 'initialize Notion database' first.");
 			return;
 		}
 
@@ -656,7 +656,7 @@ private registerCommands(): void {
 			);
 
 			if (fileNodes.length === 0) {
-				new Notice("No markdown files found in canvas");
+				new Notice("No Markdown files found in canvas");
 				return;
 			}
 
@@ -825,7 +825,7 @@ private registerCommands(): void {
 	private addNoteContextMenu(menu: Menu, file: TFile): void {
 		menu.addItem((item: MenuItem) => {
 			item
-				.setTitle("Convert to Structured Item")
+				.setTitle("Convert to structured item")
 				.setIcon("file-box")
 				.onClick(() => {
 					void this.convertNoteToStructuredItem(file);
