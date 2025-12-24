@@ -1,4 +1,4 @@
-import { Plugin, TFile, Notice, normalizePath, Menu, MenuItem } from "obsidian";
+import { Plugin, TFile, Notice, normalizePath, Menu, MenuItem, WorkspaceLeaf } from "obsidian";
 import {
 	CanvasItemFromTemplateSettings,
 	DEFAULT_SETTINGS,
@@ -12,7 +12,6 @@ import {
 	NotionBlock,
 	NotionRichText,
 	NotionPage,
-	CanvasEdge,
 	InternalCanvasView,
 } from "./types";
 import { CanvasStructuredItemsSettingTab } from "./settings";
@@ -48,9 +47,17 @@ import {
 	closeCanvasViews,
 	reopenCanvasViews,
 	CanvasNode,
+	CanvasEdge,
+	CanvasData,
 	generateNodeId,
+	createEdge,
+	addEdge,
+	edgeExists,
+	findNodeByEntityId,
 } from "./util/canvas";
 import { generateUniqueFilename, isPluginCreatedNote } from "./util/fileNaming";
+import { addNodesToCanvasView, getCanvasView, hasInternalCanvasAPI, inspectCanvasAPI, addEdgesToCanvasView } from "./util/canvasView";
+import { EntityIndex, EntityIndexEntry, getEntityTypeFromId } from "./util/entityNavigator";
 
 const DEFAULT_NODE_HEIGHT = 220;
 const DEFAULT_NODE_WIDTH = 400;
@@ -80,6 +87,18 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	private notionSyncIntervalId: ReturnType<typeof setInterval> | null = null;
 	// Debounce timer for edge sync (per canvas file)
 	private edgeSyncDebounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+	// Canvas visibility toggles state
+	private visibilityState: { tasks: boolean; stories: boolean; milestones: boolean; decisions: boolean; documents: boolean } = {
+		tasks: true,
+		stories: true,
+		milestones: true,
+		decisions: true,
+		documents: true,
+	};
+	// Control panel element reference
+	private controlPanelEl: HTMLElement | null = null;
+	// Entity Navigator index
+	private entityIndex: EntityIndex | null = null;
 
 	private getCanvasNodeFromEventTarget(target: EventTarget | null): CanvasNodeResult | null {
 		if (!(target instanceof HTMLElement)) return null;
@@ -129,11 +148,14 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 		await this.loadSettings();
 
 		// Initialize logger
-		this.logger = new Logger(this.app, "canvas-accomplishments");
-		await this.logger.info("Plugin loaded");
+		this.logger = new Logger(this.app, "canvas-project-manager");
+		this.logger.info("Plugin loaded");
 
 		// Initialize Notion client
 		this.notionClient = new NotionClient(this.settings, this.logger);
+
+		// Setup CSS styles (creates snippet if needed)
+		await this.setupStyles();
 
 		// Ensure templates exist
 		await this.ensureTemplatesExist();
@@ -209,14 +231,37 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 			await this.initializeFileAccomplishmentIdCache();
 			// Start bi-directional sync polling if enabled
 			this.startNotionSyncPolling();
+			// Apply visual styles to any open canvas views
+			this.applyStylesToAllCanvasViews();
+			// Initialize Entity Navigator index
+			await this.initializeEntityNavigator();
 		});
 
-		await this.logger.info("Plugin initialization complete");
+		// Watch for canvas views opening to apply styles
+		this.registerEvent(
+			this.app.workspace.on("active-leaf-change", (leaf) => {
+				if (leaf?.view?.getViewType() === "canvas") {
+					// Delay to let canvas render
+					setTimeout(() => this.applyStylesToCanvasView(leaf.view), 100);
+				}
+			})
+		);
+
+		// Also watch for layout changes (new splits, etc.)
+		this.registerEvent(
+			this.app.workspace.on("layout-change", () => {
+				this.applyStylesToAllCanvasViews();
+			})
+		);
+
+		this.logger.info("Plugin initialization complete");
 	}
 
 	onunload() {
 		// Stop bi-directional sync polling
 		this.stopNotionSyncPolling();
+		// Remove control panel if exists
+		this.removeControlPanel();
 		void this.logger?.info("Plugin unloaded");
 	}
 
@@ -241,7 +286,7 @@ private registerCommands(): void {
 	// Command 1: Initialize Notion database
 	this.addCommand({
 		id: "initialize-notion-database",
-		name: "Canvas item: initialize Notion database",
+		name: "Project Canvas: Initialize Notion database",
 		callback: async () => {
 			await this.initializeNotionDatabase();
 		},
@@ -250,7 +295,7 @@ private registerCommands(): void {
 	// Command 2: Sync current note to Notion
 	this.addCommand({
 		id: "sync-current-note-to-notion",
-		name: "Canvas item: sync current note to Notion",
+		name: "Project Canvas: Sync current note to Notion",
 		callback: async () => {
 			await this.syncCurrentNoteToNotion();
 		},
@@ -259,7 +304,7 @@ private registerCommands(): void {
 	// Command 3: Regenerate templates
 	this.addCommand({
 		id: "regenerate-templates",
-		name: "Canvas item: regenerate templates",
+		name: "Project Canvas: Regenerate templates",
 		callback: async () => {
 			await this.ensureTemplatesExist(true);
 			new Notice("Templates regenerated successfully");
@@ -269,7 +314,7 @@ private registerCommands(): void {
 	// Command 4: Sync all notes in current canvas to Notion
 	this.addCommand({
 		id: "sync-canvas-notes-to-notion",
-		name: "Canvas item: sync all notes in current canvas to Notion",
+		name: "Project Canvas: Sync all canvas notes to Notion",
 		callback: async () => {
 			await this.syncAllCanvasNotesToNotion();
 		},
@@ -278,9 +323,111 @@ private registerCommands(): void {
 	// Command 5: Sync canvas edges to MD depends_on fields
 	this.addCommand({
 		id: "sync-edges-to-depends-on",
-		name: "Canvas item: sync edges to dependencies",
+		name: "Project Canvas: Sync edges to dependencies",
 		callback: async () => {
 			await this.syncEdgesToDependsOnCommand();
+		},
+	});
+
+	// Command 6: Populate canvas from vault entities
+	this.addCommand({
+		id: "populate-canvas-from-vault",
+		name: "Project Canvas: Populate from vault",
+		callback: async () => {
+			await this.populateCanvasFromVault();
+		},
+	});
+
+	// Command 7: Debug - Inspect canvas API
+	this.addCommand({
+		id: "inspect-canvas-api",
+		name: "Project Canvas: [DEBUG] Inspect canvas API",
+		callback: () => {
+			const canvasFile = this.getActiveCanvasFile();
+			if (!canvasFile) {
+				new Notice("No active canvas file");
+				return;
+			}
+			inspectCanvasAPI(this.app, canvasFile);
+			new Notice("Check console for canvas API inspection results");
+		},
+	});
+
+	// Command 8: Reposition canvas nodes
+	this.addCommand({
+		id: "reposition-canvas-nodes",
+		name: "Project Canvas: Reposition nodes (graph layout)",
+		callback: async () => {
+			await this.repositionCanvasNodes();
+		},
+	});
+
+	// Command 9: Strip IDs from filenames
+	this.addCommand({
+		id: "strip-ids-from-filenames",
+		name: "Project Canvas: Strip IDs from filenames",
+		callback: async () => {
+			await this.stripIdsFromFilenames();
+		},
+	});
+
+	// Command 10: Remove duplicate nodes
+	this.addCommand({
+		id: "remove-duplicate-nodes",
+		name: "Project Canvas: Remove duplicate nodes",
+		callback: async () => {
+			await this.removeDuplicateNodes();
+		},
+	});
+
+	// Entity Navigator Commands
+	this.addCommand({
+		id: "entity-nav-go-to-parent",
+		name: "Entity Navigator: Go to Parent",
+		hotkeys: [{ modifiers: ["Ctrl", "Shift"], key: "p" }],
+		callback: () => this.navigateToParent(),
+	});
+
+	this.addCommand({
+		id: "entity-nav-go-to-children",
+		name: "Entity Navigator: Go to Children",
+		callback: () => this.navigateToChildren(),
+	});
+
+	this.addCommand({
+		id: "entity-nav-go-to-dependencies",
+		name: "Entity Navigator: Go to Dependencies",
+		callback: () => this.navigateToDependencies(),
+	});
+
+	this.addCommand({
+		id: "entity-nav-go-to-documents",
+		name: "Entity Navigator: Go to Documents",
+		hotkeys: [{ modifiers: ["Ctrl", "Shift"], key: "d" }],
+		callback: () => this.navigateToDocuments(),
+	});
+
+	this.addCommand({
+		id: "entity-nav-go-to-decisions",
+		name: "Entity Navigator: Go to Decisions",
+		hotkeys: [{ modifiers: ["Ctrl", "Shift"], key: "e" }],
+		callback: () => this.navigateToDecisions(),
+	});
+
+	this.addCommand({
+		id: "entity-nav-go-to-enabled",
+		name: "Entity Navigator: Go to Enabled Entities (for decisions)",
+		callback: () => this.navigateToEnabledEntities(),
+	});
+
+	this.addCommand({
+		id: "entity-nav-rebuild-index",
+		name: "Entity Navigator: Rebuild Index",
+		callback: async () => {
+			if (this.entityIndex) {
+				await this.entityIndex.buildIndex();
+				new Notice("Entity index rebuilt");
+			}
 		},
 	});
 }
@@ -321,7 +468,7 @@ private registerCommands(): void {
 			new Notice("✅ edge sync complete");
 		} catch (error) {
 			new Notice("❌ Failed to sync edges: " + (error as Error).message);
-			await this.logger?.error("Failed to sync edges command", error);
+			this.logger?.error("Failed to sync edges command", error);
 		}
 	}
 
@@ -349,7 +496,7 @@ private registerCommands(): void {
 
 		// Use title as filename, preserving whitespaces
 		// generateUniqueFilename will add -index suffix if file already exists
-		return await generateUniqueFilename(this.app, baseFolder, title, "md");
+		return generateUniqueFilename(this.app, baseFolder, title, "md");
 	}
 
 	/**
@@ -361,7 +508,7 @@ private registerCommands(): void {
 
 		if (!exists) {
 			await this.app.vault.createFolder(normalizedPath);
-			await this.logger?.info("Created folder", { path: normalizedPath });
+			this.logger?.info("Created folder", { path: normalizedPath });
 		}
 	}
 
@@ -389,7 +536,7 @@ private registerCommands(): void {
 		}
 
 		// Return default template if file not found
-		await this.logger?.warn("Template not found, using default", {
+		this.logger?.warn("Template not found, using default", {
 			path: templatePath,
 		});
 		return DEFAULT_ACCOMPLISHMENT_TEMPLATE;
@@ -513,7 +660,7 @@ private registerCommands(): void {
 		});
 
 		await this.app.vault.modify(file, updatedContent);
-		await this.logger?.info("Note updated with Notion page ID", { notePath, notionPageId });
+		this.logger?.info("Note updated with Notion page ID", { notePath, notionPageId });
 	}
 
 	/**
@@ -554,9 +701,9 @@ private registerCommands(): void {
 			this.settings.notionDatabaseId = databaseId;
 			await this.saveSettings();
 			new Notice(`Notion database created successfully! ID: ${databaseId}`);
-			await this.logger?.info("Notion database initialized", { databaseId });
+			this.logger?.info("Notion database initialized", { databaseId });
 		} catch (error) {
-			await this.logger?.error("Failed to initialize Notion database", error);
+			this.logger?.error("Failed to initialize Notion database", error);
 			new Notice("Failed to initialize Notion database: " + (error as Error).message);
 		}
 	}
@@ -613,12 +760,12 @@ private registerCommands(): void {
 			}
 
 			new Notice("Successfully synced to Notion");
-			await this.logger?.info("Sync successful", {
+			this.logger?.info("Sync successful", {
 				file: file.path,
 				pageId,
 			});
 		} catch (error) {
-			await this.logger?.error("Failed to sync note to Notion", error);
+			this.logger?.error("Failed to sync note to Notion", error);
 			new Notice("Failed to sync to Notion: " + (error as Error).message);
 		}
 	}
@@ -708,7 +855,7 @@ private registerCommands(): void {
 
 					syncedCount++;
 				} catch (error) {
-					await this.logger?.error("Failed to sync note", { file: file.path, error });
+					this.logger?.error("Failed to sync note", { file: file.path, error });
 					errorCount++;
 				}
 			}
@@ -754,7 +901,7 @@ private registerCommands(): void {
 							await this.notionClient.updateDependencies(targetPageId, dependencyPageIds);
 							dependencySyncCount++;
 						} catch (error) {
-							await this.logger?.error("Failed to sync dependencies", { targetAccomplishmentId, error });
+							this.logger?.error("Failed to sync dependencies", { targetAccomplishmentId, error });
 							dependencyErrorCount++;
 						}
 					}
@@ -763,10 +910,554 @@ private registerCommands(): void {
 
 			const message = `Sync complete: ${syncedCount} pages synced, ${skippedCount} skipped, ${errorCount} errors. Dependencies: ${dependencySyncCount} synced, ${dependencyErrorCount} errors`;
 			new Notice(message);
-			await this.logger?.info("Batch sync complete", { syncedCount, skippedCount, errorCount, dependencySyncCount, dependencyErrorCount });
+			this.logger?.info("Batch sync complete", { syncedCount, skippedCount, errorCount, dependencySyncCount, dependencyErrorCount });
 		} catch (error) {
-			await this.logger?.error("Failed to sync canvas notes to Notion", error);
+			this.logger?.error("Failed to sync canvas notes to Notion", error);
 			new Notice("Failed to sync canvas notes: " + (error as Error).message);
+		}
+	}
+
+	/**
+	 * Setup CSS styles - creates a CSS snippet in the vault's snippets folder
+	 * and enables it in Obsidian's appearance settings
+	 */
+	async setupStyles(): Promise<void> {
+		const snippetsFolder = normalizePath(".obsidian/snippets");
+		const snippetPath = normalizePath(`${snippetsFolder}/canvas-project-manager.css`);
+
+		// Ensure snippets folder exists
+		const snippetsFolderExists = await this.app.vault.adapter.exists(snippetsFolder);
+		if (!snippetsFolderExists) {
+			await this.app.vault.adapter.mkdir(snippetsFolder);
+			this.logger?.info("Created snippets folder", { path: snippetsFolder });
+		}
+
+		// CSS content for the snippet
+		const cssContent = `/* Canvas Project Manager - Auto-generated styles */
+/* This file is managed by the Canvas Project Manager plugin */
+
+/* Entity type visual indicators */
+.canvas-node[data-canvas-pm-type="milestone"] {
+    border-width: 3px !important;
+    border-style: solid !important;
+}
+
+.canvas-node[data-canvas-pm-type="story"] {
+    border-width: 2px !important;
+    border-style: solid !important;
+}
+
+.canvas-node[data-canvas-pm-type="task"] {
+    border-width: 1px !important;
+}
+
+.canvas-node[data-canvas-pm-type="decision"] {
+    border-width: 2px !important;
+    border-style: dashed !important;
+}
+
+.canvas-node[data-canvas-pm-type="document"] {
+    border-width: 1px !important;
+    border-style: dotted !important;
+}
+
+/* Status indicators - 8px borders, rounded corners, visible when zoomed out */
+/* Using higher specificity to override entity type styles */
+.canvas-node[data-canvas-pm-type][data-canvas-pm-status="not_started"] {
+    opacity: 1;
+    border-radius: 12px !important;
+}
+
+.canvas-node[data-canvas-pm-type][data-canvas-pm-status="in_progress"] {
+    border-color: var(--color-yellow, #ffeb3b) !important;
+    border-width: 8px !important;
+    border-style: solid !important;
+    border-radius: 12px !important;
+}
+
+.canvas-node[data-canvas-pm-type][data-canvas-pm-status="completed"],
+.canvas-node[data-canvas-pm-type][data-canvas-pm-status="complete"],
+.canvas-node[data-canvas-pm-type][data-canvas-pm-status="decided"],
+.canvas-node[data-canvas-pm-type][data-canvas-pm-status="approved"] {
+    border-color: var(--color-green, #4caf50) !important;
+    border-width: 8px !important;
+    border-style: solid !important;
+    border-radius: 12px !important;
+    opacity: 1;
+}
+
+.canvas-node[data-canvas-pm-type][data-canvas-pm-status="blocked"] {
+    border-color: var(--color-red, #f44336) !important;
+    border-width: 8px !important;
+    border-style: solid !important;
+    border-radius: 12px !important;
+    box-shadow: 0 0 16px var(--color-red, #f44336) !important;
+}
+
+/* Priority indicators */
+.canvas-node[data-canvas-pm-priority="critical"] {
+    animation: canvas-pm-pulse 2s infinite;
+}
+
+.canvas-node[data-canvas-pm-priority="high"] {
+    border-left: 4px solid var(--color-red, #f44336) !important;
+}
+
+.canvas-node[data-canvas-pm-priority="medium"] {
+    border-left: 4px solid var(--color-yellow, #ffeb3b) !important;
+}
+
+.canvas-node[data-canvas-pm-priority="low"] {
+    border-left: 4px solid var(--color-green, #4caf50) !important;
+}
+
+@keyframes canvas-pm-pulse {
+    0%, 100% { box-shadow: 0 0 4px var(--color-red, #f44336); }
+    50% { box-shadow: 0 0 12px var(--color-red, #f44336); }
+}
+`;
+
+		// Check if snippet exists and has same content
+		const snippetExists = await this.app.vault.adapter.exists(snippetPath);
+		let needsUpdate = true;
+
+		if (snippetExists) {
+			const existingContent = await this.app.vault.adapter.read(snippetPath);
+			needsUpdate = existingContent !== cssContent;
+		}
+
+		if (needsUpdate) {
+			await this.app.vault.adapter.write(snippetPath, cssContent);
+			this.logger?.info("CSS snippet created/updated", { path: snippetPath });
+		}
+
+		// Enable the snippet in Obsidian's config
+		await this.enableCssSnippet("canvas-project-manager");
+	}
+
+	/**
+	 * Enable a CSS snippet in Obsidian's appearance settings
+	 */
+	async enableCssSnippet(snippetName: string): Promise<void> {
+		try {
+			const configPath = normalizePath(".obsidian/appearance.json");
+			const configExists = await this.app.vault.adapter.exists(configPath);
+
+			let config: { enabledCssSnippets?: string[]; [key: string]: unknown } = {};
+
+			if (configExists) {
+				const configContent = await this.app.vault.adapter.read(configPath);
+				config = JSON.parse(configContent);
+			}
+
+			// Initialize enabledCssSnippets if not present
+			if (!config.enabledCssSnippets) {
+				config.enabledCssSnippets = [];
+			}
+
+			// Add our snippet if not already enabled
+			if (!config.enabledCssSnippets.includes(snippetName)) {
+				config.enabledCssSnippets.push(snippetName);
+				await this.app.vault.adapter.write(configPath, JSON.stringify(config, null, 2));
+				this.logger?.info("CSS snippet enabled", { snippet: snippetName });
+
+				// Trigger Obsidian to reload CSS
+				// @ts-ignore - customCss is not in the type definitions
+				this.app.customCss?.requestLoadSnippets?.();
+			}
+		} catch (error) {
+			this.logger?.warn("Could not enable CSS snippet automatically", { error });
+			// Non-fatal - user can enable manually
+		}
+	}
+
+	/**
+	 * Apply visual styles to all open canvas views
+	 */
+	applyStylesToAllCanvasViews(): void {
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			if (leaf.view?.getViewType() === "canvas") {
+				this.applyStylesToCanvasView(leaf.view);
+			}
+		});
+	}
+
+	/**
+	 * Apply data attributes to canvas nodes based on their metadata/frontmatter
+	 * This enables CSS styling based on entity type, status, priority, etc.
+	 */
+	async applyStylesToCanvasView(view: unknown): Promise<void> {
+		try {
+			// @ts-ignore - canvas view internals
+			const canvas = view?.canvas;
+			if (!canvas) {
+				console.debug("[Canvas Plugin] No canvas object on view");
+				return;
+			}
+
+			// @ts-ignore - canvas file
+			const canvasFile = view?.file as TFile | undefined;
+			if (!canvasFile) return;
+
+			// Use canvas internal nodes Map instead of querying DOM
+			// @ts-ignore - canvas.nodes is a Map<string, CanvasNode>
+			const canvasNodes = canvas.nodes as Map<string, unknown> | undefined;
+			if (!canvasNodes) {
+				console.debug("[Canvas Plugin] No nodes Map on canvas");
+				return;
+			}
+
+			let appliedCount = 0;
+			for (const [nodeId, canvasNode] of canvasNodes) {
+				// @ts-ignore - get the node's DOM element
+				const nodeEl = (canvasNode as { nodeEl?: HTMLElement }).nodeEl;
+				if (!nodeEl) {
+					console.debug("[Canvas Plugin] Node has no nodeEl", { nodeId });
+					continue;
+				}
+
+				// @ts-ignore - get node data (file path, type, etc.)
+				const filePath = (canvasNode as { filePath?: string }).filePath;
+				// @ts-ignore
+				const unknownData = (canvasNode as { unknownData?: { type?: string; metadata?: Record<string, unknown> } }).unknownData;
+
+
+
+				// Apply styles based on node type
+				if (filePath) {
+					// It's a file node - read frontmatter
+					const file = this.app.vault.getAbstractFileByPath(filePath);
+					if (file instanceof TFile) {
+						const applied = await this.applyStylesFromFrontmatter(nodeEl, file);
+						if (applied) appliedCount++;
+					} else {
+						console.debug("[Canvas Plugin] File not found", { path: filePath });
+					}
+				} else if (unknownData?.type === "text" && unknownData?.metadata) {
+					// Text node with metadata
+					this.applyStylesFromMetadata(nodeEl, unknownData.metadata);
+					appliedCount++;
+				}
+			}
+
+			console.debug("[Canvas Plugin] Applied styles to canvas nodes", {
+				canvas: canvasFile.path,
+				nodeCount: canvasNodes.size,
+				appliedCount,
+			});
+
+			// Now decorate edges with type information from their connected nodes
+			// @ts-ignore - canvas.edges is a Map<string, CanvasEdge>
+			const canvasEdges = canvas.edges as Map<string, unknown> | undefined;
+			if (canvasEdges) {
+				// Build a map of nodeId -> entity type for quick lookup
+				const nodeTypeMap = new Map<string, string>();
+				for (const [nodeId, canvasNode] of canvasNodes) {
+					// @ts-ignore
+					const nodeEl = (canvasNode as { nodeEl?: HTMLElement }).nodeEl;
+					if (nodeEl) {
+						const entityType = nodeEl.getAttribute("data-canvas-pm-type");
+						if (entityType) {
+							nodeTypeMap.set(nodeId, entityType);
+						}
+					}
+				}
+
+				let edgeCount = 0;
+				for (const [edgeId, canvasEdge] of canvasEdges) {
+					// @ts-ignore - get edge's DOM element and connection info
+					const edgeEl = (canvasEdge as { lineGroupEl?: HTMLElement; path?: { display?: HTMLElement } }).lineGroupEl;
+					// @ts-ignore
+					const fromNode = (canvasEdge as { from?: { node?: { id?: string } } }).from?.node;
+					// @ts-ignore
+					const toNode = (canvasEdge as { to?: { node?: { id?: string } } }).to?.node;
+
+					if (edgeEl && fromNode?.id && toNode?.id) {
+						const fromType = nodeTypeMap.get(fromNode.id) || "unknown";
+						const toType = nodeTypeMap.get(toNode.id) || "unknown";
+
+						edgeEl.setAttribute("data-canvas-pm-from-type", fromType);
+						edgeEl.setAttribute("data-canvas-pm-to-type", toType);
+						edgeCount++;
+					}
+				}
+
+				console.debug("[Canvas Plugin] Applied styles to canvas edges", {
+					edgeCount,
+					totalEdges: canvasEdges.size,
+				});
+			}
+
+			// Create or update the floating control panel
+			this.createOrUpdateControlPanel(view);
+
+		} catch (error) {
+			console.warn("[Canvas Plugin] Failed to apply styles to canvas view", error);
+		}
+	}
+
+	/**
+	 * Apply data attributes from file frontmatter
+	 * Returns true if any attribute was applied
+	 */
+	async applyStylesFromFrontmatter(el: HTMLElement, file: TFile): Promise<boolean> {
+		try {
+			const content = await this.app.vault.read(file);
+			const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+			if (!frontmatterMatch) {
+				console.debug("[Canvas Plugin] No frontmatter found", { file: file.path });
+				return false;
+			}
+
+			const frontmatterText = frontmatterMatch[1];
+			let applied = false;
+
+			// Extract type
+			const typeMatch = frontmatterText.match(/^type:\s*(.+)$/m);
+			if (typeMatch) {
+				const entityType = typeMatch[1].trim().toLowerCase();
+				el.setAttribute("data-canvas-pm-type", entityType);
+				applied = true;
+			}
+
+			// Extract status
+			const statusMatch = frontmatterText.match(/^status:\s*(.+)$/m);
+			if (statusMatch) {
+				const status = statusMatch[1].trim().toLowerCase().replace(/\s+/g, "_");
+				el.setAttribute("data-canvas-pm-status", status);
+				applied = true;
+			}
+
+			// Extract priority
+			const priorityMatch = frontmatterText.match(/^priority:\s*(.+)$/m);
+			if (priorityMatch) {
+				const priority = priorityMatch[1].trim().toLowerCase();
+				el.setAttribute("data-canvas-pm-priority", priority);
+				applied = true;
+			}
+
+			// Extract workstream
+			const workstreamMatch = frontmatterText.match(/^workstream:\s*(.+)$/m);
+			if (workstreamMatch) {
+				const workstream = workstreamMatch[1].trim().toLowerCase();
+				el.setAttribute("data-canvas-pm-workstream", workstream);
+				applied = true;
+			}
+
+			return applied;
+		} catch (error) {
+			console.warn("[Canvas Plugin] Error reading frontmatter", { file: file.path, error });
+			return false;
+		}
+	}
+
+	/**
+	 * Apply data attributes from canvas node metadata
+	 */
+	applyStylesFromMetadata(el: HTMLElement, metadata: Record<string, unknown>): void {
+		// Shape often indicates entity type
+		if (metadata.shape) {
+			const shape = String(metadata.shape).toLowerCase();
+			el.setAttribute("data-canvas-pm-type", shape);
+		}
+
+		// Direct type if present
+		if (metadata.type) {
+			el.setAttribute("data-canvas-pm-type", String(metadata.type).toLowerCase());
+		}
+
+		// Status
+		if (metadata.status) {
+			const status = String(metadata.status).toLowerCase().replace(/\s+/g, "_");
+			el.setAttribute("data-canvas-pm-status", status);
+		}
+
+		// Priority
+		if (metadata.priority) {
+			el.setAttribute("data-canvas-pm-priority", String(metadata.priority).toLowerCase());
+		}
+
+		// Workstream
+		if (metadata.workstream) {
+			el.setAttribute("data-canvas-pm-workstream", String(metadata.workstream).toLowerCase());
+		}
+	}
+
+	/**
+	 * Create or update the floating control panel for canvas visibility toggles
+	 */
+	createOrUpdateControlPanel(view: unknown): void {
+		// @ts-ignore - canvas view internals
+		const containerEl = view?.containerEl as HTMLElement | undefined;
+		if (!containerEl) {
+			console.debug("[Canvas Plugin] No containerEl on view");
+			return;
+		}
+
+		// Find the canvas element for applying visibility classes
+		const canvasEl = containerEl.querySelector(".canvas-node-container")?.parentElement as HTMLElement | null
+			|| containerEl;
+
+		// Find the view-actions area in the header (where other view buttons are)
+		const viewHeader = containerEl.closest(".workspace-leaf")?.querySelector(".view-header-right-actions") as HTMLElement | null;
+
+		if (!viewHeader) {
+			console.debug("[Canvas Plugin] No view-header-right-actions found, trying alternative");
+			// Alternative: append to the container itself as a floating panel
+			this.createFloatingPanel(containerEl, canvasEl);
+			return;
+		}
+
+		// Check if our controls already exist
+		if (viewHeader.querySelector(".canvas-pm-visibility-controls")) {
+			// Already exists, just apply visibility state
+			this.applyVisibilityState(canvasEl);
+			return;
+		}
+
+		console.debug("[Canvas Plugin] Creating visibility controls in view header");
+
+		// Create a container for our visibility toggles
+		const controlsContainer = document.createElement("div");
+		controlsContainer.className = "canvas-pm-visibility-controls";
+
+		// Create toggle buttons for each entity type
+		const types = [
+			{ key: "milestones", label: "M", title: "Toggle Milestones" },
+			{ key: "stories", label: "S", title: "Toggle Stories" },
+			{ key: "tasks", label: "T", title: "Toggle Tasks" },
+			{ key: "decisions", label: "De", title: "Toggle Decisions" },
+			{ key: "documents", label: "Do", title: "Toggle Documents" },
+		] as const;
+
+		for (const { key, label, title } of types) {
+			const btn = document.createElement("button");
+			btn.className = `canvas-pm-visibility-btn clickable-icon ${this.visibilityState[key] ? "is-active" : ""}`;
+			btn.setAttribute("aria-label", title);
+			btn.setAttribute("data-type", key);
+			btn.textContent = label;
+			btn.title = title;
+
+			btn.addEventListener("click", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				this.visibilityState[key] = !this.visibilityState[key];
+				btn.classList.toggle("is-active", this.visibilityState[key]);
+				this.applyVisibilityState(canvasEl);
+			});
+
+			controlsContainer.appendChild(btn);
+		}
+
+		// Insert at the beginning of view-header-right-actions
+		viewHeader.insertBefore(controlsContainer, viewHeader.firstChild);
+		this.controlPanelEl = controlsContainer;
+
+		// Apply current visibility state
+		this.applyVisibilityState(canvasEl);
+	}
+
+	/**
+	 * Create a floating panel as fallback when view header is not available
+	 */
+	private createFloatingPanel(containerEl: HTMLElement, canvasEl: HTMLElement): void {
+		// Check if panel already exists
+		if (containerEl.querySelector(".canvas-pm-control-panel")) {
+			this.applyVisibilityState(canvasEl);
+			return;
+		}
+
+		const panel = document.createElement("div");
+		panel.className = "canvas-pm-control-panel";
+		panel.innerHTML = `
+			<div class="canvas-pm-control-header">
+				<span>Visibility</span>
+			</div>
+			<div class="canvas-pm-control-toggles">
+				<label class="canvas-pm-toggle">
+					<input type="checkbox" data-type="milestones" ${this.visibilityState.milestones ? "checked" : ""}>
+					<span class="canvas-pm-toggle-label">Milestones</span>
+				</label>
+				<label class="canvas-pm-toggle">
+					<input type="checkbox" data-type="stories" ${this.visibilityState.stories ? "checked" : ""}>
+					<span class="canvas-pm-toggle-label">Stories</span>
+				</label>
+				<label class="canvas-pm-toggle">
+					<input type="checkbox" data-type="tasks" ${this.visibilityState.tasks ? "checked" : ""}>
+					<span class="canvas-pm-toggle-label">Tasks</span>
+				</label>
+				<label class="canvas-pm-toggle">
+					<input type="checkbox" data-type="decisions" ${this.visibilityState.decisions ? "checked" : ""}>
+					<span class="canvas-pm-toggle-label">Decisions</span>
+				</label>
+				<label class="canvas-pm-toggle">
+					<input type="checkbox" data-type="documents" ${this.visibilityState.documents ? "checked" : ""}>
+					<span class="canvas-pm-toggle-label">Documents</span>
+				</label>
+			</div>
+		`;
+
+		// Add event listeners for toggles
+		panel.querySelectorAll("input[type='checkbox']").forEach((checkbox) => {
+			checkbox.addEventListener("change", (e) => {
+				const target = e.target as HTMLInputElement;
+				const type = target.getAttribute("data-type") as "tasks" | "stories" | "milestones" | "decisions" | "documents";
+				if (type) {
+					this.visibilityState[type] = target.checked;
+					this.applyVisibilityState(canvasEl);
+				}
+			});
+		});
+
+		containerEl.appendChild(panel);
+		this.controlPanelEl = panel;
+		this.applyVisibilityState(canvasEl);
+	}
+
+	/**
+	 * Apply visibility state to canvas by toggling CSS classes
+	 */
+	applyVisibilityState(canvasEl: HTMLElement | null): void {
+		// Find the actual .canvas element - it's the one that contains .canvas-node elements
+		const activeLeaf = this.app.workspace.activeLeaf;
+		// @ts-ignore
+		const containerEl = activeLeaf?.view?.containerEl as HTMLElement | undefined;
+
+		// Try to find the actual canvas element with class "canvas"
+		let targetEl = containerEl?.querySelector(".canvas") as HTMLElement | null;
+		if (!targetEl) {
+			// Fallback to passed element
+			targetEl = canvasEl;
+		}
+
+		if (!targetEl) {
+			console.debug("[Canvas Plugin] No canvas element found for visibility");
+			return;
+		}
+
+		console.debug("[Canvas Plugin] Applying visibility to element:", {
+			tagName: targetEl.tagName,
+			className: targetEl.className,
+			hasCanvasClass: targetEl.classList.contains("canvas")
+		});
+
+		// Toggle classes based on visibility state
+		targetEl.classList.toggle("canvas-pm-hide-tasks", !this.visibilityState.tasks);
+		targetEl.classList.toggle("canvas-pm-hide-stories", !this.visibilityState.stories);
+		targetEl.classList.toggle("canvas-pm-hide-milestones", !this.visibilityState.milestones);
+		targetEl.classList.toggle("canvas-pm-hide-decisions", !this.visibilityState.decisions);
+		targetEl.classList.toggle("canvas-pm-hide-documents", !this.visibilityState.documents);
+
+		console.debug("[Canvas Plugin] Applied visibility state", this.visibilityState);
+	}
+
+	/**
+	 * Remove control panel when leaving canvas view
+	 */
+	removeControlPanel(): void {
+		if (this.controlPanelEl) {
+			this.controlPanelEl.remove();
+			this.controlPanelEl = null;
 		}
 	}
 
@@ -798,10 +1489,10 @@ private registerCommands(): void {
 				const file = this.app.vault.getAbstractFileByPath(normalizedPath);
 				if (file instanceof TFile) {
 					await this.app.vault.modify(file, template.content);
-					await this.logger?.info("Template regenerated", { path: normalizedPath });
+					this.logger?.info("Template regenerated", { path: normalizedPath });
 				} else {
 					await this.app.vault.create(normalizedPath, template.content);
-					await this.logger?.info("Template created", { path: normalizedPath });
+					this.logger?.info("Template created", { path: normalizedPath });
 				}
 
 				if (!exists) {
@@ -831,6 +1522,95 @@ private registerCommands(): void {
 					void this.convertNoteToStructuredItem(file);
 				});
 		});
+
+		// Add Entity Navigator submenu
+		this.addEntityNavigatorSubmenu(menu, file);
+	}
+
+	/**
+	 * Add Entity Navigator submenu to context menu
+	 */
+	private addEntityNavigatorSubmenu(menu: Menu, file: TFile): void {
+		if (!this.entityIndex?.isReady()) return;
+
+		const entity = this.entityIndex.getFromFile(file);
+		if (!entity) return;
+
+		menu.addSeparator();
+
+		// Parent navigation
+		const parent = this.entityIndex.getParent(entity.id);
+		menu.addItem((item: MenuItem) => {
+			item
+				.setTitle(parent ? `Go to Parent: ${parent.title}` : "Go to Parent (none)")
+				.setIcon("arrow-up")
+				.setDisabled(!parent)
+				.onClick(() => parent && this.openEntities([parent]));
+		});
+
+		// Children navigation
+		const children = this.entityIndex.getChildren(entity.id);
+		menu.addItem((item: MenuItem) => {
+			item
+				.setTitle(`Go to Children (${children.length})`)
+				.setIcon("arrow-down")
+				.setDisabled(children.length === 0)
+				.onClick(() => this.openEntities(children));
+		});
+
+		// Dependencies navigation
+		const deps = this.entityIndex.getDependencies(entity.id);
+		menu.addItem((item: MenuItem) => {
+			item
+				.setTitle(`Go to Dependencies (${deps.length})`)
+				.setIcon("link")
+				.setDisabled(deps.length === 0)
+				.onClick(() => this.openEntities(deps));
+		});
+
+		// Documents navigation
+		const docs = this.entityIndex.getImplementedDocuments(entity.id);
+		menu.addItem((item: MenuItem) => {
+			item
+				.setTitle(`Go to Documents (${docs.length})`)
+				.setIcon("file-text")
+				.setDisabled(docs.length === 0)
+				.onClick(() => this.openEntities(docs));
+		});
+
+		// Decisions navigation
+		const decisions = this.entityIndex.getRelatedDecisions(entity.id);
+		menu.addItem((item: MenuItem) => {
+			item
+				.setTitle(`Go to Decisions (${decisions.length})`)
+				.setIcon("scale")
+				.setDisabled(decisions.length === 0)
+				.onClick(() => this.openEntities(decisions));
+		});
+
+		// For decisions: show enabled entities
+		if (entity.type === 'decision') {
+			const enabled = this.entityIndex.getEnabledEntities(entity.id);
+			menu.addItem((item: MenuItem) => {
+				item
+					.setTitle(`Go to Enabled Entities (${enabled.length})`)
+					.setIcon("zap")
+					.setDisabled(enabled.length === 0)
+					.onClick(() => this.openEntities(enabled));
+			});
+		}
+
+		// For documents: show implementors
+		if (entity.type === 'document') {
+			const implementors = this.entityIndex.getImplementors(entity.id);
+			menu.addItem((item: MenuItem) => {
+				item
+					.setTitle(`Go to Implementors (${implementors.length})`)
+					.setIcon("git-branch")
+					.setDisabled(implementors.length === 0)
+					.onClick(() => this.openEntities(implementors));
+			});
+		}
 	}
 
 	/**
@@ -938,23 +1718,23 @@ private registerCommands(): void {
 			}
 
 			// Avoid duplicates
-			if (nodeEl.querySelector(".canvas-accomplishments-select-btn")) {
+			if (nodeEl.querySelector(".canvas-pm-select-btn")) {
 				return null;
 			}
 
 			const btn = document.createElement("button");
-			btn.className = "canvas-accomplishments-select-btn";
+			btn.className = "canvas-pm-select-btn";
 			btn.textContent = "Convert";
 			// Styles are defined in styles.css
 
 			// Ensure nodeEl can host absolutely-positioned child
-			nodeEl.addClass("canvas-accomplishments-node-container");
+			nodeEl.addClass("canvas-pm-node-container");
 
-			btn.addEventListener("click", async (e) => {
+			btn.addEventListener("click", (e) => {
 				e.preventDefault();
 				e.stopPropagation();
 				console.debug("[Canvas Plugin] Selection button clicked for node", data?.id);
-				await this.convertCanvasNodeToStructuredItem(canvasNode);
+				void this.convertCanvasNodeToStructuredItem(canvasNode);
 			});
 
 			nodeEl.appendChild(btn);
@@ -1116,7 +1896,7 @@ private registerCommands(): void {
 		menus.forEach((menu) => {
 			menu
 				.querySelectorAll(
-					".canvas-accomplishments-select-menu, .canvas-accomplishments-open-menu"
+					".canvas-pm-select-menu, .canvas-pm-open-menu"
 				)
 				.forEach((el) => el.remove());
 		});
@@ -1189,7 +1969,7 @@ private registerCommands(): void {
 				mode = "convert";
 			} else if (nodeType === "file" && nodeInFile.file) {
 				// Check if it's a plugin-created note by checking canvas metadata OR MD frontmatter
-				const hasPluginMetadata = metadata?.plugin === "structured-canvas-notes";
+				const hasPluginMetadata = metadata?.plugin === "canvas-project-manager" || metadata?.plugin === "structured-canvas-notes" || metadata?.plugin === "canvas-accomplishments";
 				const isPluginFile = await this.isPluginCreatedFile(nodeInFile.file);
 
 				if (hasPluginMetadata || isPluginFile) {
@@ -1225,7 +2005,7 @@ private registerCommands(): void {
 			// Remove previous injected buttons to avoid stale callbacks or duplicates
 			visibleMenu
 				.querySelectorAll(
-					".canvas-accomplishments-select-menu, .canvas-accomplishments-open-menu"
+					".canvas-pm-select-menu, .canvas-pm-open-menu"
 				)
 				.forEach((el) => el.remove());
 
@@ -1233,7 +2013,7 @@ private registerCommands(): void {
 
 			if (mode === "convert") {
 				const convertButton = this.buildMenuButton(
-					"canvas-accomplishments-select-menu",
+					"canvas-pm-select-menu",
 					"Convert",
 					async () => this.convertCanvasNodeToStructuredItem(canvasNode),
 					canvasNode
@@ -1243,7 +2023,7 @@ private registerCommands(): void {
 				// Capture file path at button creation time (clicking button deselects node)
 				const filePath = nodeInFile.file;
 				const openButton = this.buildMenuButton(
-					"canvas-accomplishments-open-menu",
+					"canvas-pm-open-menu",
 					"Open",
 					async () => {
 						console.debug("[Canvas Plugin] Open button clicked, opening file:", filePath);
@@ -1265,10 +2045,10 @@ private registerCommands(): void {
 		canvasNode: InternalCanvasNode
 	): HTMLElement {
 		const item = document.createElement("div");
-		item.className = `${className} clickable-icon canvas-accomplishments-menu-item`;
+		item.className = `${className} clickable-icon canvas-pm-menu-item`;
 
 		const iconDiv = document.createElement("div");
-		iconDiv.addClass("canvas-accomplishments-menu-icon");
+		iconDiv.addClass("canvas-pm-menu-icon");
 		const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 		svg.setAttribute("width", "16");
 		svg.setAttribute("height", "16");
@@ -1300,12 +2080,14 @@ private registerCommands(): void {
 		label.textContent = labelText;
 		item.appendChild(label);
 
-		item.addEventListener("click", async (e) => {
+		item.addEventListener("click", (e) => {
 			e.preventDefault();
 			e.stopPropagation();
-			await onClick();
-			// Rebuild menu immediately to refresh labels
-			await this.addSelectionMenuButton(canvasNode);
+			void (async () => {
+				await onClick();
+				// Rebuild menu immediately to refresh labels
+				await this.addSelectionMenuButton(canvasNode);
+			})();
 		});
 
 		return item;
@@ -1507,7 +2289,7 @@ private registerCommands(): void {
 			}
 
 			// Check if we already added our item to THIS menu
-			if (menuEl.querySelector('.canvas-accomplishments-convert')) {
+			if (menuEl.querySelector('.canvas-pm-convert')) {
 				console.debug('[Canvas Plugin] Menu item already exists in this menu');
 				return;
 			}
@@ -1557,14 +2339,14 @@ private registerCommands(): void {
 
 			// Create our menu item matching Obsidian's style
 			const item = document.createElement('div');
-			item.className = itemClass + ' canvas-accomplishments-convert';
+			item.className = itemClass + ' canvas-pm-convert';
 			// Styles are inherited from the itemClass which matches Obsidian's native menu items
 
 			item.setAttribute('aria-label', 'Convert to structured item');
 
 			// Create icon using setIcon from Obsidian API would be better, but for SVG:
 			const iconDiv = document.createElement('div');
-			iconDiv.addClass('canvas-accomplishments-menu-icon');
+			iconDiv.addClass('canvas-pm-menu-icon');
 			const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
 			svg.setAttribute('width', '18');
 			svg.setAttribute('height', '18');
@@ -1593,7 +2375,7 @@ private registerCommands(): void {
 			item.appendChild(iconDiv);
 
 			// Add click handler with the correct node reference
-			item.addEventListener('click', async (e) => {
+			item.addEventListener('click', (e) => {
 				e.preventDefault();
 				e.stopPropagation();
 
@@ -1603,7 +2385,7 @@ private registerCommands(): void {
 				menuEl?.addClass('is-hidden');
 
 				// Convert the node (use the captured targetNode, not a lookup)
-				await this.convertCanvasNodeToStructuredItem(targetNode);
+				void this.convertCanvasNodeToStructuredItem(targetNode);
 			});
 			
 			// Add to menu
@@ -1620,7 +2402,7 @@ private registerCommands(): void {
 	 */
 	private async convertNoteToStructuredItem(file: TFile): Promise<void> {
 		try {
-			await this.logger?.info("Conversion flow invoked (note to structured item)", {
+			this.logger?.info("Conversion flow invoked (note to structured item)", {
 				path: file.path,
 			});
 			const content = await this.app.vault.read(file);
@@ -1653,7 +2435,7 @@ private registerCommands(): void {
 		);
 		modal.open();
 		} catch (error) {
-			await this.logger?.error("Failed to convert note", error);
+			this.logger?.error("Failed to convert note", error);
 			new Notice("Failed to convert note: " + (error as Error).message);
 		}
 	}
@@ -1669,7 +2451,7 @@ private registerCommands(): void {
 	): Promise<void> {
 		try {
 			// Generate ID
-			const id = await generateId(this.app, this.settings);
+			const id = generateId(this.app, this.settings);
 
 			// Keep the same file path
 			const newPath = file.path;
@@ -1701,7 +2483,7 @@ private registerCommands(): void {
 			await this.app.vault.modify(file, newContent);
 
 			new Notice(`✅ Converted to ${result.type}: ${id}`);
-			await this.logger?.info("Note converted", { oldPath: file.path, newPath, id });
+			this.logger?.info("Note converted", { oldPath: file.path, newPath, id });
 
 			// Sync to Notion if enabled
 			if (this.shouldSyncOnCreate()) {
@@ -1711,7 +2493,7 @@ private registerCommands(): void {
 				}
 			}
 		} catch (error) {
-			await this.logger?.error("Failed to perform note conversion", error);
+			this.logger?.error("Failed to perform note conversion", error);
 			new Notice("Failed to convert note: " + (error as Error).message);
 		}
 	}
@@ -1775,7 +2557,7 @@ private registerCommands(): void {
 				return;
 			}
 			
-			await this.logger?.info("Conversion flow invoked (canvas text node to structured item)", {
+			this.logger?.info("Conversion flow invoked (canvas text node to structured item)", {
 				nodeId: nodeInFile.id,
 			});
 
@@ -1809,7 +2591,7 @@ private registerCommands(): void {
 		);
 		modal.open();
 		} catch (error) {
-			await this.logger?.error("Failed to convert canvas node", error);
+			this.logger?.error("Failed to convert canvas node", error);
 			new Notice("Failed to convert canvas node: " + (error as Error).message);
 		}
 	}
@@ -1847,17 +2629,17 @@ private registerCommands(): void {
 				if (existingFile instanceof TFile) {
 					const fileContent = await this.app.vault.read(existingFile);
 					const parsed = parseFrontmatter(fileContent);
-					id = parsed?.id || await generateId(this.app, this.settings);
+					id = parsed?.id || generateId(this.app, this.settings);
 					console.debug('[Canvas Plugin] Read ID from existing file:', id);
 				} else {
-					id = await generateId(this.app, this.settings);
+					id = generateId(this.app, this.settings);
 				}
 			} else {
 				// Generate new path (conversion flow)
-				id = await generateId(this.app, this.settings);
+				id = generateId(this.app, this.settings);
 				const baseFolder = canvasFile.parent?.path || this.settings.notesBaseFolder;
 				// Use title as filename, preserving whitespaces
-				notePath = await generateUniqueFilename(
+				notePath = generateUniqueFilename(
 					this.app,
 					baseFolder,
 					title,
@@ -1899,7 +2681,7 @@ private registerCommands(): void {
 				});
 
 				await this.app.vault.create(notePath, content);
-				await this.logger?.info("Note created from canvas node", { path: notePath });
+				this.logger?.info("Note created from canvas node", { path: notePath });
 			} else {
 				console.debug('[Canvas Plugin] Note file already exists, skipping creation:', notePath);
 			}
@@ -2027,13 +2809,13 @@ private registerCommands(): void {
 			
 			// Log completion
 			if (existingNode) {
-				await this.logger?.info("Canvas node converted in-place", {
+				this.logger?.info("Canvas node converted in-place", {
 					nodeId: resolvedNodeId,
 					path: notePath,
 				});
 				new Notice(`✅ Converted to ${result.type}: ${id}`);
 			} else {
-				await this.logger?.info("Canvas node created", {
+				this.logger?.info("Canvas node created", {
 					path: notePath,
 				});
 				new Notice(`✅ Created ${result.type}: ${id}`);
@@ -2059,7 +2841,7 @@ private registerCommands(): void {
 			}
 		} catch (error) {
 			this.isUpdatingCanvas = false;
-			await this.logger?.error("Failed to perform canvas node conversion", error);
+			this.logger?.error("Failed to perform canvas node conversion", error);
 			new Notice("Failed to convert canvas node: " + (error as Error).message);
 		}
 	}
@@ -2143,7 +2925,7 @@ private registerCommands(): void {
 		effortColor?: string
 	): CanvasNode["metadata"] {
 		const metadata: CanvasNode["metadata"] = {
-			plugin: "structured-canvas-notes",
+			plugin: "canvas-project-manager",
 			alias: options?.alias ?? title,
 			shape: this.settings.shapeAccomplishment,
 			showId: this.settings.showIdInCanvas,
@@ -2183,7 +2965,7 @@ private registerCommands(): void {
 			console.debug('[Canvas Plugin] Cache initialization complete. Total cached canvases:', this.canvasNodeCache.size);
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to initialize canvas node cache:', error);
-			await this.logger?.error("Failed to initialize canvas node cache", error);
+			this.logger?.error("Failed to initialize canvas node cache", error);
 		}
 	}
 
@@ -2213,7 +2995,7 @@ private registerCommands(): void {
 			console.debug('[Canvas Plugin] File accomplishment ID cache initialized with', cachedCount, 'entries');
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to initialize file accomplishment ID cache:', error);
-			await this.logger?.error("Failed to initialize file accomplishment ID cache", error);
+			this.logger?.error("Failed to initialize file accomplishment ID cache", error);
 		}
 	}
 
@@ -2278,7 +3060,7 @@ private registerCommands(): void {
 			// Trigger edge sync (debounced) to update depends_on in MD files
 			this.scheduleEdgeSync(canvasFile);
 		} catch (error) {
-			await this.logger?.error("Failed to handle canvas modification", error);
+			this.logger?.error("Failed to handle canvas modification", error);
 		}
 	}
 
@@ -2444,7 +3226,7 @@ private registerCommands(): void {
 			console.debug('[Canvas Plugin] Edge sync complete:', { updatedCount, clearedCount });
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to sync edges to MD files:', error);
-			await this.logger?.error("Failed to sync edges to MD files", error);
+			this.logger?.error("Failed to sync edges to MD files", error);
 		}
 	}
 
@@ -2587,7 +3369,7 @@ private registerCommands(): void {
 				this.mdSyncDebounceTimers.set(file.path, timer);
 			}
 		} catch (error) {
-			await this.logger?.error("Failed to handle MD file modification", error);
+			this.logger?.error("Failed to handle MD file modification", error);
 		}
 	}
 
@@ -2625,7 +3407,7 @@ private registerCommands(): void {
 			new Notice(`Notion page archived for deleted note: ${accomplishmentId}`);
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to archive Notion page:', error);
-			await this.logger?.error("Failed to archive Notion page for deleted file", error);
+			this.logger?.error("Failed to archive Notion page for deleted file", error);
 		}
 	}
 
@@ -2679,7 +3461,7 @@ private registerCommands(): void {
 							console.debug('[Canvas Plugin] Deleting file:', file.path);
 							await this.app.fileManager.trashFile(file);
 							new Notice(`🗑️ Deleted: ${file.basename}`);
-							await this.logger?.info("Plugin-created file auto-deleted", {
+							this.logger?.info("Plugin-created file auto-deleted", {
 								file: file.path,
 								canvas: canvasFile.path,
 							});
@@ -2691,7 +3473,7 @@ private registerCommands(): void {
 			}
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to check and delete plugin file:', error);
-			await this.logger?.error("Failed to check and delete plugin file", error);
+			this.logger?.error("Failed to check and delete plugin file", error);
 		}
 	}
 
@@ -2706,8 +3488,8 @@ private registerCommands(): void {
 		const intervalMs = this.settings.notionSyncIntervalMinutes * 60 * 1000;
 		console.debug('[Canvas Plugin] Starting Notion sync polling every', this.settings.notionSyncIntervalMinutes, 'minutes');
 
-		this.notionSyncIntervalId = setInterval(async () => {
-			await this.pollNotionForChanges();
+		this.notionSyncIntervalId = setInterval(() => {
+			void this.pollNotionForChanges();
 		}, intervalMs);
 	}
 
@@ -2958,6 +3740,2189 @@ private registerCommands(): void {
 		].filter(line => line !== null).join("\n");
 
 		return `${yaml}\n\n${body}`;
+	}
+
+	/**
+	 * Move archived entity files to archive subfolders based on their type.
+	 * Archive structure: archive/milestones/, archive/stories/, archive/tasks/, etc.
+	 * @param baseFolder - The base folder where entities and archive folder are located
+	 * @returns Number of files moved
+	 */
+	private async moveArchivedFilesToArchive(baseFolder: string): Promise<number> {
+		console.group('[Canvas Plugin] moveArchivedFilesToArchive');
+		console.log('Base folder:', baseFolder);
+		new Notice(`🔍 Scanning for archived files in: ${baseFolder}`);
+
+		const entityTypes = ['milestone', 'story', 'task', 'decision', 'document', 'accomplishment'];
+		const typeToFolder: Record<string, string> = {
+			milestone: 'milestones',
+			story: 'stories',
+			task: 'tasks',
+			decision: 'decisions',
+			document: 'documents',
+			accomplishment: 'accomplishments',
+		};
+
+		let movedCount = 0;
+		let archivedFound = 0;
+
+		try {
+			// Get all markdown files in the vault
+			const allFiles = this.app.vault.getMarkdownFiles();
+			console.log('Total markdown files in vault:', allFiles.length);
+
+			// Filter to files in the base folder (but not already in archive)
+			// If baseFolder is empty, include all files (but still exclude archive)
+			const filesInBaseFolder = allFiles.filter(f => {
+				const inBaseFolder = baseFolder === '' || f.path.startsWith(baseFolder);
+				// Check for archive folder - handles both "archive/" at root and "/archive/" in subfolders
+				const notInArchive = !f.path.includes('/archive/') && !f.path.startsWith('archive/');
+				return inBaseFolder && notInArchive;
+			});
+			console.log('Files in base folder (excluding archive):', filesInBaseFolder.length);
+			new Notice(`📂 Found ${filesInBaseFolder.length} files in base folder (excluding archive)`);
+
+			for (const file of filesInBaseFolder) {
+				try {
+					const content = await this.app.vault.read(file);
+					const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+					if (!frontmatterMatch) {
+						console.log(`  [SKIP] No frontmatter: ${file.path}`);
+						continue;
+					}
+
+					const frontmatterText = frontmatterMatch[1];
+
+					// Check if archived
+					const statusMatch = frontmatterText.match(/^status:\s*(.+)$/m);
+					const archivedMatch = frontmatterText.match(/^archived:\s*(.+)$/m);
+					const statusValue = statusMatch?.[1]?.trim().toLowerCase();
+					const archivedValue = archivedMatch?.[1]?.trim().toLowerCase();
+					const isArchived = statusValue === 'archived' || archivedValue === 'true';
+
+					if (!isArchived) {
+						continue;
+					}
+
+					archivedFound++;
+					console.log(`  [ARCHIVED] Found archived file: ${file.path} (status=${statusValue}, archived=${archivedValue})`);
+
+					// Get entity type
+					const typeMatch = frontmatterText.match(/^type:\s*(.+)$/m);
+					if (!typeMatch) {
+						console.log(`    [SKIP] No type field in: ${file.path}`);
+						continue;
+					}
+
+					const entityType = typeMatch[1].trim().toLowerCase();
+					if (!entityTypes.includes(entityType)) {
+						console.log(`    [SKIP] Unknown entity type '${entityType}' in: ${file.path}`);
+						continue;
+					}
+
+					// Determine archive subfolder
+					const archiveSubfolder = typeToFolder[entityType] || entityType + 's';
+					const archivePath = baseFolder ? `${baseFolder}/archive/${archiveSubfolder}` : `archive/${archiveSubfolder}`;
+
+					// Ensure archive folder exists (tolerant - ignore if already exists)
+					try {
+						const archiveFolder = this.app.vault.getAbstractFileByPath(archivePath);
+						if (!archiveFolder) {
+							console.log(`    Creating archive folder: ${archivePath}`);
+							await this.app.vault.createFolder(archivePath);
+						}
+					} catch (folderError) {
+						// Folder might already exist or parent needs creation - ignore and continue
+						console.log(`    Archive folder check/create: ${archivePath} (may already exist)`);
+					}
+
+					// Move file to archive
+					const newPath = `${archivePath}/${file.name}`;
+					console.log(`    Moving: ${file.path} -> ${newPath}`);
+					await this.app.fileManager.renameFile(file, newPath);
+					movedCount++;
+					console.log(`    ✅ Moved successfully`);
+
+				} catch (e) {
+					console.error('Error processing file:', file.path, e);
+					new Notice(`❌ Error moving file: ${file.path}`);
+				}
+			}
+
+			console.log(`Summary: Found ${archivedFound} archived files, moved ${movedCount}`);
+			console.groupEnd();
+			new Notice(`📊 Archive scan complete: ${archivedFound} archived found, ${movedCount} moved`);
+			return movedCount;
+
+		} catch (error) {
+			console.error('Error in moveArchivedFilesToArchive:', error);
+			console.groupEnd();
+			new Notice(`❌ Error in archive scan: ${(error as Error).message}`);
+			return movedCount;
+		}
+	}
+
+	/**
+	 * Remove archived nodes from the canvas.
+	 * Checks each file node's frontmatter for archived status and removes if archived.
+	 * @param canvasFile - The canvas file to clean
+	 * @returns Number of nodes removed
+	 */
+	private async removeArchivedNodesFromCanvas(canvasFile: TFile): Promise<number> {
+		console.group('[Canvas Plugin] removeArchivedNodesFromCanvas');
+		new Notice(`🔍 Scanning canvas for archived nodes...`);
+
+		try {
+			const canvasData = await loadCanvasData(this.app, canvasFile);
+			const fileNodes = canvasData.nodes.filter(n => n.type === 'file');
+			console.log('File nodes on canvas:', fileNodes.length);
+			new Notice(`📋 Checking ${fileNodes.length} file nodes on canvas`);
+
+			const nodesToRemove = new Set<string>();
+			let missingFiles = 0;
+			let archivedNodes = 0;
+
+			for (const node of fileNodes) {
+				if (!node.file) continue;
+
+				const file = this.app.vault.getAbstractFileByPath(node.file);
+				if (!(file instanceof TFile)) {
+					// File doesn't exist anymore, mark for removal
+					console.log(`  [MISSING] File not found: ${node.file}`);
+					nodesToRemove.add(node.id);
+					missingFiles++;
+					continue;
+				}
+
+				try {
+					const content = await this.app.vault.read(file);
+					const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+					if (!frontmatterMatch) continue;
+
+					const frontmatterText = frontmatterMatch[1];
+
+					// Check if archived
+					const statusMatch = frontmatterText.match(/^status:\s*(.+)$/m);
+					const archivedMatch = frontmatterText.match(/^archived:\s*(.+)$/m);
+					const statusValue = statusMatch?.[1]?.trim().toLowerCase();
+					const archivedValue = archivedMatch?.[1]?.trim().toLowerCase();
+					const isArchived = statusValue === 'archived' || archivedValue === 'true';
+
+					if (isArchived) {
+						console.log(`  [ARCHIVED] Node is archived: ${node.file} (status=${statusValue}, archived=${archivedValue})`);
+						nodesToRemove.add(node.id);
+						archivedNodes++;
+					}
+				} catch (e) {
+					console.warn('Error reading file for node:', node.id, e);
+				}
+			}
+
+			console.log(`Summary: ${missingFiles} missing files, ${archivedNodes} archived nodes`);
+
+			if (nodesToRemove.size === 0) {
+				console.log('No archived nodes to remove');
+				console.groupEnd();
+				new Notice(`✅ No archived nodes found on canvas`);
+				return 0;
+			}
+
+			console.log('Removing', nodesToRemove.size, 'nodes total');
+			new Notice(`🗑️ Removing ${nodesToRemove.size} nodes (${archivedNodes} archived, ${missingFiles} missing files)`);
+
+			// Remove nodes
+			canvasData.nodes = canvasData.nodes.filter(n => !nodesToRemove.has(n.id));
+
+			// Remove edges connected to removed nodes
+			const edgesBefore = canvasData.edges.length;
+			canvasData.edges = canvasData.edges.filter(e =>
+				!nodesToRemove.has(e.fromNode) && !nodesToRemove.has(e.toNode)
+			);
+			const edgesRemoved = edgesBefore - canvasData.edges.length;
+			if (edgesRemoved > 0) {
+				console.log('Also removed', edgesRemoved, 'orphaned edges');
+			}
+
+			// Save canvas (don't close/reopen - caller will handle that)
+			await this.app.vault.modify(canvasFile, JSON.stringify(canvasData, null, '\t'));
+			console.log('Canvas saved');
+
+			console.groupEnd();
+			return nodesToRemove.size;
+
+		} catch (error) {
+			console.error('Error in removeArchivedNodesFromCanvas:', error);
+			console.groupEnd();
+			return 0;
+		}
+	}
+
+	/**
+	 * Populate canvas from vault entities
+	 * Scans the vault for all entity files (milestones, stories, tasks, decisions, documents)
+	 * and creates canvas nodes for each entity that isn't already on the canvas
+	 */
+	private async populateCanvasFromVault(): Promise<void> {
+		console.group('[Canvas Plugin] populateCanvasFromVault');
+		console.log('=== STAGE 1: INITIALIZATION ===');
+
+		const canvasFile = this.getActiveCanvasFile();
+		if (!canvasFile) {
+			console.warn('No active canvas file found');
+			console.groupEnd();
+			new Notice("Please open a canvas file first");
+			return;
+		}
+		console.log('Canvas file:', canvasFile.path);
+
+		// Get canvas view state
+		const leaves = this.app.workspace.getLeavesOfType("canvas");
+		const canvasLeaf = leaves.find(leaf => {
+			const view = leaf.view as { file?: TFile };
+			return view.file?.path === canvasFile.path;
+		});
+		const canvasView = canvasLeaf?.view as {
+			canvas?: {
+				nodes?: Map<string, unknown>;
+				data?: { nodes: unknown[] };
+				requestSave?: () => void;
+				createFileNode?: (opts: unknown) => unknown;
+			}
+		} | undefined;
+
+		console.log('Canvas view found:', !!canvasView);
+		console.log('Canvas internal object:', !!canvasView?.canvas);
+		console.log('Canvas nodes Map:', canvasView?.canvas?.nodes ? `Map with ${canvasView.canvas.nodes.size} entries` : 'undefined');
+		console.log('Canvas data.nodes:', canvasView?.canvas?.data?.nodes ? `Array with ${canvasView.canvas.data.nodes.length} entries` : 'undefined');
+		console.log('Canvas has createFileNode:', !!canvasView?.canvas?.createFileNode);
+		console.log('Canvas has requestSave:', !!canvasView?.canvas?.requestSave);
+
+		new Notice("Scanning vault for entities...");
+
+		try {
+			console.log('\n=== STAGE 2: LOAD CANVAS FILE DATA ===');
+			// Load current canvas data from FILE (not in-memory)
+			const canvasData = await loadCanvasData(this.app, canvasFile);
+			console.log('Canvas file data loaded:');
+			console.log('  - Nodes in file:', canvasData.nodes.length);
+			console.log('  - Edges in file:', canvasData.edges.length);
+			console.log('  - File nodes:', canvasData.nodes.filter(n => n.type === 'file').length);
+			console.log('  - Text nodes:', canvasData.nodes.filter(n => n.type === 'text').length);
+
+			// Get all file paths already on canvas
+			const existingFilePaths = new Set<string>();
+			for (const node of canvasData.nodes) {
+				if (node.type === "file" && node.file) {
+					existingFilePaths.add(node.file);
+				}
+			}
+			console.log('Existing file paths on canvas:', existingFilePaths.size);
+
+			// Get all entity IDs already on canvas (read from frontmatter of existing nodes)
+			const existingEntityIds = new Set<string>();
+			for (const node of canvasData.nodes) {
+				if (node.type === "file" && node.file) {
+					const file = this.app.vault.getAbstractFileByPath(node.file);
+					if (file instanceof TFile) {
+						try {
+							const content = await this.app.vault.read(file);
+							const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+							if (fmMatch) {
+								const idMatch = fmMatch[1].match(/^id:\s*(.+)$/m);
+								if (idMatch) {
+									existingEntityIds.add(idMatch[1].trim());
+								}
+							}
+						} catch (e) {
+							// Ignore read errors for existing nodes
+						}
+					}
+				}
+			}
+			console.log('Existing entity IDs on canvas:', existingEntityIds.size);
+
+			// Entity types to scan for (V2 schema)
+			const entityTypes = ['milestone', 'story', 'task', 'decision', 'document', 'accomplishment'];
+
+			// Node sizes by entity type
+			const nodeSizes: Record<string, { width: number; height: number }> = {
+				milestone: { width: 280, height: 200 },
+				story: { width: 200, height: 150 },
+				task: { width: 160, height: 100 },
+				decision: { width: 180, height: 120 },
+				document: { width: 200, height: 150 },
+				accomplishment: { width: 200, height: 150 },
+			};
+
+			// Colors by entity type (Obsidian canvas colors 1-6)
+			const entityColors: Record<string, string> = {
+				milestone: "6",    // purple
+				story: "3",        // blue
+				task: "2",         // green
+				decision: "4",     // orange
+				document: "5",     // yellow
+				accomplishment: "3", // blue (default)
+			};
+
+			console.log('\n=== STAGE 3: SCAN VAULT FOR ENTITIES ===');
+			// Scan all markdown files (excluding archive folder)
+			const allFilesRaw = this.app.vault.getMarkdownFiles();
+			// Check for archive folder - handles both "archive/" at root and "/archive/" in subfolders
+			const allFiles = allFilesRaw.filter(f => !f.path.includes('/archive/') && !f.path.startsWith('archive/'));
+			console.log('Total markdown files in vault:', allFilesRaw.length);
+			console.log('Files after excluding archive folder:', allFiles.length);
+
+			// Entity info including dependencies
+			interface EntityInfo {
+				file: TFile;
+				type: string;
+				effort?: string;
+				id?: string;
+				title?: string;
+				parent?: string;        // Parent entity ID (for hierarchy)
+				dependsOn: string[];    // Entity IDs this depends on
+				enables: string[];      // Entity IDs this decision enables/unblocks
+			}
+
+			const entitiesToAdd: EntityInfo[] = [];
+
+			// Helper to parse YAML array (handles both inline and multiline)
+			const parseYamlArray = (frontmatterText: string, key: string): string[] => {
+				// Try multiline format first:
+				// depends_on:
+				//   - S-001
+				//   - S-002
+				const multilineMatch = frontmatterText.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+				if (multilineMatch) {
+					const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+					if (items) {
+						return items.map(item => item.replace(/^\s*-\s*/, '').trim());
+					}
+				}
+
+				// Try inline format: depends_on: [S-001, S-002]
+				const inlineMatch = frontmatterText.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+				if (inlineMatch) {
+					return inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+				}
+
+				// Try single value: depends_on: S-001
+				const singleMatch = frontmatterText.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+				if (singleMatch && singleMatch[1].trim()) {
+					return [singleMatch[1].trim()];
+				}
+
+				return [];
+			};
+
+			// Track entity IDs seen in this batch to prevent duplicates within the scan
+			const batchEntityIds = new Set<string>();
+			let skippedDuplicates = 0;
+
+			for (const file of allFiles) {
+				// Skip if already on canvas (by file path)
+				if (existingFilePaths.has(file.path)) {
+					continue;
+				}
+
+				// Read and parse frontmatter
+				const content = await this.app.vault.read(file);
+				const frontmatter = parseFrontmatter(content);
+
+				// Also try to parse V2 style frontmatter
+				const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+				if (!frontmatterMatch) continue;
+
+				const frontmatterText = frontmatterMatch[1];
+				const typeMatch = frontmatterText.match(/^type:\s*(.+)$/m);
+				if (!typeMatch) continue;
+
+				const entityType = typeMatch[1].trim().toLowerCase();
+				if (!entityTypes.includes(entityType)) continue;
+
+				// Skip archived items (status: archived or archived: true)
+				const statusMatch = frontmatterText.match(/^status:\s*(.+)$/m);
+				const archivedMatch = frontmatterText.match(/^archived:\s*(.+)$/m);
+				const isArchived =
+					statusMatch?.[1]?.trim().toLowerCase() === 'archived' ||
+					archivedMatch?.[1]?.trim().toLowerCase() === 'true';
+				if (isArchived) {
+					console.log(`Skipping archived entity: ${file.path}`);
+					continue;
+				}
+
+				// Extract effort and other metadata
+				const effortMatch = frontmatterText.match(/^effort:\s*(.+)$/m);
+				const idMatch = frontmatterText.match(/^id:\s*(.+)$/m);
+				const titleMatch = frontmatterText.match(/^title:\s*["']?(.+?)["']?\s*$/m);
+				const parentMatch = frontmatterText.match(/^parent:\s*(.+)$/m);
+
+				const entityId = idMatch?.[1]?.trim();
+
+				// Skip if entity ID already exists on canvas
+				if (entityId && existingEntityIds.has(entityId)) {
+					console.log(`Skipping duplicate entity ID (already on canvas): ${entityId} in ${file.path}`);
+					skippedDuplicates++;
+					continue;
+				}
+
+				// Skip if entity ID already seen in this batch
+				if (entityId && batchEntityIds.has(entityId)) {
+					console.log(`Skipping duplicate entity ID (duplicate in vault): ${entityId} in ${file.path}`);
+					skippedDuplicates++;
+					continue;
+				}
+
+				// Track this entity ID
+				if (entityId) {
+					batchEntityIds.add(entityId);
+				}
+
+				// Parse depends_on array
+				const dependsOn = parseYamlArray(frontmatterText, 'depends_on');
+
+				// Parse enables array (for decisions)
+				const enables = parseYamlArray(frontmatterText, 'enables');
+
+				entitiesToAdd.push({
+					file,
+					type: entityType,
+					effort: effortMatch?.[1]?.trim(),
+					id: entityId,
+					title: titleMatch?.[1]?.trim() || file.basename,
+					parent: parentMatch?.[1]?.trim(),
+					dependsOn,
+					enables,
+				});
+			}
+
+			if (skippedDuplicates > 0) {
+				console.log(`Skipped ${skippedDuplicates} duplicate entities`);
+			}
+
+			console.log('Entities found to add:', entitiesToAdd.length);
+			if (entitiesToAdd.length > 0) {
+				console.table(entitiesToAdd.map(e => ({
+					path: e.file.path,
+					type: e.type,
+					id: e.id,
+					parent: e.parent || '-',
+					dependsOn: e.dependsOn.length > 0 ? e.dependsOn.join(', ') : '-'
+				})));
+			}
+
+			if (entitiesToAdd.length === 0) {
+				console.log('No entities to add, exiting');
+				console.groupEnd();
+				new Notice("No new entities found to add to canvas");
+				return;
+			}
+
+			// Group entities by type for organized layout
+			const entitiesByType: Record<string, typeof entitiesToAdd> = {};
+			for (const entity of entitiesToAdd) {
+				if (!entitiesByType[entity.type]) {
+					entitiesByType[entity.type] = [];
+				}
+				entitiesByType[entity.type].push(entity);
+			}
+			console.log('Entities by type:', Object.fromEntries(Object.entries(entitiesByType).map(([k, v]) => [k, v.length])));
+
+			console.log('\n=== STAGE 4: CREATE NODE OBJECTS (GRAPH LAYOUT) ===');
+			// Graph-based layout using topological sort on dependencies
+			// Nodes are positioned in layers based on dependency depth
+			const nodeWidth = 300;
+			const nodeHeight = 200;
+			const horizontalGap = 80;
+			const verticalGap = 120;
+			const startX = 50;
+			const startY = 50;
+
+			const newNodes: CanvasNode[] = [];
+
+			// Map entity IDs to node info for edge creation
+			const entityNodeMap = new Map<string, {
+				nodeId: string;
+				filePath: string;
+				parent?: string;
+				dependsOn: string[];
+				enables: string[];
+			}>();
+
+			// Build entity lookup map
+			const entityById = new Map<string, typeof entitiesToAdd[0]>();
+			for (const entity of entitiesToAdd) {
+				if (entity.id) {
+					entityById.set(entity.id, entity);
+				}
+			}
+
+			// Calculate dependency depth for each entity (longest path from a root)
+			// Roots are entities with no dependencies
+			const depthCache = new Map<string, number>();
+
+			const calculateDepth = (entityId: string, visited: Set<string> = new Set()): number => {
+				if (depthCache.has(entityId)) return depthCache.get(entityId)!;
+				if (visited.has(entityId)) return 0; // Cycle detected, break it
+
+				visited.add(entityId);
+				const entity = entityById.get(entityId);
+				if (!entity) return 0;
+
+				// Depth is based on dependencies (what this entity depends on)
+				// Also consider parent relationship
+				let maxDepDep = -1;
+				for (const depId of entity.dependsOn) {
+					if (entityById.has(depId)) {
+						maxDepDep = Math.max(maxDepDep, calculateDepth(depId, new Set(visited)));
+					}
+				}
+
+				// Parent relationship also contributes to depth
+				if (entity.parent && entityById.has(entity.parent)) {
+					maxDepDep = Math.max(maxDepDep, calculateDepth(entity.parent, new Set(visited)));
+				}
+
+				const depth = maxDepDep + 1;
+				depthCache.set(entityId, depth);
+				return depth;
+			};
+
+			// Calculate depth for all entities
+			for (const entity of entitiesToAdd) {
+				if (entity.id) {
+					calculateDepth(entity.id);
+				}
+			}
+
+			// Group entities by depth (layer)
+			const entitiesByDepth = new Map<number, typeof entitiesToAdd>();
+			for (const entity of entitiesToAdd) {
+				const depth = entity.id ? (depthCache.get(entity.id) || 0) : 0;
+				if (!entitiesByDepth.has(depth)) {
+					entitiesByDepth.set(depth, []);
+				}
+				entitiesByDepth.get(depth)!.push(entity);
+			}
+
+			// Sort depths
+			const depths = Array.from(entitiesByDepth.keys()).sort((a, b) => a - b);
+			console.log('Graph layers:', depths.length, 'depths:', depths);
+
+			// Hierarchical graph layout: milestones centered, children below their parents
+			// Track positions for alignment
+			const entityPositions = new Map<string, { x: number; y: number }>();
+
+			// Row heights for each type level
+			const typeRows: Record<string, number> = {
+				'milestone': 0,
+				'story': 1,
+				'task': 2,
+				'decision': 3,
+				'document': 4,
+				'accomplishment': 5,
+			};
+
+			// Get entities by type
+			const milestones = entitiesToAdd.filter(e => e.type === 'milestone');
+			const stories = entitiesToAdd.filter(e => e.type === 'story');
+			const tasks = entitiesToAdd.filter(e => e.type === 'task');
+			const others = entitiesToAdd.filter(e => !['milestone', 'story', 'task'].includes(e.type));
+
+			// Sort milestones by ID
+			milestones.sort((a, b) => {
+				if (a.id && b.id) return a.id.localeCompare(b.id);
+				return a.file.basename.localeCompare(b.file.basename);
+			});
+
+			// Build children map (parent -> children)
+			const childrenOf = new Map<string, typeof entitiesToAdd>();
+			for (const entity of entitiesToAdd) {
+				if (entity.parent) {
+					if (!childrenOf.has(entity.parent)) {
+						childrenOf.set(entity.parent, []);
+					}
+					childrenOf.get(entity.parent)!.push(entity);
+				}
+			}
+
+			// Sort children: those with dependencies first, then by ID
+			for (const [parentId, children] of childrenOf) {
+				children.sort((a, b) => {
+					const aHasDeps = a.dependsOn.length > 0 ? 1 : 0;
+					const bHasDeps = b.dependsOn.length > 0 ? 1 : 0;
+					if (bHasDeps !== aHasDeps) return bHasDeps - aHasDeps;
+					if (a.id && b.id) return a.id.localeCompare(b.id);
+					return a.file.basename.localeCompare(b.file.basename);
+				});
+			}
+
+			// Calculate width needed for each milestone's subtree
+			const getSubtreeWidth = (entityId: string): number => {
+				const children = childrenOf.get(entityId) || [];
+				if (children.length === 0) return nodeWidth;
+
+				let totalWidth = 0;
+				for (const child of children) {
+					if (child.id) {
+						totalWidth += getSubtreeWidth(child.id) + horizontalGap;
+					} else {
+						totalWidth += nodeWidth + horizontalGap;
+					}
+				}
+				return Math.max(nodeWidth, totalWidth - horizontalGap);
+			};
+
+			// Place milestones horizontally, spaced by their subtree width
+			let currentX = startX;
+			const milestoneY = startY;
+
+			for (const milestone of milestones) {
+				const subtreeWidth = milestone.id ? getSubtreeWidth(milestone.id) : nodeWidth;
+				const milestoneX = currentX + (subtreeWidth - nodeWidth) / 2; // Center milestone over its subtree
+
+				if (milestone.id) {
+					entityPositions.set(milestone.id, { x: milestoneX, y: milestoneY });
+				}
+
+				const size = nodeSizes['milestone'] || { width: nodeWidth, height: nodeHeight };
+				const color = entityColors['milestone'];
+
+				const node = createNode(
+					"file",
+					milestoneX,
+					milestoneY,
+					size.width,
+					size.height,
+					{
+						file: milestone.file.path,
+						color: color,
+						metadata: {
+							plugin: "canvas-project-manager",
+							shape: "milestone",
+							entityId: milestone.id,
+						},
+					}
+				);
+				newNodes.push(node);
+
+				if (milestone.id) {
+					entityNodeMap.set(milestone.id, {
+						nodeId: node.id,
+						filePath: milestone.file.path,
+						parent: milestone.parent,
+						dependsOn: milestone.dependsOn,
+						enables: milestone.enables,
+					});
+				}
+
+				currentX += subtreeWidth + horizontalGap * 2;
+			}
+
+			// Place children recursively under their parents
+			const placeChildren = (parentId: string, parentX: number, rowLevel: number) => {
+				const children = childrenOf.get(parentId) || [];
+				if (children.length === 0) return;
+
+				const rowY = startY + rowLevel * (nodeHeight + verticalGap);
+
+				// Calculate total width of children
+				let totalChildWidth = 0;
+				for (const child of children) {
+					const childSubtreeWidth = child.id ? getSubtreeWidth(child.id) : nodeWidth;
+					totalChildWidth += childSubtreeWidth + horizontalGap;
+				}
+				totalChildWidth -= horizontalGap; // Remove last gap
+
+				// Start position to center children under parent
+				let childX = parentX - totalChildWidth / 2 + nodeWidth / 2;
+
+				for (const child of children) {
+					const childSubtreeWidth = child.id ? getSubtreeWidth(child.id) : nodeWidth;
+					const childCenterX = childX + (childSubtreeWidth - nodeWidth) / 2;
+
+					if (child.id) {
+						entityPositions.set(child.id, { x: childCenterX, y: rowY });
+					}
+
+					const size = nodeSizes[child.type] || { width: nodeWidth, height: nodeHeight };
+					const color = entityColors[child.type];
+
+					let nodeColor = color;
+					if (child.effort && this.settings.effortColorMap[child.effort]) {
+						nodeColor = this.settings.effortColorMap[child.effort];
+					}
+
+					const node = createNode(
+						"file",
+						childCenterX,
+						rowY,
+						size.width,
+						size.height,
+						{
+							file: child.file.path,
+							color: nodeColor,
+							metadata: {
+								plugin: "canvas-project-manager",
+								shape: child.type,
+								entityId: child.id,
+							},
+						}
+					);
+					newNodes.push(node);
+
+					if (child.id) {
+						entityNodeMap.set(child.id, {
+							nodeId: node.id,
+							filePath: child.file.path,
+							parent: child.parent,
+							dependsOn: child.dependsOn,
+							enables: child.enables,
+						});
+
+						// Recursively place this child's children
+						placeChildren(child.id, childCenterX, rowLevel + 1);
+					}
+
+					childX += childSubtreeWidth + horizontalGap;
+				}
+			};
+
+			// Place children of each milestone
+			for (const milestone of milestones) {
+				if (milestone.id) {
+					const pos = entityPositions.get(milestone.id);
+					if (pos) {
+						placeChildren(milestone.id, pos.x, 1);
+					}
+				}
+			}
+
+			// Place orphans (no parent) at the end - these go last
+			const orphans = entitiesToAdd.filter(e =>
+				!e.parent && e.type !== 'milestone' && !entityNodeMap.has(e.id || '')
+			);
+
+			if (orphans.length > 0) {
+				// Sort: items with dependencies first, then by type, then by ID
+				orphans.sort((a, b) => {
+					const aHasDeps = a.dependsOn.length > 0 ? 1 : 0;
+					const bHasDeps = b.dependsOn.length > 0 ? 1 : 0;
+					if (bHasDeps !== aHasDeps) return bHasDeps - aHasDeps;
+
+					const typeOrder = ['story', 'task', 'decision', 'document', 'accomplishment'];
+					const aTypeIdx = typeOrder.indexOf(a.type);
+					const bTypeIdx = typeOrder.indexOf(b.type);
+					if (aTypeIdx !== bTypeIdx) return aTypeIdx - bTypeIdx;
+
+					if (a.id && b.id) return a.id.localeCompare(b.id);
+					return a.file.basename.localeCompare(b.file.basename);
+				});
+
+				// Place orphans in a row at the bottom right
+				const orphanStartX = currentX;
+				const orphanY = startY + 4 * (nodeHeight + verticalGap); // Below main content
+
+				let orphanX = orphanStartX;
+				for (const orphan of orphans) {
+					const size = nodeSizes[orphan.type] || { width: nodeWidth, height: nodeHeight };
+					const color = entityColors[orphan.type];
+
+					let nodeColor = color;
+					if (orphan.effort && this.settings.effortColorMap[orphan.effort]) {
+						nodeColor = this.settings.effortColorMap[orphan.effort];
+					}
+
+					const node = createNode(
+						"file",
+						orphanX,
+						orphanY,
+						size.width,
+						size.height,
+						{
+							file: orphan.file.path,
+							color: nodeColor,
+							metadata: {
+								plugin: "canvas-project-manager",
+								shape: orphan.type,
+								entityId: orphan.id,
+							},
+						}
+					);
+					newNodes.push(node);
+
+					if (orphan.id) {
+						entityNodeMap.set(orphan.id, {
+							nodeId: node.id,
+							filePath: orphan.file.path,
+							parent: orphan.parent,
+							dependsOn: orphan.dependsOn,
+							enables: orphan.enables,
+						});
+					}
+
+					orphanX += size.width + horizontalGap;
+				}
+			}
+
+			console.log('Created', newNodes.length, 'node objects');
+			console.log('Entity node map:', entityNodeMap.size, 'entries');
+			if (newNodes.length > 0) {
+				console.log('Sample node:', JSON.stringify(newNodes[0], null, 2));
+			}
+
+			console.log('\n=== STAGE 5: FILE-BASED APPROACH (NODES + EDGES TOGETHER) ===');
+			this.isUpdatingCanvas = true;
+			console.log('isUpdatingCanvas set to TRUE');
+
+			// IMPORTANT: Close canvas views FIRST to prevent in-memory state from overwriting our changes
+			console.log('Closing canvas views to prevent overwrites...');
+			const closedLeaves = await closeCanvasViews(this.app, canvasFile);
+			console.log('Closed', closedLeaves.length, 'canvas views');
+
+			// Small delay to ensure any pending saves complete
+			await new Promise(resolve => setTimeout(resolve, 100));
+
+			// Load current canvas data - we'll add both nodes AND edges, then save once
+			const canvasDataForEdges = await loadCanvasData(this.app, canvasFile);
+			console.log('Current canvas has', canvasDataForEdges.nodes.length, 'nodes and', canvasDataForEdges.edges.length, 'edges');
+
+			// Add all new nodes to canvas data
+			for (const node of newNodes) {
+				addNode(canvasDataForEdges, node);
+			}
+			console.log('After adding new nodes:', canvasDataForEdges.nodes.length, 'nodes')
+
+			// Build a map of entity ID -> canvas node ID for ALL nodes on canvas
+			// This includes both newly added nodes and existing nodes
+			const allEntityToNodeMap = new Map<string, string>();
+
+			// Also build a complete map of all entities with their dependencies (new + existing)
+			const allEntityDependencies = new Map<string, {
+				nodeId: string;
+				filePath: string;
+				parent?: string;
+				dependsOn: string[];
+				enables: string[];
+				isNew: boolean;
+			}>();
+
+			// First, add our newly created nodes
+			for (const [entityId, info] of entityNodeMap.entries()) {
+				allEntityToNodeMap.set(entityId, info.nodeId);
+				allEntityDependencies.set(entityId, {
+					...info,
+					isNew: true,
+				});
+			}
+
+			// Then, scan existing nodes for entity IDs AND their dependencies
+			console.log('Scanning existing nodes for dependencies...');
+
+			// Helper to parse YAML array
+			const parseYamlArrayLocal = (text: string, key: string): string[] => {
+				const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+				if (multilineMatch) {
+					const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+					if (items) {
+						return items.map(item => item.replace(/^\s*-\s*/, '').trim());
+					}
+				}
+				const inlineMatch = text.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+				if (inlineMatch) {
+					return inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+				}
+				const singleMatch = text.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+				if (singleMatch && singleMatch[1].trim()) {
+					return [singleMatch[1].trim()];
+				}
+				return [];
+			};
+
+			for (const node of canvasDataForEdges.nodes) {
+				let entityId: string | undefined;
+
+				// First check metadata
+				if (node.metadata?.entityId && typeof node.metadata.entityId === 'string') {
+					entityId = node.metadata.entityId;
+				}
+
+				// For file nodes, read entity ID from frontmatter (not filename)
+				if (!entityId && node.type === 'file' && node.file) {
+					const file = this.app.vault.getAbstractFileByPath(node.file);
+					if (file instanceof TFile) {
+						try {
+							const content = await this.app.vault.read(file);
+							const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+							if (frontmatterMatch) {
+								const frontmatterText = frontmatterMatch[1];
+								const idMatch = frontmatterText.match(/^id:\s*(.+)$/m);
+								if (idMatch) {
+									entityId = idMatch[1].trim();
+								}
+
+								// If we found an entity ID, also read dependencies
+								if (entityId && !entityNodeMap.has(entityId)) {
+									const parentMatch = frontmatterText.match(/^parent:\s*(.+)$/m);
+									const dependsOn = parseYamlArrayLocal(frontmatterText, 'depends_on');
+									const enables = parseYamlArrayLocal(frontmatterText, 'enables');
+
+									allEntityDependencies.set(entityId, {
+										nodeId: node.id,
+										filePath: node.file,
+										parent: parentMatch?.[1]?.trim(),
+										dependsOn,
+										enables,
+										isNew: false,
+									});
+								}
+							}
+						} catch (e) {
+							console.warn(`Failed to read frontmatter for existing node: ${node.file}`, e);
+						}
+					}
+				}
+
+				if (entityId) {
+					allEntityToNodeMap.set(entityId, node.id);
+				}
+			}
+			console.log('Entity to node mapping:', allEntityToNodeMap.size, 'entries');
+			console.log('Entities with dependencies:', allEntityDependencies.size, '(new:', entityNodeMap.size, ', existing:', allEntityDependencies.size - entityNodeMap.size, ')');
+
+			// Create edges for ALL entities (new and existing)
+			const newEdges: CanvasEdge[] = [];
+			let edgesSkipped = 0;
+			let edgesFromNewNodes = 0;
+			let edgesFromExistingNodes = 0;
+
+			for (const [entityId, info] of allEntityDependencies.entries()) {
+				const sourceNodeId = info.nodeId;
+
+				// Create edges for depends_on relationships
+				for (const depId of info.dependsOn) {
+					const targetNodeId = allEntityToNodeMap.get(depId);
+					if (targetNodeId) {
+						// Check if edge already exists
+						if (!edgeExists(canvasDataForEdges, targetNodeId, sourceNodeId)) {
+							// Edge goes FROM dependency TO this node (A depends on B = B --> A)
+							// Visual: dependency --> dependent
+							const edge = createEdge(targetNodeId, sourceNodeId, undefined, 'right', 'left');
+							newEdges.push(edge);
+							if (info.isNew) edgesFromNewNodes++; else edgesFromExistingNodes++;
+						} else {
+							edgesSkipped++;
+						}
+					} else {
+						// Target not on canvas - skip silently
+					}
+				}
+
+				// Create edge for parent relationship
+				if (info.parent) {
+					const parentNodeId = allEntityToNodeMap.get(info.parent);
+					if (parentNodeId) {
+						// Check if edge already exists
+						if (!edgeExists(canvasDataForEdges, sourceNodeId, parentNodeId)) {
+							// Edge goes FROM child TO parent (child belongs to parent)
+							// No label for cleaner visual
+							const edge = createEdge(sourceNodeId, parentNodeId, undefined, 'top', 'bottom');
+							newEdges.push(edge);
+							if (info.isNew) edgesFromNewNodes++; else edgesFromExistingNodes++;
+						} else {
+							edgesSkipped++;
+						}
+					} else {
+						// Parent not on canvas - skip silently
+					}
+				}
+
+				// Create edges for enables relationships (decision -> enabled entity)
+				for (const enabledId of info.enables) {
+					const enabledNodeId = allEntityToNodeMap.get(enabledId);
+					if (enabledNodeId) {
+						// Check if edge already exists
+						if (!edgeExists(canvasDataForEdges, sourceNodeId, enabledNodeId)) {
+							// Edge goes FROM decision TO enabled entity (decision enables/unblocks the entity)
+							// Visual: decision --> enabled entity
+							const edge = createEdge(sourceNodeId, enabledNodeId, undefined, 'right', 'left');
+							newEdges.push(edge);
+							if (info.isNew) edgesFromNewNodes++; else edgesFromExistingNodes++;
+						} else {
+							edgesSkipped++;
+						}
+					} else {
+						// Enabled entity not on canvas - skip silently
+					}
+				}
+			}
+
+			console.log('Edge summary:');
+			console.log('  - New edges created:', newEdges.length);
+			console.log('    - From new nodes:', edgesFromNewNodes);
+			console.log('    - From existing nodes:', edgesFromExistingNodes);
+			console.log('  - Edges already existed:', edgesSkipped);
+
+			// Add edges to canvas data
+			for (const edge of newEdges) {
+				addEdge(canvasDataForEdges, edge);
+			}
+
+			// Save everything together (nodes + edges) in one operation
+			console.log('\n=== STAGE 5D: SAVE NODES + EDGES TOGETHER ===');
+			console.log('Saving canvas with', canvasDataForEdges.nodes.length, 'nodes and', canvasDataForEdges.edges.length, 'edges');
+			await saveCanvasData(this.app, canvasFile, canvasDataForEdges);
+			console.log('Saved canvas');
+
+			// Verify file BEFORE reopening
+			console.log('\n=== STAGE 5E: VERIFY FILE BEFORE REOPEN ===');
+			await new Promise(resolve => setTimeout(resolve, 100));
+			const preReopenData = await loadCanvasData(this.app, canvasFile);
+			console.log('File content BEFORE reopen:', preReopenData.nodes.length, 'nodes,', preReopenData.edges.length, 'edges');
+
+			// Reopen the canvas views we closed at the start
+			// Using reopenCanvasViews on the same leaves forces Obsidian to reload from file
+			console.log('\n=== STAGE 5F: REOPEN CANVAS ===');
+			await reopenCanvasViews(this.app, canvasFile, closedLeaves);
+			console.log('Canvas reopened via reopenCanvasViews');
+
+			console.log('\n=== STAGE 6: VERIFY PERSISTENCE ===');
+			// Verify by reading from file
+			const finalCanvasData = await loadCanvasData(this.app, canvasFile);
+			console.log('Final file content:', finalCanvasData.nodes.length, 'nodes,', finalCanvasData.edges.length, 'edges');
+			console.log('✅ File saved successfully');
+
+			// Update cache after reload (re-read from file to ensure consistency)
+			const currentNodeIds = new Set(finalCanvasData.nodes.map((n: CanvasNode) => n.id));
+			this.canvasNodeCache.set(canvasFile.path, currentNodeIds);
+			console.log('Cache updated with', currentNodeIds.size, 'node IDs');
+
+			// Keep flag true to prevent deletion detection during auto-refresh
+			setTimeout(() => {
+				this.isUpdatingCanvas = false;
+				console.log('[Canvas Plugin] isUpdatingCanvas set to FALSE');
+			}, 500);
+
+			console.log('\n=== COMPLETE ===');
+			console.log('Summary:');
+			console.log('  - Nodes added:', newNodes.length);
+			console.log('  - Edges created:', newEdges.length);
+			console.groupEnd();
+
+			const edgeInfo = newEdges.length > 0 ? `, ${newEdges.length} edges` : '';
+			new Notice(`✅ Added ${newNodes.length} entities${edgeInfo} to canvas. Repositioning...`);
+			this.logger?.info("Populated canvas from vault", {
+				nodesAdded: newNodes.length,
+				edgesCreated: newEdges.length,
+				byType: Object.fromEntries(Object.entries(entitiesByType).map(([k, v]) => [k, v.length]))
+			});
+
+			// Apply the same positioning algorithm used by the reposition command
+			console.log('\n=== STAGE 7: REPOSITION NODES ===');
+			await this.repositionCanvasNodes();
+
+			// Archive cleanup: move archived files and remove archived nodes
+			console.log('\n=== STAGE 8: ARCHIVE CLEANUP ===');
+			// Get base folder from canvas file path - handle root case
+			let baseFolder = canvasFile.parent?.path || '';
+			// If baseFolder is "/" or empty, use empty string to match all files
+			if (baseFolder === '/' || baseFolder === '') {
+				baseFolder = '';
+			}
+			console.log('Canvas file path:', canvasFile.path);
+			console.log('Base folder for archive:', baseFolder || '(root - all files)');
+
+			const movedFiles = await this.moveArchivedFilesToArchive(baseFolder);
+			if (movedFiles > 0) {
+				new Notice(`📁 Moved ${movedFiles} archived files to archive folders`);
+			}
+
+			const removedNodes = await this.removeArchivedNodesFromCanvas(canvasFile);
+			if (removedNodes > 0) {
+				new Notice(`🗑️ Removed ${removedNodes} archived nodes from canvas`);
+			}
+
+		} catch (error) {
+			console.error('ERROR in populateCanvasFromVault:', error);
+			console.groupEnd();
+			this.isUpdatingCanvas = false;
+			this.logger?.error("Failed to populate canvas from vault", error);
+			new Notice("❌ Failed to populate canvas: " + (error as Error).message);
+		}
+	}
+
+	/**
+	 * Reposition existing canvas nodes using graph layout
+	 * Does not create new nodes, only repositions existing ones
+	 */
+	/**
+	 * Reposition canvas nodes using workstream-based layout:
+	 * - Milestones are positioned in horizontal lanes by workstream
+	 * - Dependencies (stories, tasks) fan out to the LEFT of their milestone
+	 * - Cross-stream dependencies are handled by aligning streams
+	 */
+	private async repositionCanvasNodes(): Promise<void> {
+		console.group('[Canvas Plugin] repositionCanvasNodes (workstream-based)');
+
+		const canvasFile = this.getActiveCanvasFile();
+		if (!canvasFile) {
+			console.warn('No active canvas file found');
+			console.groupEnd();
+			new Notice("Please open a canvas file first");
+			return;
+		}
+
+		try {
+			const canvasData = await loadCanvasData(this.app, canvasFile);
+			console.log('Canvas has', canvasData.nodes.length, 'nodes,', canvasData.edges.length, 'edges');
+
+			const fileNodes = canvasData.nodes.filter(n => n.type === 'file');
+			if (fileNodes.length === 0) {
+				new Notice("No file nodes on canvas to reposition");
+				console.groupEnd();
+				return;
+			}
+
+			// Layout configuration (exposed as params for tuning)
+			const config = {
+				milestoneSpacing: 1200,     // Horizontal spacing between milestones (doubled)
+				storySpacing: 800,          // Horizontal spacing between milestone and stories (doubled)
+				taskSpacing: 700,           // Horizontal spacing between story and tasks (doubled)
+				decisionSpacing: 800,       // Horizontal spacing for decisions (left of milestone)
+				documentSpacing: 1000,      // Horizontal spacing for documents (left of milestone)
+				verticalSpacing: 60,        // Vertical spacing between dependency nodes
+				decisionVerticalSpacing: 260, // Vertical spacing for decisions (60 + 200)
+				documentVerticalSpacing: 460, // Vertical spacing for documents (60 + 400)
+				streamSpacing: 400,         // Vertical spacing between workstream lanes
+				nodeWidth: 350,
+				nodeHeight: 250,
+				startX: 500,
+				startY: 500,
+			};
+
+			// ============================================================
+			// STEP 1: Parse node metadata (type, workstream, enables) from frontmatter
+			// ============================================================
+			type NodeMeta = {
+				id: string;
+				entityId?: string;  // Entity ID from frontmatter (e.g., DEC-001)
+				type: string;       // milestone, story, task, etc.
+				workstream: string; // engineering, business, etc.
+				filePath: string;
+				enables: string[];  // Entity IDs this decision enables/unblocks
+			};
+			const nodeMeta = new Map<string, NodeMeta>();
+			const entityIdToNodeId = new Map<string, string>(); // Map entity ID -> canvas node ID
+
+			// Helper to parse YAML array
+			const parseYamlArrayRepos = (text: string, key: string): string[] => {
+				const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+				if (multilineMatch) {
+					const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+					if (items) {
+						return items.map(item => item.replace(/^\s*-\s*/, '').trim());
+					}
+				}
+				const inlineMatch = text.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+				if (inlineMatch) {
+					return inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+				}
+				const singleMatch = text.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+				if (singleMatch && singleMatch[1].trim()) {
+					return [singleMatch[1].trim()];
+				}
+				return [];
+			};
+
+			for (const node of fileNodes) {
+				if (!node.file) continue;
+				const file = this.app.vault.getAbstractFileByPath(node.file);
+				if (!(file instanceof TFile)) continue;
+
+				try {
+					const content = await this.app.vault.read(file);
+					const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+					if (!fmMatch) continue;
+
+					const fmText = fmMatch[1];
+					const typeMatch = fmText.match(/^type:\s*(.+)$/m);
+					const workstreamMatch = fmText.match(/^workstream:\s*(.+)$/m);
+					const idMatch = fmText.match(/^id:\s*(.+)$/m);
+					const enables = parseYamlArrayRepos(fmText, 'enables');
+
+					const entityId = idMatch?.[1]?.trim();
+
+					nodeMeta.set(node.id, {
+						id: node.id,
+						entityId,
+						type: typeMatch?.[1]?.trim().toLowerCase() || 'unknown',
+						workstream: workstreamMatch?.[1]?.trim().toLowerCase() || 'unassigned',
+						filePath: node.file,
+						enables,
+					});
+
+					// Build entity ID -> node ID mapping
+					if (entityId) {
+						entityIdToNodeId.set(entityId, node.id);
+					}
+				} catch (e) {
+					console.warn('Failed to read frontmatter for node:', node.id, e);
+				}
+			}
+
+			// ============================================================
+			// STEP 2: Build dependency graph (from edges + enables field)
+			// ============================================================
+			const dependsOn = new Map<string, string[]>();  // nodeId -> [nodes it depends on]
+			const dependedBy = new Map<string, string[]>(); // nodeId -> [nodes that depend on it]
+
+			for (const node of fileNodes) {
+				dependsOn.set(node.id, []);
+				dependedBy.set(node.id, []);
+			}
+
+			// Build from canvas edges
+			for (const edge of canvasData.edges) {
+				// fromNode --> toNode means toNode depends on fromNode
+				const deps = dependsOn.get(edge.toNode);
+				if (deps && fileNodes.some(n => n.id === edge.fromNode)) {
+					deps.push(edge.fromNode);
+				}
+				const depBy = dependedBy.get(edge.fromNode);
+				if (depBy && fileNodes.some(n => n.id === edge.toNode)) {
+					depBy.push(edge.toNode);
+				}
+			}
+
+			// Also build from 'enables' field in frontmatter (for decisions)
+			// If decision enables entity X, then X depends on the decision
+			for (const [nodeId, meta] of nodeMeta.entries()) {
+				if (meta.enables.length > 0) {
+					for (const enabledEntityId of meta.enables) {
+						const enabledNodeId = entityIdToNodeId.get(enabledEntityId);
+						if (enabledNodeId && fileNodes.some(n => n.id === enabledNodeId)) {
+							// The enabled entity depends on this decision
+							const deps = dependsOn.get(enabledNodeId);
+							if (deps && !deps.includes(nodeId)) {
+								deps.push(nodeId);
+							}
+							// This decision is depended on by the enabled entity
+							const depBy = dependedBy.get(nodeId);
+							if (depBy && !depBy.includes(enabledNodeId)) {
+								depBy.push(enabledNodeId);
+							}
+						}
+					}
+				}
+			}
+
+			console.log('Dependency graph built with enables relationships');
+
+			// ============================================================
+			// STEP 3: Identify milestones and group by workstream
+			// ============================================================
+			const milestones = fileNodes.filter(n => nodeMeta.get(n.id)?.type === 'milestone');
+			const nonMilestones = fileNodes.filter(n => nodeMeta.get(n.id)?.type !== 'milestone');
+
+			// Group milestones by workstream
+			const milestonesByWorkstream = new Map<string, typeof milestones>();
+			for (const m of milestones) {
+				const ws = nodeMeta.get(m.id)?.workstream || 'unassigned';
+				if (!milestonesByWorkstream.has(ws)) milestonesByWorkstream.set(ws, []);
+				milestonesByWorkstream.get(ws)!.push(m);
+			}
+
+			console.log('Milestones by workstream:', Object.fromEntries(
+				Array.from(milestonesByWorkstream.entries()).map(([k, v]) => [k, v.length])
+			));
+
+			// ============================================================
+			// STEP 4: Data structures for positioning
+			// ============================================================
+			type Position = { x: number; y: number };
+			type Size = { width: number; height: number };
+			type MilestoneBox = {
+				position: Position;
+				size: Size;
+				relativePositions: Map<string, Position>; // dependency nodeId -> relative position
+			};
+			const tracker = new Map<string, MilestoneBox>();
+			type NodePosition = { x: number; y: number; width: number; height: number };
+			const finalPositions = new Map<string, NodePosition>();
+
+			// ============================================================
+			// STEP 5: For each milestone, calculate its bounding box
+			// ============================================================
+			const getMilestoneDependencies = (milestoneId: string, visited: Set<string>): string[] => {
+				// Get all non-milestone dependencies recursively
+				const result: string[] = [];
+				const deps = dependsOn.get(milestoneId) || [];
+
+				for (const depId of deps) {
+					if (visited.has(depId)) continue;
+					visited.add(depId);
+
+					const meta = nodeMeta.get(depId);
+					if (meta?.type === 'milestone') continue; // Skip other milestones
+
+					result.push(depId);
+					// Recursively get dependencies of this dependency
+					result.push(...getMilestoneDependencies(depId, visited));
+				}
+				return result;
+			};
+
+			// Track which milestone each node belongs to (for later positioning)
+			const nodeToMilestone = new Map<string, string>();
+
+			// Alternating top/bottom flag
+			let alternateTop = true;
+
+			for (const [workstream, wsMilestones] of milestonesByWorkstream) {
+				console.log(`Processing workstream: ${workstream} with ${wsMilestones.length} milestones`);
+
+				// Sort milestones within workstream by dependency order
+				// Milestones that depend on other milestones should be to the right
+				const milestoneDeps = new Map<string, string[]>();
+				for (const m of wsMilestones) {
+					const deps = (dependsOn.get(m.id) || []).filter(depId =>
+						nodeMeta.get(depId)?.type === 'milestone'
+					);
+					milestoneDeps.set(m.id, deps);
+				}
+
+				// Topological sort of milestones
+				const sortedMilestones: typeof wsMilestones = [];
+				const remaining = new Set(wsMilestones.map(m => m.id));
+
+				while (remaining.size > 0) {
+					// Find milestones with no remaining dependencies
+					let found = false;
+					for (const mId of remaining) {
+						const deps = milestoneDeps.get(mId) || [];
+						const hasUnresolvedDep = deps.some(d => remaining.has(d));
+						if (!hasUnresolvedDep) {
+							sortedMilestones.push(wsMilestones.find(m => m.id === mId)!);
+							remaining.delete(mId);
+							found = true;
+							break;
+						}
+					}
+					if (!found) {
+						// Cycle detected, just add remaining
+						for (const mId of remaining) {
+							sortedMilestones.push(wsMilestones.find(m => m.id === mId)!);
+						}
+						break;
+					}
+				}
+
+				// Process each milestone
+				for (const milestone of sortedMilestones) {
+					const mId = milestone.id;
+					const allDeps = getMilestoneDependencies(mId, new Set([mId]));
+
+					// Mark these nodes as belonging to this milestone
+					for (const depId of allDeps) {
+						if (!nodeToMilestone.has(depId)) {
+							nodeToMilestone.set(depId, mId);
+						}
+					}
+
+					// Separate by type
+					const stories = allDeps.filter(id => nodeMeta.get(id)?.type === 'story');
+					const tasks = allDeps.filter(id => nodeMeta.get(id)?.type === 'task');
+					const decisions = allDeps.filter(id => nodeMeta.get(id)?.type === 'decision');
+					const documents = allDeps.filter(id => nodeMeta.get(id)?.type === 'document');
+					const others = allDeps.filter(id => {
+						const t = nodeMeta.get(id)?.type;
+						return t !== 'story' && t !== 'task' && t !== 'decision' && t !== 'document';
+					});
+
+					// Calculate relative positions
+					// Milestone is at (0, 0) in its local coordinate system
+					// Dependencies fan to the LEFT
+					const relativePositions = new Map<string, Position>();
+
+					// Position stories to the left of milestone
+					// Alternating: this milestone's stories go TOP or BOTTOM
+					const storyDirection = alternateTop ? -1 : 1; // -1 = above, 1 = below
+					alternateTop = !alternateTop;
+
+					let storyY = storyDirection * (config.nodeHeight / 2 + config.verticalSpacing);
+					for (const storyId of stories) {
+						relativePositions.set(storyId, {
+							x: -config.storySpacing,
+							y: storyY,
+						});
+						storyY += storyDirection * (config.nodeHeight + config.verticalSpacing);
+					}
+
+					// Position tasks further left
+					let taskY = storyDirection * (config.nodeHeight / 2 + config.verticalSpacing);
+					for (const taskId of tasks) {
+						relativePositions.set(taskId, {
+							x: -config.storySpacing - config.taskSpacing,
+							y: taskY,
+						});
+						taskY += storyDirection * (config.nodeHeight + config.verticalSpacing);
+					}
+
+					// Position decisions to the left of milestone (same side as stories/tasks but different spacing)
+					let decisionY = storyDirection * (config.nodeHeight / 2 + config.decisionVerticalSpacing);
+					for (const decisionId of decisions) {
+						relativePositions.set(decisionId, {
+							x: -config.decisionSpacing, // Left side of milestone
+							y: decisionY,
+						});
+						decisionY += storyDirection * (config.nodeHeight + config.decisionVerticalSpacing);
+					}
+
+					// Position documents to the left of milestone (further left than decisions)
+					let documentY = storyDirection * (config.nodeHeight / 2 + config.documentVerticalSpacing);
+					for (const documentId of documents) {
+						relativePositions.set(documentId, {
+							x: -config.documentSpacing, // Left side of milestone, further out
+							y: documentY,
+						});
+						documentY += storyDirection * (config.nodeHeight + config.documentVerticalSpacing);
+					}
+
+					// Position other types
+					let otherY = -storyDirection * (config.nodeHeight / 2 + config.verticalSpacing);
+					for (const otherId of others) {
+						relativePositions.set(otherId, {
+							x: -config.storySpacing,
+							y: otherY,
+						});
+						otherY += -storyDirection * (config.nodeHeight + config.verticalSpacing);
+					}
+
+					// Calculate bounding box size
+					let minX = 0, maxX = config.nodeWidth;
+					let minY = 0, maxY = config.nodeHeight;
+
+					for (const [, pos] of relativePositions) {
+						minX = Math.min(minX, pos.x);
+						maxX = Math.max(maxX, pos.x + config.nodeWidth);
+						minY = Math.min(minY, pos.y);
+						maxY = Math.max(maxY, pos.y + config.nodeHeight);
+					}
+
+					const boxWidth = maxX - minX + config.milestoneSpacing;
+					const boxHeight = maxY - minY;
+
+					tracker.set(mId, {
+						position: { x: 0, y: 0 }, // Will be set later
+						size: { width: boxWidth, height: boxHeight },
+						relativePositions,
+					});
+
+					console.log(`Milestone ${mId}: ${allDeps.length} deps, box size ${boxWidth}x${boxHeight}`);
+				}
+			}
+
+			// ============================================================
+			// STEP 6: Position milestones within each workstream lane
+			// ============================================================
+			const workstreamLanes = new Map<string, { y: number; height: number }>();
+			let currentLaneY = config.startY;
+
+			for (const [workstream, wsMilestones] of milestonesByWorkstream) {
+				// Calculate lane height (max of all milestone boxes in this workstream)
+				let maxHeight = config.nodeHeight;
+				for (const m of wsMilestones) {
+					const box = tracker.get(m.id);
+					if (box) maxHeight = Math.max(maxHeight, box.size.height);
+				}
+
+				workstreamLanes.set(workstream, {
+					y: currentLaneY + maxHeight / 2,
+					height: maxHeight,
+				});
+
+				// Position milestones left to right
+				let currentX = config.startX;
+
+				// Re-sort by dependency (same logic as before)
+				const milestoneDeps = new Map<string, string[]>();
+				for (const m of wsMilestones) {
+					const deps = (dependsOn.get(m.id) || []).filter(depId =>
+						nodeMeta.get(depId)?.type === 'milestone'
+					);
+					milestoneDeps.set(m.id, deps);
+				}
+
+				const sortedMilestones: typeof wsMilestones = [];
+				const remaining = new Set(wsMilestones.map(m => m.id));
+
+				while (remaining.size > 0) {
+					let found = false;
+					for (const mId of remaining) {
+						const deps = milestoneDeps.get(mId) || [];
+						const hasUnresolvedDep = deps.some(d => remaining.has(d));
+						if (!hasUnresolvedDep) {
+							sortedMilestones.push(wsMilestones.find(m => m.id === mId)!);
+							remaining.delete(mId);
+							found = true;
+							break;
+						}
+					}
+					if (!found) {
+						for (const mId of remaining) {
+							sortedMilestones.push(wsMilestones.find(m => m.id === mId)!);
+						}
+						break;
+					}
+				}
+
+				for (const milestone of sortedMilestones) {
+					const box = tracker.get(milestone.id);
+					if (!box) continue;
+
+					// Milestone position (right side of its box)
+					const milestoneX = currentX + box.size.width - config.nodeWidth - config.milestoneSpacing / 2;
+					const milestoneY = currentLaneY + maxHeight / 2 - config.nodeHeight / 2;
+
+					box.position = { x: milestoneX, y: milestoneY };
+
+					// Set final position for milestone
+					finalPositions.set(milestone.id, {
+						x: milestoneX,
+						y: milestoneY,
+						width: config.nodeWidth,
+						height: config.nodeHeight,
+					});
+
+					// Set final positions for dependencies (convert relative to absolute)
+					for (const [depId, relPos] of box.relativePositions) {
+						finalPositions.set(depId, {
+							x: milestoneX + relPos.x,
+							y: milestoneY + relPos.y,
+							width: config.nodeWidth,
+							height: config.nodeHeight,
+						});
+					}
+
+					currentX += box.size.width;
+				}
+
+				currentLaneY += maxHeight + config.streamSpacing;
+			}
+
+			// ============================================================
+			// STEP 7: Handle cross-stream milestone dependencies
+			// ============================================================
+			// If milestone A (engineering) depends on milestone B (business),
+			// ensure B is positioned to the left of A
+			for (const milestone of milestones) {
+				const mId = milestone.id;
+				const mPos = finalPositions.get(mId);
+				if (!mPos) continue;
+
+				const deps = dependsOn.get(mId) || [];
+				for (const depId of deps) {
+					const depMeta = nodeMeta.get(depId);
+					if (depMeta?.type !== 'milestone') continue;
+
+					const depPos = finalPositions.get(depId);
+					if (!depPos) continue;
+
+					// If dependency is to the right of this milestone, we need to shift
+					if (depPos.x >= mPos.x) {
+						const shift = depPos.x - mPos.x + config.milestoneSpacing + config.nodeWidth;
+						console.log(`Cross-stream: shifting ${mId} right by ${shift} because it depends on ${depId}`);
+
+						// Shift this milestone and all its dependencies
+						mPos.x += shift;
+						const box = tracker.get(mId);
+						if (box) {
+							for (const [nodeId] of box.relativePositions) {
+								const pos = finalPositions.get(nodeId);
+								if (pos) pos.x += shift;
+							}
+						}
+					}
+				}
+			}
+
+			// ============================================================
+			// STEP 8: Handle orphan nodes and nodes not assigned to milestones
+			// ============================================================
+			const orphans = fileNodes.filter(n => !finalPositions.has(n.id));
+			if (orphans.length > 0) {
+				console.log(`Positioning ${orphans.length} orphan nodes`);
+				let orphanX = config.startX;
+				let orphanY = currentLaneY + config.streamSpacing;
+
+				for (const orphan of orphans) {
+					finalPositions.set(orphan.id, {
+						x: orphanX,
+						y: orphanY,
+						width: config.nodeWidth,
+						height: config.nodeHeight,
+					});
+					orphanY += config.nodeHeight + config.verticalSpacing;
+
+					// Wrap to next column if too many
+					if (orphanY > currentLaneY + 2000) {
+						orphanY = currentLaneY + config.streamSpacing;
+						orphanX += config.nodeWidth + config.storySpacing;
+					}
+				}
+			}
+
+			// ============================================================
+			// STEP 9: Apply positions to nodes
+			// ============================================================
+			let repositionedCount = 0;
+			for (const node of fileNodes) {
+				const pos = finalPositions.get(node.id);
+				if (pos) {
+					node.x = pos.x;
+					node.y = pos.y;
+					node.width = pos.width;
+					node.height = pos.height;
+					repositionedCount++;
+				}
+			}
+
+			// ============================================================
+			// STEP 10: Update edge sides for cleaner connections
+			// ============================================================
+			for (const edge of canvasData.edges) {
+				const fromPos = finalPositions.get(edge.fromNode);
+				const toPos = finalPositions.get(edge.toNode);
+
+				if (fromPos && toPos) {
+					// Determine best edge sides based on relative positions
+					if (fromPos.x < toPos.x) {
+						edge.fromSide = 'right';
+						edge.toSide = 'left';
+					} else if (fromPos.x > toPos.x) {
+						edge.fromSide = 'left';
+						edge.toSide = 'right';
+					} else if (fromPos.y < toPos.y) {
+						edge.fromSide = 'bottom';
+						edge.toSide = 'top';
+					} else {
+						edge.fromSide = 'top';
+						edge.toSide = 'bottom';
+					}
+				}
+			}
+
+			// Remove existing group nodes
+			canvasData.nodes = canvasData.nodes.filter(n => n.type !== 'group');
+
+			console.log('Repositioned', repositionedCount, 'nodes');
+
+			// ============================================================
+			// STEP 11: Save and reopen canvas
+			// ============================================================
+			this.isUpdatingCanvas = true;
+			const closedLeaves = await closeCanvasViews(this.app, canvasFile);
+			console.log('Closed', closedLeaves.length, 'canvas views');
+
+			await new Promise(resolve => setTimeout(resolve, 100));
+			await saveCanvasData(this.app, canvasFile, canvasData);
+			console.log('Saved canvas with new positions');
+
+			await new Promise(resolve => setTimeout(resolve, 200));
+			await this.app.workspace.openLinkText(canvasFile.path, '', false);
+
+			this.isUpdatingCanvas = false;
+			console.groupEnd();
+
+			new Notice(`✅ Repositioned ${repositionedCount} nodes`);
+
+		} catch (error) {
+			console.error('ERROR in repositionCanvasNodes:', error);
+			console.groupEnd();
+			this.isUpdatingCanvas = false;
+			new Notice("❌ Failed to reposition nodes: " + (error as Error).message);
+		}
+	}
+
+	/**
+	 * Remove duplicate nodes from canvas.
+	 * Duplicates are identified by entity ID (from frontmatter).
+	 * When duplicates are found, keeps the node that has edges connected to it.
+	 * If multiple duplicates have edges (or none have edges), keeps the first one found.
+	 */
+	private async removeDuplicateNodes(): Promise<void> {
+		console.group('[Canvas Plugin] removeDuplicateNodes');
+
+		const canvasFile = this.getActiveCanvasFile();
+		if (!canvasFile) {
+			console.warn('No active canvas file found');
+			console.groupEnd();
+			new Notice("Please open a canvas file first");
+			return;
+		}
+
+		try {
+			const canvasData = await loadCanvasData(this.app, canvasFile);
+			console.log('Canvas has', canvasData.nodes.length, 'nodes,', canvasData.edges.length, 'edges');
+
+			const fileNodes = canvasData.nodes.filter(n => n.type === 'file');
+			if (fileNodes.length === 0) {
+				new Notice("No file nodes on canvas");
+				console.groupEnd();
+				return;
+			}
+
+			// Build a set of node IDs that have edges connected
+			const nodesWithEdges = new Set<string>();
+			for (const edge of canvasData.edges) {
+				nodesWithEdges.add(edge.fromNode);
+				nodesWithEdges.add(edge.toNode);
+			}
+			console.log('Nodes with edges:', nodesWithEdges.size);
+
+			// Read entity IDs from frontmatter for all file nodes
+			const nodeEntityIds = new Map<string, string>(); // nodeId -> entityId
+			const nodeFilePaths = new Map<string, string>(); // nodeId -> filePath
+
+			for (const node of fileNodes) {
+				if (!node.file) continue;
+				nodeFilePaths.set(node.id, node.file);
+
+				const file = this.app.vault.getAbstractFileByPath(node.file);
+				if (!(file instanceof TFile)) continue;
+
+				try {
+					const content = await this.app.vault.read(file);
+					const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+					if (fmMatch) {
+						const idMatch = fmMatch[1].match(/^id:\s*(.+)$/m);
+						if (idMatch) {
+							nodeEntityIds.set(node.id, idMatch[1].trim());
+						}
+					}
+				} catch (e) {
+					console.warn('Failed to read frontmatter for node:', node.id, e);
+				}
+			}
+
+			// Group nodes by entity ID
+			const nodesByEntityId = new Map<string, string[]>(); // entityId -> [nodeIds]
+			for (const [nodeId, entityId] of nodeEntityIds) {
+				if (!nodesByEntityId.has(entityId)) {
+					nodesByEntityId.set(entityId, []);
+				}
+				nodesByEntityId.get(entityId)!.push(nodeId);
+			}
+
+			// Find duplicates and decide which to remove
+			const nodesToRemove = new Set<string>();
+			let duplicateGroups = 0;
+
+			for (const [entityId, nodeIds] of nodesByEntityId) {
+				if (nodeIds.length <= 1) continue; // No duplicates
+
+				duplicateGroups++;
+				console.log(`Found ${nodeIds.length} duplicates for entity ${entityId}`);
+
+				// Separate nodes with edges from those without
+				const withEdges = nodeIds.filter(id => nodesWithEdges.has(id));
+				const withoutEdges = nodeIds.filter(id => !nodesWithEdges.has(id));
+
+				console.log(`  - With edges: ${withEdges.length}, Without edges: ${withoutEdges.length}`);
+
+				// Strategy: Keep one node (preferably one with edges), remove the rest
+				let nodeToKeep: string;
+
+				if (withEdges.length > 0) {
+					// Keep the first node with edges
+					nodeToKeep = withEdges[0];
+					// Remove all others (both with and without edges)
+					for (const nodeId of nodeIds) {
+						if (nodeId !== nodeToKeep) {
+							nodesToRemove.add(nodeId);
+							console.log(`  - Removing node ${nodeId} (${nodeFilePaths.get(nodeId)})`);
+						}
+					}
+				} else {
+					// No nodes have edges, keep the first one
+					nodeToKeep = nodeIds[0];
+					for (let i = 1; i < nodeIds.length; i++) {
+						nodesToRemove.add(nodeIds[i]);
+						console.log(`  - Removing node ${nodeIds[i]} (${nodeFilePaths.get(nodeIds[i])})`);
+					}
+				}
+
+				console.log(`  - Keeping node ${nodeToKeep} (${nodeFilePaths.get(nodeToKeep)})`);
+			}
+
+			if (nodesToRemove.size === 0) {
+				console.log('No duplicate nodes found');
+				console.groupEnd();
+				new Notice("No duplicate nodes found on canvas");
+				return;
+			}
+
+			console.log(`Removing ${nodesToRemove.size} duplicate nodes from ${duplicateGroups} duplicate groups`);
+
+			// Remove duplicate nodes
+			canvasData.nodes = canvasData.nodes.filter(n => !nodesToRemove.has(n.id));
+
+			// Also remove any edges that reference removed nodes
+			const edgesBefore = canvasData.edges.length;
+			canvasData.edges = canvasData.edges.filter(e =>
+				!nodesToRemove.has(e.fromNode) && !nodesToRemove.has(e.toNode)
+			);
+			const edgesRemoved = edgesBefore - canvasData.edges.length;
+			if (edgesRemoved > 0) {
+				console.log(`Also removed ${edgesRemoved} orphaned edges`);
+			}
+
+			// Save canvas
+			this.isUpdatingCanvas = true;
+			const closedLeaves = await closeCanvasViews(this.app, canvasFile);
+			console.log('Closed', closedLeaves.length, 'canvas views');
+
+			await new Promise(resolve => setTimeout(resolve, 100));
+			await saveCanvasData(this.app, canvasFile, canvasData);
+			console.log('Saved canvas');
+
+			await new Promise(resolve => setTimeout(resolve, 200));
+			await this.app.workspace.openLinkText(canvasFile.path, '', false);
+
+			this.isUpdatingCanvas = false;
+			console.groupEnd();
+
+			new Notice(`✅ Removed ${nodesToRemove.size} duplicate nodes`);
+
+		} catch (error) {
+			console.error('ERROR in removeDuplicateNodes:', error);
+			console.groupEnd();
+			this.isUpdatingCanvas = false;
+			new Notice("❌ Failed to remove duplicates: " + (error as Error).message);
+		}
+	}
+
+	/**
+	 * Strip IDs from filenames and update canvas references.
+	 * Transforms: T-014_[C1.5]_Implement_WorkflowLogger.md -> Implement_WorkflowLogger.md
+	 * Pattern: Removes prefix like "X-NNN_" or "X-NNN_[...anything...]_" from the beginning
+	 */
+	async stripIdsFromFilenames(): Promise<void> {
+		console.group('[Canvas Plugin] Strip IDs from filenames');
+
+		const canvasFile = this.getActiveCanvasFile();
+		if (!canvasFile) {
+			new Notice("No active canvas file");
+			console.groupEnd();
+			return;
+		}
+
+		this.isUpdatingCanvas = true;
+
+		try {
+			const canvasData = await loadCanvasData(this.app, canvasFile);
+			const fileNodes = canvasData.nodes.filter(n => n.type === 'file' && n.file?.endsWith('.md'));
+
+			if (fileNodes.length === 0) {
+				new Notice("No Markdown file nodes found on canvas");
+				console.groupEnd();
+				this.isUpdatingCanvas = false;
+				return;
+			}
+
+			console.log(`Found ${fileNodes.length} file nodes to process`);
+
+			// Pattern to match:
+			// - Start of string
+			// - Letter(s)-Number(s) (e.g., T-014, M-001, S-123)
+			// - Optionally followed by _[anything]_ (e.g., _[C1.5]_)
+			// - Then the actual name
+			const idPattern = /^[A-Z]+-\d+(?:_\[[^\]]*\])?_(.+)$/;
+
+			let renamedCount = 0;
+			const renamedFiles: { oldPath: string; newPath: string }[] = [];
+
+			for (const node of fileNodes) {
+				if (!node.file) continue;
+
+				const filePath = node.file;
+				const file = this.app.vault.getAbstractFileByPath(filePath);
+				if (!(file instanceof TFile)) {
+					console.log(`Skipping ${filePath} - file not found`);
+					continue;
+				}
+
+				const fileName = file.basename; // Without extension
+				const match = fileName.match(idPattern);
+
+				if (match) {
+					const newBaseName = match[1];
+					const newPath = file.parent
+						? `${file.parent.path}/${newBaseName}.md`
+						: `${newBaseName}.md`;
+
+					// Check if target already exists
+					if (this.app.vault.getAbstractFileByPath(newPath)) {
+						console.log(`Skipping ${fileName} - target ${newBaseName}.md already exists`);
+						continue;
+					}
+
+					console.log(`Renaming: ${fileName}.md -> ${newBaseName}.md`);
+
+					// Rename the file (Obsidian will update links automatically)
+					await this.app.fileManager.renameFile(file, newPath);
+					renamedFiles.push({ oldPath: filePath, newPath });
+					renamedCount++;
+				} else {
+					console.log(`Skipping ${fileName} - doesn't match ID pattern`);
+				}
+			}
+
+			// Update canvas node references
+			if (renamedFiles.length > 0) {
+				// Reload canvas data to get fresh state
+				const updatedCanvasData = await loadCanvasData(this.app, canvasFile);
+
+				for (const { oldPath, newPath } of renamedFiles) {
+					const node = updatedCanvasData.nodes.find(n => n.file === oldPath);
+					if (node) {
+						node.file = newPath;
+						console.log(`Updated canvas reference: ${oldPath} -> ${newPath}`);
+					}
+				}
+
+				// Save updated canvas
+				await this.app.vault.modify(canvasFile, JSON.stringify(updatedCanvasData, null, 2));
+				console.log('Canvas file saved with updated references');
+			}
+
+			this.isUpdatingCanvas = false;
+			console.groupEnd();
+
+			new Notice(`✅ Renamed ${renamedCount} files`);
+
+		} catch (error) {
+			console.error('ERROR in stripIdsFromFilenames:', error);
+			console.groupEnd();
+			this.isUpdatingCanvas = false;
+			new Notice("❌ Failed to strip IDs: " + (error as Error).message);
+		}
+	}
+
+	// =========================================================================
+	// Entity Navigator Methods
+	// =========================================================================
+
+	/** Initialize the Entity Navigator index */
+	private async initializeEntityNavigator(): Promise<void> {
+		// Check for Dataview plugin
+		if (this.settings.entityNavigator.showDataviewWarning) {
+			const dataviewPlugin = (this.app as any).plugins?.getPlugin?.('dataview');
+			if (!dataviewPlugin) {
+				new Notice("⚠️ Dataview plugin not found. Some Entity Navigator features may be limited.", 5000);
+			}
+		}
+
+		// Build entity index
+		this.entityIndex = new EntityIndex(this.app, this.settings.entityNavigator);
+		await this.entityIndex.buildIndex();
+
+		// Watch for file changes to update index
+		this.registerEvent(
+			this.app.metadataCache.on("changed", (file) => {
+				if (file instanceof TFile && file.extension === "md") {
+					this.entityIndex?.updateFile(file);
+				}
+			})
+		);
+
+		this.registerEvent(
+			this.app.vault.on("delete", (file) => {
+				if (file instanceof TFile && file.extension === "md") {
+					this.entityIndex?.removeFile(file);
+				}
+			})
+		);
+
+		console.log("[Entity Navigator] Initialized");
+	}
+
+	/** Get current entity from active file or selected canvas node */
+	private getCurrentEntity(): EntityIndexEntry | null {
+		const file = this.app.workspace.getActiveFile();
+
+		// If active file is a markdown file, use it directly
+		if (file && file.extension === "md") {
+			return this.entityIndex?.getFromFile(file) || null;
+		}
+
+		// If active file is a canvas, try to get selected node's file
+		if (file && file.extension === "canvas") {
+			const selectedFile = this.getSelectedCanvasNodeFile();
+			if (selectedFile) {
+				return this.entityIndex?.getFromFile(selectedFile) || null;
+			}
+		}
+
+		return null;
+	}
+
+	/** Get the file from the currently selected canvas node (if any) */
+	private getSelectedCanvasNodeFile(): TFile | null {
+		const view = this.app.workspace.getActiveViewOfType(require("obsidian").ItemView);
+		if (!view || view.getViewType() !== "canvas") return null;
+
+		const canvas = (view as any).canvas;
+		if (!canvas?.selection) return null;
+
+		// Get first selected node
+		const selectedNodes = Array.from(canvas.selection);
+		if (selectedNodes.length === 0) return null;
+
+		const node = selectedNodes[0] as any;
+		const data = node?.getData?.();
+		if (!data?.file) return null;
+
+		// Resolve file path to TFile
+		const tfile = this.app.vault.getAbstractFileByPath(data.file);
+		if (tfile instanceof TFile) return tfile;
+
+		return null;
+	}
+
+	/** Open multiple files based on settings */
+	private async openEntities(entries: EntityIndexEntry[]): Promise<void> {
+		if (entries.length === 0) {
+			new Notice("No related entities found");
+			return;
+		}
+
+		const behavior = this.settings.entityNavigator.openBehavior;
+
+		if (entries.length === 1 || behavior === 'tabs') {
+			// Open all in new tabs
+			for (const entry of entries) {
+				await this.app.workspace.getLeaf('tab').openFile(entry.file);
+			}
+		} else if (behavior === 'split-h') {
+			// Open first, then split horizontally for rest
+			const firstLeaf = this.app.workspace.getLeaf('tab');
+			await firstLeaf.openFile(entries[0].file);
+			for (let i = 1; i < entries.length; i++) {
+				const newLeaf = this.app.workspace.getLeaf('split', 'horizontal');
+				await newLeaf.openFile(entries[i].file);
+			}
+		} else if (behavior === 'split-v') {
+			// Open first, then split vertically for rest
+			const firstLeaf = this.app.workspace.getLeaf('tab');
+			await firstLeaf.openFile(entries[0].file);
+			for (let i = 1; i < entries.length; i++) {
+				const newLeaf = this.app.workspace.getLeaf('split', 'vertical');
+				await newLeaf.openFile(entries[i].file);
+			}
+		}
+	}
+
+	/** Navigate to parent entity */
+	private navigateToParent(): void {
+		const entity = this.getCurrentEntity();
+		if (!entity) {
+			new Notice("No entity found in current file");
+			return;
+		}
+		const parent = this.entityIndex?.getParent(entity.id);
+		if (parent) {
+			this.openEntities([parent]);
+		} else {
+			new Notice("No parent entity found");
+		}
+	}
+
+	/** Navigate to children entities */
+	private navigateToChildren(): void {
+		const entity = this.getCurrentEntity();
+		if (!entity) {
+			new Notice("No entity found in current file");
+			return;
+		}
+		const children = this.entityIndex?.getChildren(entity.id) || [];
+		if (children.length > 0) {
+			this.openEntities(children);
+			new Notice(`Opening ${children.length} child entities`);
+		} else {
+			new Notice("No child entities found");
+		}
+	}
+
+	/** Navigate to dependencies */
+	private navigateToDependencies(): void {
+		const entity = this.getCurrentEntity();
+		console.log("[Entity Navigator] navigateToDependencies - entity:", entity);
+		if (!entity) {
+			new Notice("No entity found in current file");
+			return;
+		}
+		console.log("[Entity Navigator] Entity depends_on:", entity.depends_on);
+		const deps = this.entityIndex?.getDependencies(entity.id) || [];
+		console.log("[Entity Navigator] Resolved dependencies:", deps);
+		if (deps.length > 0) {
+			this.openEntities(deps);
+			new Notice(`Opening ${deps.length} dependencies`);
+		} else {
+			new Notice("No dependencies found");
+		}
+	}
+
+	/** Navigate to implemented documents */
+	private navigateToDocuments(): void {
+		const entity = this.getCurrentEntity();
+		if (!entity) {
+			new Notice("No entity found in current file");
+			return;
+		}
+		const docs = this.entityIndex?.getImplementedDocuments(entity.id) || [];
+		if (docs.length > 0) {
+			this.openEntities(docs);
+			new Notice(`Opening ${docs.length} documents`);
+		} else {
+			new Notice("No implemented documents found");
+		}
+	}
+
+	/** Navigate to related decisions */
+	private navigateToDecisions(): void {
+		const entity = this.getCurrentEntity();
+		if (!entity) {
+			new Notice("No entity found in current file");
+			return;
+		}
+		const decisions = this.entityIndex?.getRelatedDecisions(entity.id) || [];
+		if (decisions.length > 0) {
+			this.openEntities(decisions);
+			new Notice(`Opening ${decisions.length} decisions`);
+		} else {
+			new Notice("No related decisions found");
+		}
+	}
+
+	/** Navigate to entities enabled by a decision */
+	private navigateToEnabledEntities(): void {
+		const entity = this.getCurrentEntity();
+		if (!entity) {
+			new Notice("No entity found in current file");
+			return;
+		}
+		if (entity.type !== 'decision') {
+			new Notice("This command only works on decision entities");
+			return;
+		}
+		const enabled = this.entityIndex?.getEnabledEntities(entity.id) || [];
+		if (enabled.length > 0) {
+			this.openEntities(enabled);
+			new Notice(`Opening ${enabled.length} enabled entities`);
+		} else {
+			new Notice("No enabled entities found");
+		}
 	}
 }
 

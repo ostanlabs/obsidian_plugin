@@ -348,6 +348,101 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 						})
 				);
 		}
+
+		// Entity Navigator Section
+		new Setting(containerEl).setName("Entity Navigator").setHeading();
+
+		new Setting(containerEl)
+			.setName("Show Dataview warning")
+			.setDesc("Show a warning notice if Dataview plugin is not installed")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.entityNavigator.showDataviewWarning)
+					.onChange((value) => {
+						this.plugin.settings.entityNavigator.showDataviewWarning = value;
+						void this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Open behavior")
+			.setDesc("How to open multiple related files")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("tabs", "New tabs")
+					.addOption("split-h", "Horizontal split")
+					.addOption("split-v", "Vertical split")
+					.setValue(this.plugin.settings.entityNavigator.openBehavior)
+					.onChange((value: "tabs" | "split-h" | "split-v") => {
+						this.plugin.settings.entityNavigator.openBehavior = value;
+						void this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Milestones folder")
+			.setDesc("Folder path for milestone entities")
+			.addText((text) =>
+				text
+					.setPlaceholder("milestones")
+					.setValue(this.plugin.settings.entityNavigator.milestonesFolder)
+					.onChange((value) => {
+						this.plugin.settings.entityNavigator.milestonesFolder = value;
+						void this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Stories folder")
+			.setDesc("Folder path for story entities")
+			.addText((text) =>
+				text
+					.setPlaceholder("stories")
+					.setValue(this.plugin.settings.entityNavigator.storiesFolder)
+					.onChange((value) => {
+						this.plugin.settings.entityNavigator.storiesFolder = value;
+						void this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Tasks folder")
+			.setDesc("Folder path for task entities")
+			.addText((text) =>
+				text
+					.setPlaceholder("tasks")
+					.setValue(this.plugin.settings.entityNavigator.tasksFolder)
+					.onChange((value) => {
+						this.plugin.settings.entityNavigator.tasksFolder = value;
+						void this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Decisions folder")
+			.setDesc("Folder path for decision entities")
+			.addText((text) =>
+				text
+					.setPlaceholder("decisions")
+					.setValue(this.plugin.settings.entityNavigator.decisionsFolder)
+					.onChange((value) => {
+						this.plugin.settings.entityNavigator.decisionsFolder = value;
+						void this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Documents folder")
+			.setDesc("Folder path for document entities")
+			.addText((text) =>
+				text
+					.setPlaceholder("documents")
+					.setValue(this.plugin.settings.entityNavigator.documentsFolder)
+					.onChange((value) => {
+						this.plugin.settings.entityNavigator.documentsFolder = value;
+						void this.plugin.saveSettings();
+					})
+			);
 	}
 }
 

@@ -23,7 +23,7 @@ export interface StructuredItemResult {
 
 export class StructuredItemModal extends Modal {
 	private settings: CanvasItemFromTemplateSettings;
-	private onSubmit: (result: StructuredItemResult) => void;
+	private onSubmit: (result: StructuredItemResult) => void | Promise<void>;
 	private result: StructuredItemResult;
 	private options: StructuredItemModalOptions;
 	private availableTemplates: string[] = [];
@@ -32,7 +32,7 @@ export class StructuredItemModal extends Modal {
 		app: App,
 		settings: CanvasItemFromTemplateSettings,
 		options: StructuredItemModalOptions,
-		onSubmit: (result: StructuredItemResult) => void
+		onSubmit: (result: StructuredItemResult) => void | Promise<void>
 	) {
 		super(app);
 		this.settings = settings;
@@ -48,7 +48,7 @@ export class StructuredItemModal extends Modal {
 		};
 	}
 
-	async onOpen(): Promise<void> {
+	onOpen(): void {
 		const { contentEl } = this;
 		contentEl.empty();
 
@@ -140,7 +140,7 @@ export class StructuredItemModal extends Modal {
 		// Show Notion sync status if enabled
 		if (this.settings.notionEnabled && this.settings.notionDatabaseId) {
 			const notionInfo = contentEl.createEl("div", {
-				cls: "notion-sync-info canvas-accomplishments-notion-info",
+				cls: "notion-sync-info canvas-pm-notion-info",
 			});
 			notionInfo.createEl("small", {
 				text: "✓ will sync to Notion",
@@ -149,7 +149,7 @@ export class StructuredItemModal extends Modal {
 		}
 
 		// Buttons
-		const buttonContainer = contentEl.createDiv({ cls: "modal-button-container canvas-accomplishments-button-container" });
+		const buttonContainer = contentEl.createDiv({ cls: "modal-button-container canvas-pm-button-container" });
 
 		const cancelButton = buttonContainer.createEl("button", { text: "Cancel" });
 		cancelButton.addEventListener("click", () => {
@@ -205,7 +205,7 @@ export class StructuredItemModal extends Modal {
 		const titleValue = this.result.title || this.options.currentTitle || this.options.defaultTitle || "";
 		this.result.alias = this.result.alias?.trim() || titleValue;
 
-		this.onSubmit(this.result);
+		void Promise.resolve(this.onSubmit(this.result));
 		this.close();
 	}
 

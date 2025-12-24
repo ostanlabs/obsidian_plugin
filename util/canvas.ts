@@ -250,6 +250,82 @@ export function removeNode(data: CanvasData, nodeId: string): boolean {
 }
 
 /**
+ * Generate a unique edge ID
+ */
+export function generateEdgeId(): string {
+	return `edge-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+}
+
+/**
+ * Create a new edge between two nodes
+ * @param fromNodeId - Source node ID
+ * @param toNodeId - Target node ID
+ * @param label - Optional label for the edge (e.g., "depends on", "blocks", "parent")
+ * @param fromSide - Side of source node to connect from (default: "bottom")
+ * @param toSide - Side of target node to connect to (default: "top")
+ */
+export function createEdge(
+	fromNodeId: string,
+	toNodeId: string,
+	label?: string,
+	fromSide: "top" | "right" | "bottom" | "left" = "bottom",
+	toSide: "top" | "right" | "bottom" | "left" = "top"
+): CanvasEdge {
+	return {
+		id: generateEdgeId(),
+		fromNode: fromNodeId,
+		toNode: toNodeId,
+		fromSide,
+		toSide,
+		...(label && { label }),
+	};
+}
+
+/**
+ * Add an edge to canvas data
+ */
+export function addEdge(data: CanvasData, edge: CanvasEdge): void {
+	data.edges.push(edge);
+}
+
+/**
+ * Check if an edge already exists between two nodes
+ */
+export function edgeExists(data: CanvasData, fromNodeId: string, toNodeId: string): boolean {
+	return data.edges.some(
+		(edge) => edge.fromNode === fromNodeId && edge.toNode === toNodeId
+	);
+}
+
+/**
+ * Find a node by its file path
+ */
+export function findNodeByFilePath(data: CanvasData, filePath: string): CanvasNode | undefined {
+	return data.nodes.find((node) => node.type === "file" && node.file === filePath);
+}
+
+/**
+ * Find a node by entity ID (stored in metadata or extracted from file path)
+ */
+export function findNodeByEntityId(data: CanvasData, entityId: string): CanvasNode | undefined {
+	return data.nodes.find((node) => {
+		// Check metadata first
+		if (node.metadata?.entityId === entityId) {
+			return true;
+		}
+		// Check if file path contains the entity ID
+		if (node.type === "file" && node.file) {
+			// Entity files are typically named like "M-001 Title.md" or stored in folders
+			const fileName = node.file.split("/").pop() || "";
+			if (fileName.startsWith(entityId + " ") || fileName.startsWith(entityId + ".")) {
+				return true;
+			}
+		}
+		return false;
+	});
+}
+
+/**
  * Close all canvas views for a specific canvas file
  * Returns the leaves that were closed for reopening later
  */

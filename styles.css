@@ -1,7 +1,11 @@
-/* Canvas Accomplishments Plugin Styles */
+/* Canvas Project Manager Plugin Styles */
+
+/* ============================================
+   SELECTION & CONVERT BUTTONS
+   ============================================ */
 
 /* Selection/Convert button on canvas nodes */
-.canvas-accomplishments-select-btn {
+.canvas-pm-select-btn {
     position: absolute;
     right: 8px;
     bottom: 8px;
@@ -13,20 +17,27 @@
     cursor: pointer;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
     z-index: 9999;
+    font-size: 12px;
+    font-weight: 500;
 }
 
-.canvas-accomplishments-select-btn:hover {
+.canvas-pm-select-btn:hover {
     background: var(--background-modifier-hover);
+    border-color: var(--interactive-accent);
 }
 
 /* Parent node needs relative positioning for absolute button */
-.canvas-accomplishments-node-container {
+.canvas-pm-node-container {
     position: relative;
     overflow: visible;
 }
 
+/* ============================================
+   MENU ITEMS
+   ============================================ */
+
 /* Menu item in canvas context menu */
-.canvas-accomplishments-menu-item {
+.canvas-pm-menu-item {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -34,15 +45,41 @@
 }
 
 /* Convert menu item in canvas card menu */
-.canvas-accomplishments-convert {
+.canvas-pm-convert {
     display: flex;
     align-items: center;
     gap: 6px;
     cursor: pointer;
 }
 
+/* Open file menu item */
+.canvas-pm-select-menu,
+.canvas-pm-open-menu {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
+
+.canvas-pm-menu-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+}
+
+.canvas-pm-menu-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* ============================================
+   MODAL STYLES
+   ============================================ */
+
 /* Notion sync info box in modal */
-.canvas-accomplishments-notion-info {
+.canvas-pm-notion-info {
     margin-top: 1rem;
     padding: 0.5rem;
     background-color: var(--background-modifier-success);
@@ -50,20 +87,342 @@
 }
 
 /* Modal button container */
-.canvas-accomplishments-button-container {
+.canvas-pm-button-container {
     display: flex;
     justify-content: flex-end;
     gap: 0.5rem;
     margin-top: 1.5rem;
 }
 
+/* ============================================
+   SETTINGS STYLES
+   ============================================ */
+
 /* Settings section heading */
-.canvas-accomplishments-settings-heading {
+.canvas-pm-settings-heading {
     margin-top: 1.5rem;
     margin-bottom: 0.5rem;
     font-weight: 600;
     font-size: 1.1em;
     border-bottom: 1px solid var(--background-modifier-border);
     padding-bottom: 0.5rem;
+}
+
+/* ============================================
+   ENTITY TYPE INDICATORS (Canvas Nodes)
+   ============================================ */
+
+/* Milestone nodes - larger, prominent */
+.canvas-node.canvas-pm-milestone {
+    border-width: 3px;
+    border-style: solid;
+}
+
+/* Story nodes */
+.canvas-node.canvas-pm-story {
+    border-width: 2px;
+    border-style: solid;
+}
+
+/* Task nodes - smaller, subtle */
+.canvas-node.canvas-pm-task {
+    border-width: 1px;
+    border-style: solid;
+}
+
+/* Decision nodes - diamond-like appearance */
+.canvas-node.canvas-pm-decision {
+    border-width: 2px;
+    border-style: dashed;
+}
+
+/* Document nodes */
+.canvas-node.canvas-pm-document {
+    border-width: 1px;
+    border-style: dotted;
+}
+
+/* ============================================
+   STATUS INDICATORS
+   Designed to be visible when zoomed out
+   All borders: 8px thick with rounded corners
+   Using higher specificity to override entity type styles
+   ============================================ */
+
+/* Not Started - default, full opacity */
+.canvas-node[data-canvas-pm-type].canvas-pm-status-not-started {
+    opacity: 1;
+    border-radius: 12px !important;
+}
+
+/* In Progress - yellow solid border */
+.canvas-node[data-canvas-pm-type].canvas-pm-status-in-progress {
+    border-color: var(--color-yellow) !important;
+    border-width: 8px !important;
+    border-style: solid !important;
+    border-radius: 12px !important;
+}
+
+/* Completed - green, thick border */
+.canvas-node[data-canvas-pm-type].canvas-pm-status-completed,
+.canvas-node[data-canvas-pm-type].canvas-pm-status-complete,
+.canvas-node[data-canvas-pm-type].canvas-pm-status-decided,
+.canvas-node[data-canvas-pm-type].canvas-pm-status-approved {
+    border-color: var(--color-green) !important;
+    border-width: 8px !important;
+    border-style: solid !important;
+    border-radius: 12px !important;
+    opacity: 1;
+}
+
+/* Blocked - red, thick border with wide glow */
+.canvas-node[data-canvas-pm-type].canvas-pm-status-blocked {
+    border-color: var(--color-red) !important;
+    border-width: 8px !important;
+    border-style: solid !important;
+    border-radius: 12px !important;
+    box-shadow: 0 0 16px var(--color-red);
+}
+
+/* ============================================
+   WORKSTREAM COLORS
+   ============================================ */
+
+.canvas-pm-workstream-engineering {
+    --canvas-pm-workstream-color: var(--color-blue);
+}
+
+.canvas-pm-workstream-business {
+    --canvas-pm-workstream-color: var(--color-purple);
+}
+
+.canvas-pm-workstream-design {
+    --canvas-pm-workstream-color: var(--color-pink);
+}
+
+.canvas-pm-workstream-marketing {
+    --canvas-pm-workstream-color: var(--color-orange);
+}
+
+.canvas-pm-workstream-infra {
+    --canvas-pm-workstream-color: var(--color-yellow);
+}
+
+.canvas-pm-workstream-research {
+    --canvas-pm-workstream-color: var(--color-green);
+}
+
+/* ============================================
+   PRIORITY INDICATORS
+   ============================================ */
+
+.canvas-pm-priority-critical {
+    animation: canvas-pm-pulse 2s infinite;
+}
+
+.canvas-pm-priority-high {
+    border-left: 4px solid var(--color-red) !important;
+}
+
+.canvas-pm-priority-medium {
+    border-left: 4px solid var(--color-yellow) !important;
+}
+
+.canvas-pm-priority-low {
+    border-left: 4px solid var(--color-green) !important;
+}
+
+@keyframes canvas-pm-pulse {
+    0%, 100% {
+        box-shadow: 0 0 4px var(--color-red);
+    }
+    50% {
+        box-shadow: 0 0 12px var(--color-red);
+    }
+}
+
+/* ============================================
+   DEPENDENCY EDGES
+   ============================================ */
+
+/* Style for dependency edges (blocks relationship) */
+.canvas-pm-edge-blocks {
+    stroke: var(--color-red);
+    stroke-width: 2px;
+}
+
+/* Style for enables relationship */
+.canvas-pm-edge-enables {
+    stroke: var(--color-green);
+    stroke-width: 2px;
+    stroke-dasharray: 5, 5;
+}
+
+/* ============================================
+   VISIBILITY CONTROLS (Header Buttons)
+   ============================================ */
+
+.canvas-pm-visibility-controls {
+    display: flex;
+    gap: 2px;
+    margin-right: 8px;
+    padding-right: 8px;
+    border-right: 1px solid var(--background-modifier-border);
+}
+
+.canvas-pm-visibility-btn {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.5;
+    transition: opacity 0.15s, background 0.15s;
+}
+
+.canvas-pm-visibility-btn:hover {
+    background: var(--background-modifier-hover);
+    opacity: 0.8;
+}
+
+.canvas-pm-visibility-btn.is-active {
+    opacity: 1;
+    color: var(--text-normal);
+    background: var(--background-modifier-hover);
+}
+
+/* ============================================
+   FLOATING CONTROL PANEL (Fallback)
+   ============================================ */
+
+.canvas-pm-control-panel {
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    background: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 100;
+    min-width: 140px;
+    font-size: 12px;
+}
+
+.canvas-pm-control-header {
+    font-weight: 600;
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    color: var(--text-muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.canvas-pm-control-toggles {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.canvas-pm-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    padding: 4px 0;
+}
+
+.canvas-pm-toggle:hover {
+    color: var(--text-accent);
+}
+
+.canvas-pm-toggle input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    cursor: pointer;
+}
+
+.canvas-pm-toggle-label {
+    user-select: none;
+}
+
+/* ============================================
+   VISIBILITY HIDING (CSS-based)
+   ============================================ */
+
+/* Hide task nodes and their connected edges */
+.canvas-pm-hide-tasks .canvas-node[data-canvas-pm-type="task"],
+.canvas.canvas-pm-hide-tasks .canvas-node[data-canvas-pm-type="task"] {
+    display: none !important;
+}
+
+.canvas-pm-hide-tasks [data-canvas-pm-from-type="task"],
+.canvas-pm-hide-tasks [data-canvas-pm-to-type="task"],
+.canvas.canvas-pm-hide-tasks [data-canvas-pm-from-type="task"],
+.canvas.canvas-pm-hide-tasks [data-canvas-pm-to-type="task"] {
+    display: none !important;
+}
+
+/* Hide story nodes and their connected edges */
+.canvas-pm-hide-stories .canvas-node[data-canvas-pm-type="story"],
+.canvas.canvas-pm-hide-stories .canvas-node[data-canvas-pm-type="story"] {
+    display: none !important;
+}
+
+.canvas-pm-hide-stories [data-canvas-pm-from-type="story"],
+.canvas-pm-hide-stories [data-canvas-pm-to-type="story"],
+.canvas.canvas-pm-hide-stories [data-canvas-pm-from-type="story"],
+.canvas.canvas-pm-hide-stories [data-canvas-pm-to-type="story"] {
+    display: none !important;
+}
+
+/* Hide milestone nodes and their connected edges */
+.canvas-pm-hide-milestones .canvas-node[data-canvas-pm-type="milestone"],
+.canvas.canvas-pm-hide-milestones .canvas-node[data-canvas-pm-type="milestone"] {
+    display: none !important;
+}
+
+.canvas-pm-hide-milestones [data-canvas-pm-from-type="milestone"],
+.canvas-pm-hide-milestones [data-canvas-pm-to-type="milestone"],
+.canvas.canvas-pm-hide-milestones [data-canvas-pm-from-type="milestone"],
+.canvas.canvas-pm-hide-milestones [data-canvas-pm-to-type="milestone"] {
+    display: none !important;
+}
+
+/* Hide decision nodes and their connected edges */
+.canvas-pm-hide-decisions .canvas-node[data-canvas-pm-type="decision"],
+.canvas.canvas-pm-hide-decisions .canvas-node[data-canvas-pm-type="decision"] {
+    display: none !important;
+}
+
+.canvas-pm-hide-decisions [data-canvas-pm-from-type="decision"],
+.canvas-pm-hide-decisions [data-canvas-pm-to-type="decision"],
+.canvas.canvas-pm-hide-decisions [data-canvas-pm-from-type="decision"],
+.canvas.canvas-pm-hide-decisions [data-canvas-pm-to-type="decision"] {
+    display: none !important;
+}
+
+/* Hide document nodes and their connected edges */
+.canvas-pm-hide-documents .canvas-node[data-canvas-pm-type="document"],
+.canvas.canvas-pm-hide-documents .canvas-node[data-canvas-pm-type="document"] {
+    display: none !important;
+}
+
+.canvas-pm-hide-documents [data-canvas-pm-from-type="document"],
+.canvas-pm-hide-documents [data-canvas-pm-to-type="document"],
+.canvas.canvas-pm-hide-documents [data-canvas-pm-from-type="document"],
+.canvas.canvas-pm-hide-documents [data-canvas-pm-to-type="document"] {
+    display: none !important;
 }
 

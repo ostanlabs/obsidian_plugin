@@ -16,6 +16,19 @@ type NotionPropertyValue =
 	| { relation: Array<{ id: string }> };
 
 /**
+ * Type for dual_property relation (not fully typed in Notion SDK)
+ */
+interface DualPropertyRelation {
+	relation: {
+		database_id: string;
+		type: "dual_property";
+		dual_property: {
+			synced_property_name: string;
+		};
+	};
+}
+
+/**
  * Notion properties object
  */
 type NotionProperties = Record<string, NotionPropertyValue>;
@@ -258,19 +271,21 @@ export class NotionClient {
 			this.logger.info("Adding dependency relation to database...");
 
 			// Use type assertion because the SDK types don't fully support dual_property
+			const dependsOnProperty: DualPropertyRelation = {
+				relation: {
+					database_id: databaseId,
+					type: "dual_property",
+					dual_property: {
+						synced_property_name: "Blocks",
+					},
+				},
+			};
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			await this.client.databases.update({
 				database_id: databaseId,
 				properties: {
-					"Depends On": {
-						relation: {
-							database_id: databaseId,
-							type: "dual_property",
-							dual_property: {
-								synced_property_name: "Blocks",
-							},
-						},
-					} as any,
-				},
+					"Depends On": dependsOnProperty,
+				} as any,
 			});
 
 			this.logger.info("Dependency relation added successfully");

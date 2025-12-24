@@ -1,9 +1,9 @@
 {
-  "id": "canvas-accomplishments",
-  "name": "Canvas Accomplishments",
+  "id": "canvas-project-manager",
+  "name": "Canvas Project Manager",
   "version": "1.0.0",
   "minAppVersion": "1.4.0",
-  "description": "Create and manage structured accomplishment items on Canvas with templates, auto-generated IDs, effort tracking, and optional Notion sync.",
+  "description": "Visual project management on Obsidian Canvas - manage milestones, stories, tasks, decisions, and documents with dependencies, workstreams, and optional Notion sync.",
   "author": "Ostan Labs",
   "authorUrl": "https://github.com/ostanlabs",
   "isDesktopOnly": false

@@ -60,28 +60,28 @@ export class Logger {
 		}
 	}
 
-	async info(message: string, data?: unknown): Promise<void> {
+	info(message: string, data?: unknown): void {
 		const formatted = this.formatMessage("INFO", message, data);
 		console.debug(formatted);
-		await this.writeToFile(formatted);
+		void this.writeToFile(formatted);
 	}
 
-	async warn(message: string, data?: unknown): Promise<void> {
+	warn(message: string, data?: unknown): void {
 		const formatted = this.formatMessage("WARN", message, data);
 		console.warn(formatted);
-		await this.writeToFile(formatted);
+		void this.writeToFile(formatted);
 	}
 
-	async error(message: string, data?: unknown): Promise<void> {
+	error(message: string, data?: unknown): void {
 		const formatted = this.formatMessage("ERROR", message, data);
 		console.error(formatted);
-		await this.writeToFile(formatted);
+		void this.writeToFile(formatted);
 	}
 
-	async debug(message: string, data?: unknown): Promise<void> {
+	debug(message: string, data?: unknown): void {
 		const formatted = this.formatMessage("DEBUG", message, data);
 		console.debug(formatted);
-		await this.writeToFile(formatted);
+		void this.writeToFile(formatted);
 	}
 
 	/**

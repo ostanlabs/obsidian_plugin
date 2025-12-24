@@ -1,3 +1,28 @@
+// Entity Navigator types
+export type EntityType = 'milestone' | 'story' | 'task' | 'decision' | 'document' | 'accomplishment';
+export type OpenBehavior = 'tabs' | 'split-h' | 'split-v';
+
+export interface EntityNavigatorSettings {
+	showDataviewWarning: boolean;
+	openBehavior: OpenBehavior;
+	// Entity folder paths (for optimized search)
+	milestonesFolder: string;
+	storiesFolder: string;
+	tasksFolder: string;
+	decisionsFolder: string;
+	documentsFolder: string;
+}
+
+export const DEFAULT_ENTITY_NAVIGATOR_SETTINGS: EntityNavigatorSettings = {
+	showDataviewWarning: true,
+	openBehavior: 'tabs',
+	milestonesFolder: 'milestones',
+	storiesFolder: 'stories',
+	tasksFolder: 'tasks',
+	decisionsFolder: 'decisions',
+	documentsFolder: 'documents',
+};
+
 export interface CanvasItemFromTemplateSettings {
 	notesBaseFolder: string;
 	accomplishmentTemplatePath: string;
@@ -22,6 +47,8 @@ export interface CanvasItemFromTemplateSettings {
 	syncOnDemandOnly: boolean;
 	notionSyncIntervalMinutes: number; // Polling interval for bi-directional sync
 	autoSyncOnMdChange: boolean; // Auto-sync when MD file is modified
+	// Entity Navigator
+	entityNavigator: EntityNavigatorSettings;
 }
 
 export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
@@ -52,6 +79,7 @@ export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
 	syncOnDemandOnly: false,
 	notionSyncIntervalMinutes: 5,
 	autoSyncOnMdChange: true,
+	entityNavigator: DEFAULT_ENTITY_NAVIGATOR_SETTINGS,
 };
 
 export type ItemType = "accomplishment";
