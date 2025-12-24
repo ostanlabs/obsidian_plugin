@@ -2,7 +2,7 @@
 
 # Default vault path - override with make deploy VAULT_PATH=/your/vault/path
 VAULT_PATH ?= $(HOME)/Documents/Obsidian/TestVault
-PLUGIN_DIR = $(VAULT_PATH)/.obsidian/plugins/canvas-structured-items
+PLUGIN_DIR = $(VAULT_PATH)/.obsidian/plugins/canvas-accomplishments
 
 help: ## Show this help message
 	@echo "Available targets:"

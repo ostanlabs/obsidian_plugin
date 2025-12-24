@@ -1,4 +1,4 @@
-# Contributing to Canvas Accomplishments
+# Contributing to Canvas Project Manager
 
 Thank you for your interest in contributing! This document provides guidelines and instructions for contributing to the project.
 
@@ -22,24 +22,23 @@ Thank you for your interest in contributing! This document provides guidelines a
 
 2. **Install Dependencies**
    ```bash
-   make install
-   # or: npm install
+   npm install
    ```
 
 3. **Build the Plugin**
    ```bash
-   make build
-   # or: npm run build
+   npm run build
    ```
 
-4. **Link to Test Vault**
+4. **Deploy to Test Vault**
    ```bash
-   make deploy VAULT_PATH=/path/to/test/vault
+   mkdir -p /path/to/vault/.obsidian/plugins/canvas-project-manager
+   cp main.js manifest.json styles.css /path/to/vault/.obsidian/plugins/canvas-project-manager/
    ```
 
 5. **Start Development Mode**
    ```bash
-   make dev
+   npm run dev
    # This will watch for changes and rebuild automatically
    ```
 
@@ -156,8 +155,8 @@ describe('generateUniqueId', () => {
 
 ```bash
 npm test                  # Run all tests
-npm run test:watch        # Watch mode
-npm run test:coverage     # With coverage report
+npm run test -- --watch   # Watch mode
+npm test -- --coverage    # With coverage report
 ```
 
 ## 📚 Documentation
@@ -170,9 +169,10 @@ npm run test:coverage     # With coverage report
 
 ### User Documentation
 
-- **README**: Keep main README up-to-date
-- **Feature Docs**: Create separate docs for major features
-- **Changelog**: Update CHANGELOG.md with all changes
+- **README.md**: Main user guide
+- **docs/ARCHITECTURE.md**: Technical architecture
+- **docs/GETTING_STARTED.md**: Quick start guide
+- **CHANGELOG.md**: Update with all changes
 
 ## 🐛 Bug Reports
 
@@ -318,5 +318,5 @@ Contributors will be:
 
 ---
 
-Thank you for contributing to Canvas Accomplishments! 🎉
+Thank you for contributing to Canvas Project Manager! 🎉
 

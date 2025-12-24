@@ -1,6 +1,6 @@
-# Getting Started with Canvas Accomplishments
+# Getting Started with Canvas Project Manager
 
-Welcome! This guide will help you build and start using the Canvas Accomplishments plugin for Obsidian.
+Welcome! This guide will help you build and start using the Canvas Project Manager plugin for Obsidian.
 
 ## Prerequisites
 
@@ -20,103 +20,165 @@ node --version  # Should be v16.x or higher
 ### Step 1: Build the Plugin
 
 ```bash
-# Make the quick start script executable (first time only)
-chmod +x quick-start.sh
+# Install dependencies
+npm install
 
-# Run the quick start script
-./quick-start.sh /path/to/your/vault
+# Build the plugin
+npm run build
+
+# Copy to your vault
+mkdir -p /path/to/vault/.obsidian/plugins/canvas-project-manager
+cp main.js manifest.json styles.css /path/to/vault/.obsidian/plugins/canvas-project-manager/
 ```
-
-The script will:
-1. Install dependencies
-2. Build the plugin
-3. Deploy to your vault
 
 ### Step 2: Enable in Obsidian
 
 1. Open Obsidian
 2. Go to **Settings → Community Plugins**
 3. If needed, click **Turn off Safe Mode**
-4. Find **Canvas Accomplishments** in the installed plugins list
+4. Find **Canvas Project Manager** in the installed plugins list
 5. Click the toggle to **enable** it
 6. (Optional) Click the gear icon to configure settings
 
-### Step 3: Create Your First Item
+### Step 3: Populate Canvas from Vault
 
 1. Create or open a Canvas file (`.canvas`)
 2. Press `Ctrl+P` (or `Cmd+P` on Mac) to open command palette
-3. Type "Canvas: New Item" and select **"Canvas: New Item From Template (Center Position)"**
-4. Fill in the modal:
-   - **Type**: Task
-   - **Effort**: Engineering
-   - **Title**: My First Task
-5. Click **Create**
+3. Type "Populate" and select **"Project Canvas: Populate from vault"**
+4. The plugin will scan your vault for entity files and add them to the canvas
 
-🎉 **Success!** You should see a new note created and linked on your canvas.
+🎉 **Success!** You should see entity nodes appear on your canvas with hierarchical layout.
 
-## What Just Happened?
+## Entity Types
 
-The plugin:
-1. Generated a unique ID (e.g., `T001`)
-2. Created a note from the task template at `Projects/T001-My-First-Task.md`
-3. Filled in frontmatter with metadata
-4. Added a file node to your canvas linking to the note
-5. (If Notion is configured) Synced to Notion database
+The plugin supports 6 entity types, each with distinct visual styling:
 
-## Next Steps
+| Type | ID Prefix | Border Style | Use Case |
+|------|-----------|--------------|----------|
+| **Milestone** | M-xxx | 3px solid | High-level project goals |
+| **Story** | S-xxx | 2px solid | User stories, features |
+| **Task** | T-xxx | 1px solid | Actionable work items |
+| **Decision** | DEC-xxx | 2px dashed | Architectural decisions |
+| **Document** | DOC-xxx | 1px dotted | Technical specs, designs |
+| **Accomplishment** | A-xxx | 2px solid | Completed achievements |
 
-### Explore the Note
+## Creating Entity Files
 
-Open the newly created note to see:
-- **Frontmatter** with all metadata (type, effort, ID, status, etc.)
-- **Template sections** (Objective, Steps, Notes)
-- **Checkboxes** for tracking progress
+Entity files are markdown files with YAML frontmatter:
 
-### Try an Accomplishment
+```yaml
+---
+id: M-001
+type: milestone
+title: "Project Alpha Launch"
+status: active
+workstream: engineering
+---
 
-1. Run the command again
-2. This time select **Type: Accomplishment**
-3. Notice the different template and ID prefix (A001)
+# Project Alpha Launch
 
-### Customize Templates
-
-1. Go to **Settings → Canvas Accomplishments → Templates**
-2. Note the template paths (e.g., `Templates/canvas-task-template.md`)
-3. Open these files in your vault and customize them
-4. Your changes will be used for all future items
-
-### Set Up Notion (Optional)
-
-See the [Notion Setup Guide](#notion-setup-optional) below.
-
-## Manual Build (Alternative to Quick Start)
-
-If you prefer step-by-step control:
-
-```bash
-# 1. Install dependencies
-make install
-
-# 2. Build the plugin
-make build
-
-# 3. Deploy to your vault
-make deploy VAULT_PATH=/path/to/your/vault
+Description of the milestone...
 ```
 
-## Development Workflow
+### Hierarchy with `parent` Field
 
-For active development with hot reload:
-
-```bash
-# 1. Create a symlink to your vault (one-time setup)
-make link VAULT_PATH=/path/to/your/vault
-
-# 2. Start watch mode (auto-rebuild on changes)
-make watch
+```yaml
+---
+id: S-001
+type: story
+title: "User Authentication"
+parent: M-001           # This story belongs to milestone M-001
+status: in_progress
+---
 ```
 
-Now every time you save a TypeScript file, the plugin rebuilds automatically. Reload in Obsidian to see changes (Ctrl+R with debug mode enabled).
+### Dependencies with `depends_on` Field
+
+```yaml
+---
+id: T-001
+type: task
+title: "Implement login form"
+parent: S-001
+depends_on:
+  - T-002               # This task depends on T-002
+  - T-003
+status: active
+---
+```
+
+### Decisions with `enables` Field
+
+```yaml
+---
+id: DEC-001
+type: decision
+title: "Use OAuth2 for authentication"
+enables:
+  - S-001               # This decision enables/unblocks S-001
+  - T-001
+status: completed
+---
+```
+
+## Key Commands
+
+### Canvas Population & Layout
+
+| Command | Description |
+|---------|-------------|
+| **Project Canvas: Populate from vault** | Scan vault and add entities to canvas |
+| **Project Canvas: Reposition nodes (graph layout)** | Apply hierarchical layout |
+| **Project Canvas: Remove duplicate nodes** | Clean up duplicate entity nodes |
+
+### Entity Navigation
+
+| Command | Hotkey | Description |
+|---------|--------|-------------|
+| **Entity Navigator: Go to Parent** | Ctrl+Shift+P | Jump to parent entity |
+| **Entity Navigator: Go to Children** | - | Jump to child entities |
+| **Entity Navigator: Go to Dependencies** | - | Jump to dependencies |
+| **Entity Navigator: Go to Documents** | Ctrl+Shift+D | Jump to related documents |
+| **Entity Navigator: Go to Decisions** | Ctrl+Shift+E | Jump to related decisions |
+
+### Notion Sync (Optional)
+
+| Command | Description |
+|---------|-------------|
+| **Project Canvas: Initialize Notion database** | Create Notion database |
+| **Project Canvas: Sync current note to Notion** | Sync active note |
+| **Project Canvas: Sync all canvas notes to Notion** | Sync all entities |
+
+## Archive System
+
+Entities with `status: archived` or `archived: true` are automatically:
+
+1. **Moved to archive folders**: `archive/milestones/`, `archive/stories/`, etc.
+2. **Removed from canvas**: Archived nodes are cleaned up
+3. **Excluded from scans**: Archive folder is skipped in future populates
+
+To archive an entity, simply set its status:
+
+```yaml
+---
+id: T-001
+type: task
+title: "Old task"
+status: archived        # This will trigger archiving
+---
+```
+
+## Visibility Toggles
+
+When viewing a canvas, you'll see visibility toggle buttons:
+
+- **M** - Toggle Milestones
+- **S** - Toggle Stories
+- **T** - Toggle Tasks
+- **De** - Toggle Decisions
+- **Do** - Toggle Documents
+
+Click to show/hide entity types on the canvas.
 
 ## Notion Setup (Optional)
 
@@ -126,7 +188,7 @@ Want to sync your items to Notion? Here's how:
 
 1. Go to https://www.notion.so/my-integrations
 2. Click **"+ New integration"**
-3. Give it a name (e.g., "Obsidian Canvas Items")
+3. Give it a name (e.g., "Obsidian Canvas")
 4. Select the workspace
 5. Copy the **Internal Integration Token** (starts with `secret_`)
 
@@ -142,7 +204,7 @@ Want to sync your items to Notion? Here's how:
 
 ### 3. Configure Plugin
 
-1. In Obsidian: **Settings → Canvas Accomplishments**
+1. In Obsidian: **Settings → Canvas Project Manager**
 2. Scroll to **Notion Integration** section
 3. Toggle **"Enable Notion sync"** to ON
 4. Paste your **Integration Token**
@@ -159,68 +221,52 @@ Want to sync your items to Notion? Here's how:
 4. Select your integration from the dropdown
 5. Click **"Invite"**
 
-### 5. Test Sync
+## Development Workflow
 
-1. Create a new item in Obsidian
-2. Check Notion - you should see a new database with your item!
-
-## Common Commands
+For active development with hot reload:
 
 ```bash
-make help              # Show all available commands
-make build             # Build for production
-make dev               # Build with source maps
-make watch             # Auto-rebuild on changes
-make test              # Run tests
-make lint              # Check code style
-make format            # Format code
-make clean             # Clean build artifacts
+# Start watch mode (auto-rebuild on changes)
+npm run dev
 ```
 
-## Keyboard Shortcuts
-
-You can assign keyboard shortcuts to commands:
-
-1. **Settings → Hotkeys**
-2. Search for "Canvas"
-3. Click the `+` next to a command
-4. Press your desired key combination
-
-Suggested shortcuts:
-- `Canvas: New Item From Template`: `Ctrl+Shift+N`
-- `Canvas Item: Sync Current Note to Notion`: `Ctrl+Shift+S`
+Now every time you save a TypeScript file, the plugin rebuilds automatically. Reload in Obsidian to see changes (Ctrl+R with debug mode enabled).
 
 ## Tips & Tricks
 
-### 1. Customize Effort Avenues
+### 1. Use Workstreams for Organization
 
-Add your own categories:
+Group related entities by workstream:
 
-1. **Settings → Canvas Accomplishments → Effort Avenues**
-2. Edit the list (one per line):
-   ```
-   Business
-   Infra
-   Engineering
-   Research
-   Design       # Added!
-   Marketing    # Added!
-   ```
+```yaml
+---
+id: M-001
+type: milestone
+title: "Backend API"
+workstream: engineering    # Groups with other engineering items
+---
+```
 
-### 2. Change ID Format
+The layout algorithm positions entities by workstream lanes.
 
-Prefer different IDs?
+### 2. Leverage the Entity Navigator
 
-1. **Settings → Canvas Accomplishments → ID Generation**
-2. Change prefixes: `T` → `TASK`, `A` → `GOAL`
-3. Change padding: `3` → `4` (for `0001` instead of `001`)
+When viewing an entity file:
+- **Ctrl+Shift+P** - Jump to parent
+- **Ctrl+Shift+D** - Jump to related documents
+- **Ctrl+Shift+E** - Jump to related decisions
 
-### 3. Auto-Create Notes in Canvas Folder
+Or right-click on a canvas node to see navigation options.
 
-1. **Settings → Canvas Accomplishments → General**
-2. Enable **"Infer base folder from canvas location"**
+### 3. Archive Completed Work
 
-Now notes are created in the same folder as your canvas!
+Set `status: archived` to clean up your canvas:
+
+```yaml
+status: archived
+```
+
+The next "Populate from vault" will move the file to the archive folder and remove it from the canvas.
 
 ### 4. View Logs
 
@@ -228,32 +274,40 @@ Having issues? Check the logs:
 
 ```bash
 # In your vault
-cat .obsidian/plugins/canvas-accomplishments/plugin.log
+cat .obsidian/plugins/canvas-project-manager/plugin.log
 ```
 
 Or in Obsidian:
 1. Press `Ctrl+Shift+I` (Developer Tools)
 2. Go to **Console** tab
-3. Look for plugin messages
+3. Look for `[Canvas Plugin]` messages
 
 ## Troubleshooting
 
 ### "No active canvas found"
 
-**Problem**: Command doesn't work  
+**Problem**: Command doesn't work
 **Solution**: Make sure you have a `.canvas` file open and focused
 
 ### Plugin doesn't appear in settings
 
-**Problem**: Plugin not showing up  
+**Problem**: Plugin not showing up
 **Solution**:
 1. Check that `main.js` exists in plugin folder
 2. Restart Obsidian
-3. Verify you ran `make build`
+3. Verify you ran `npm run build`
+
+### Entities not appearing on canvas
+
+**Problem**: "Populate from vault" doesn't add entities
+**Solutions**:
+1. Check entity files have valid frontmatter with `type` field
+2. Ensure files are not in the `archive/` folder
+3. Check console logs for parsing errors
 
 ### Notion sync fails
 
-**Problem**: Error when syncing to Notion  
+**Problem**: Error when syncing to Notion
 **Solutions**:
 1. Verify integration token is correct (starts with `secret_`)
 2. Check parent page ID is correct
@@ -261,25 +315,10 @@ Or in Obsidian:
 4. Check database was initialized (run "Initialize Notion Database")
 5. Look at logs for specific error
 
-### Templates not found
+### Archive folder creation fails
 
-**Problem**: "Template not found" error  
-**Solution**:
-1. Check template paths in settings
-2. Click "Regenerate default templates"
-3. Verify `Templates/` folder exists
-
-### Build errors
-
-**Problem**: `make build` fails  
-**Solution**:
-```bash
-# Clean and reinstall
-make clean
-rm -rf node_modules
-make install
-make build
-```
+**Problem**: Error creating archive folders
+**Solution**: The plugin is now tolerant of existing folders. If you see errors, check file permissions.
 
 ## File Locations
 
@@ -289,41 +328,46 @@ After installation, here's where things are:
 your-vault/
 ├── .obsidian/
 │   └── plugins/
-│       └── canvas-accomplishments/
+│       └── canvas-project-manager/
 │           ├── main.js              # Built plugin
 │           ├── manifest.json        # Plugin info
+│           ├── styles.css           # Visual styling
 │           └── plugin.log           # Logs
-├── Templates/
-│   ├── canvas-task-template.md         # Task template
-│   └── canvas-accomplishment-template.md  # Accomplishment template
-└── Projects/                        # Generated notes (default)
-    ├── T001-My-First-Task.md
-    └── A001-My-First-Accomplishment.md
+├── archive/                         # Archived entities
+│   ├── milestones/
+│   ├── stories/
+│   ├── tasks/
+│   ├── decisions/
+│   ├── documents/
+│   └── accomplishments/
+└── [your entity files]              # Active entities
+    ├── M-001_project_alpha.md
+    ├── S-001_user_auth.md
+    └── T-001_login_form.md
 ```
 
 ## Learn More
 
 - **README.md** - Complete user guide
+- **ARCHITECTURE.md** - Technical architecture
 - **DEVELOPMENT.md** - Developer documentation
-- **BUILD.md** - Detailed build instructions
-- **make help** - List all commands
 
 ## Get Help
 
-- Check **logs**: `.obsidian/plugins/canvas-accomplishments/plugin.log`
+- Check **logs**: `.obsidian/plugins/canvas-project-manager/plugin.log`
 - Open **console**: `Ctrl+Shift+I` → Console tab
 - Review **README.md** for detailed documentation
-- Create an issue on GitHub (if available)
+- Create an issue on GitHub
 
 ## What's Next?
 
 Now that you're set up, try:
 
-1. **Create multiple tasks** and see IDs increment (T001, T002, T003)
-2. **Create an accomplishment** and link tasks to it using the Parent field
-3. **Customize templates** to match your workflow
-4. **Set up Notion sync** to track items in a dashboard
-5. **Explore settings** to configure the plugin to your liking
+1. **Create entity files** with proper frontmatter (type, id, parent, depends_on)
+2. **Run "Populate from vault"** to add entities to your canvas
+3. **Run "Reposition nodes"** to apply hierarchical layout
+4. **Use Entity Navigator** to quickly navigate relationships
+5. **Archive completed work** by setting `status: archived`
+6. **Set up Notion sync** to track items in a dashboard
 
-Enjoy using Canvas Accomplishments! 🚀
-
+Enjoy using Canvas Project Manager! 🚀
