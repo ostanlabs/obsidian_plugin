@@ -3224,6 +3224,9 @@ private registerCommands(): void {
 			}
 
 			console.debug('[Canvas Plugin] Edge sync complete:', { updatedCount, clearedCount });
+
+			// Also sync reverse relationships (blocks, children, implemented_by, etc.)
+			await this.syncReverseRelationships(canvasFile);
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to sync edges to MD files:', error);
 			this.logger?.error("Failed to sync edges to MD files", error);
@@ -3270,6 +3273,203 @@ private registerCommands(): void {
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to update depends_on in', filePath, ':', error);
 			return false;
+		}
+	}
+
+	/**
+	 * Sync reverse relationships in MD files based on ENTITY_SCHEMAS.md spec
+	 * This auto-syncs: blocks (reverse of depends_on), children (reverse of parent),
+	 * implemented_by (reverse of implements), superseded_by (reverse of supersedes),
+	 * next_version (reverse of previous_version)
+	 */
+	private async syncReverseRelationships(canvasFile: TFile): Promise<void> {
+		console.debug('[Canvas Plugin] ===== Syncing reverse relationships =====');
+
+		try {
+			const canvasData = await loadCanvasData(this.app, canvasFile);
+
+			// Build maps for all relationships
+			// entityId -> { blocks: [], children: [], implementedBy: [], supersededBy: string, nextVersion: string }
+			const reverseRels = new Map<string, {
+				blocks: string[];
+				children: string[];
+				implementedBy: string[];
+				supersededBy?: string;
+				nextVersion?: string;
+			}>();
+
+			// Helper to ensure entity exists in map
+			const ensureEntity = (entityId: string) => {
+				if (!reverseRels.has(entityId)) {
+					reverseRels.set(entityId, {
+						blocks: [],
+						children: [],
+						implementedBy: [],
+					});
+				}
+				return reverseRels.get(entityId)!;
+			};
+
+			// Helper to parse YAML array
+			const parseYamlArray = (text: string, key: string): string[] => {
+				const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+				if (multilineMatch) {
+					const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+					if (items) {
+						return items.map(item => item.replace(/^\s*-\s*/, '').trim());
+					}
+				}
+				const inlineMatch = text.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+				if (inlineMatch) {
+					return inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+				}
+				const singleMatch = text.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+				if (singleMatch && singleMatch[1].trim()) {
+					return [singleMatch[1].trim()];
+				}
+				return [];
+			};
+
+			// Scan all file nodes on canvas
+			for (const node of canvasData.nodes) {
+				if (node.type !== 'file' || !node.file) continue;
+
+				const file = this.app.vault.getAbstractFileByPath(node.file);
+				if (!(file instanceof TFile)) continue;
+
+				try {
+					const content = await this.app.vault.read(file);
+					const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+					if (!frontmatterMatch) continue;
+
+					const fm = frontmatterMatch[1];
+					const idMatch = fm.match(/^id:\s*(.+)$/m);
+					if (!idMatch) continue;
+
+					const entityId = idMatch[1].trim();
+					ensureEntity(entityId);
+
+					// depends_on -> blocks (reverse)
+					const dependsOn = parseYamlArray(fm, 'depends_on');
+					for (const depId of dependsOn) {
+						const depRels = ensureEntity(depId);
+						if (!depRels.blocks.includes(entityId)) {
+							depRels.blocks.push(entityId);
+						}
+					}
+
+					// parent -> children (reverse)
+					const parentMatch = fm.match(/^parent:\s*(.+)$/m);
+					if (parentMatch) {
+						const parentId = parentMatch[1].trim();
+						const parentRels = ensureEntity(parentId);
+						if (!parentRels.children.includes(entityId)) {
+							parentRels.children.push(entityId);
+						}
+					}
+
+					// implements -> implemented_by (reverse)
+					const implementsArr = parseYamlArray(fm, 'implements');
+					for (const docId of implementsArr) {
+						const docRels = ensureEntity(docId);
+						if (!docRels.implementedBy.includes(entityId)) {
+							docRels.implementedBy.push(entityId);
+						}
+					}
+
+					// supersedes -> superseded_by (reverse)
+					const supersedesMatch = fm.match(/^supersedes:\s*(.+)$/m);
+					if (supersedesMatch) {
+						const supersededId = supersedesMatch[1].trim();
+						const supersededRels = ensureEntity(supersededId);
+						supersededRels.supersededBy = entityId;
+					}
+
+					// previous_version -> next_version (reverse)
+					const prevVersionMatch = fm.match(/^previous_version:\s*(.+)$/m);
+					if (prevVersionMatch) {
+						const prevId = prevVersionMatch[1].trim();
+						const prevRels = ensureEntity(prevId);
+						prevRels.nextVersion = entityId;
+					}
+				} catch (e) {
+					console.warn('[Canvas Plugin] Failed to read file for reverse sync:', node.file, e);
+				}
+			}
+
+			// Now update each entity's file with the computed reverse relationships
+			let updatedCount = 0;
+			for (const node of canvasData.nodes) {
+				if (node.type !== 'file' || !node.file) continue;
+
+				const file = this.app.vault.getAbstractFileByPath(node.file);
+				if (!(file instanceof TFile)) continue;
+
+				try {
+					const content = await this.app.vault.read(file);
+					const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+					if (!frontmatterMatch) continue;
+
+					const fm = frontmatterMatch[1];
+					const idMatch = fm.match(/^id:\s*(.+)$/m);
+					if (!idMatch) continue;
+
+					const entityId = idMatch[1].trim();
+					const rels = reverseRels.get(entityId);
+					if (!rels) continue;
+
+					// Check if any reverse fields need updating
+					const currentBlocks = parseYamlArray(fm, 'blocks');
+					const currentChildren = parseYamlArray(fm, 'children');
+					const currentImplementedBy = parseYamlArray(fm, 'implemented_by');
+					const supersededByMatch = fm.match(/^superseded_by:\s*(.+)$/m);
+					const currentSupersededBy = supersededByMatch?.[1]?.trim();
+					const nextVersionMatch = fm.match(/^next_version:\s*(.+)$/m);
+					const currentNextVersion = nextVersionMatch?.[1]?.trim();
+
+					// Compare and update if different
+					const blocksChanged = JSON.stringify([...currentBlocks].sort()) !== JSON.stringify([...rels.blocks].sort());
+					const childrenChanged = JSON.stringify([...currentChildren].sort()) !== JSON.stringify([...rels.children].sort());
+					const implementedByChanged = JSON.stringify([...currentImplementedBy].sort()) !== JSON.stringify([...rels.implementedBy].sort());
+					const supersededByChanged = currentSupersededBy !== rels.supersededBy;
+					const nextVersionChanged = currentNextVersion !== rels.nextVersion;
+
+					if (blocksChanged || childrenChanged || implementedByChanged || supersededByChanged || nextVersionChanged) {
+						// Build update object
+						const updates: Record<string, unknown> = {
+							updated: new Date().toISOString(),
+						};
+
+						if (blocksChanged && rels.blocks.length > 0) {
+							updates.blocks = rels.blocks;
+						}
+						if (childrenChanged && rels.children.length > 0) {
+							updates.children = rels.children;
+						}
+						if (implementedByChanged && rels.implementedBy.length > 0) {
+							updates.implemented_by = rels.implementedBy;
+						}
+						if (supersededByChanged && rels.supersededBy) {
+							updates.superseded_by = rels.supersededBy;
+						}
+						if (nextVersionChanged && rels.nextVersion) {
+							updates.next_version = rels.nextVersion;
+						}
+
+						// Update the file
+						const updatedContent = updateFrontmatter(content, updates);
+						await this.app.vault.modify(file, updatedContent);
+						updatedCount++;
+						console.debug('[Canvas Plugin] Updated reverse relationships in', node.file);
+					}
+				} catch (e) {
+					console.warn('[Canvas Plugin] Failed to update reverse relationships in:', node.file, e);
+				}
+			}
+
+			console.debug('[Canvas Plugin] Reverse relationship sync complete. Updated', updatedCount, 'files');
+		} catch (error) {
+			console.error('[Canvas Plugin] Failed to sync reverse relationships:', error);
 		}
 	}
 
@@ -4072,16 +4272,22 @@ private registerCommands(): void {
 			console.log('Total markdown files in vault:', allFilesRaw.length);
 			console.log('Files after excluding archive folder:', allFiles.length);
 
-			// Entity info including dependencies
+			// Entity info including dependencies and relationships
 			interface EntityInfo {
 				file: TFile;
 				type: string;
 				effort?: string;
 				id?: string;
 				title?: string;
-				parent?: string;        // Parent entity ID (for hierarchy)
-				dependsOn: string[];    // Entity IDs this depends on
-				enables: string[];      // Entity IDs this decision enables/unblocks
+				parent?: string;           // Parent entity ID (for hierarchy)
+				dependsOn: string[];       // Entity IDs this depends on
+				enables: string[];         // Entity IDs this decision enables/unblocks
+				// New fields from ENTITY_SCHEMAS.md
+				implements: string[];      // DocumentIds this milestone/story implements
+				implementedBy: string[];   // StoryIds/MilestoneIds that implement this document
+				supersedes?: string;       // DecisionId this decision supersedes
+				previousVersion?: string;  // DocumentId of previous version
+				docType?: string;          // Document type: spec, adr, vision, guide, research
 			}
 
 			const entitiesToAdd: EntityInfo[] = [];
@@ -4184,6 +4390,24 @@ private registerCommands(): void {
 				// Parse enables array (for decisions)
 				const enables = parseYamlArray(frontmatterText, 'enables');
 
+				// Parse implements array (for milestones/stories -> documents)
+				const implementsArr = parseYamlArray(frontmatterText, 'implements');
+
+				// Parse implemented_by array (for documents -> stories/milestones)
+				const implementedBy = parseYamlArray(frontmatterText, 'implemented_by');
+
+				// Parse supersedes (for decisions)
+				const supersedesMatch = frontmatterText.match(/^supersedes:\s*(.+)$/m);
+				const supersedes = supersedesMatch?.[1]?.trim();
+
+				// Parse previous_version (for documents)
+				const previousVersionMatch = frontmatterText.match(/^previous_version:\s*(.+)$/m);
+				const previousVersion = previousVersionMatch?.[1]?.trim();
+
+				// Parse doc_type (for documents)
+				const docTypeMatch = frontmatterText.match(/^doc_type:\s*(.+)$/m);
+				const docType = docTypeMatch?.[1]?.trim();
+
 				entitiesToAdd.push({
 					file,
 					type: entityType,
@@ -4193,6 +4417,11 @@ private registerCommands(): void {
 					parent: parentMatch?.[1]?.trim(),
 					dependsOn,
 					enables,
+					implements: implementsArr,
+					implementedBy,
+					supersedes,
+					previousVersion,
+					docType,
 				});
 			}
 
@@ -4247,6 +4476,10 @@ private registerCommands(): void {
 				parent?: string;
 				dependsOn: string[];
 				enables: string[];
+				implements: string[];
+				implementedBy: string[];
+				supersedes?: string;
+				previousVersion?: string;
 			}>();
 
 			// Build entity lookup map
@@ -4413,6 +4646,10 @@ private registerCommands(): void {
 						parent: milestone.parent,
 						dependsOn: milestone.dependsOn,
 						enables: milestone.enables,
+						implements: milestone.implements,
+						implementedBy: milestone.implementedBy,
+						supersedes: milestone.supersedes,
+						previousVersion: milestone.previousVersion,
 					});
 				}
 
@@ -4478,6 +4715,10 @@ private registerCommands(): void {
 							parent: child.parent,
 							dependsOn: child.dependsOn,
 							enables: child.enables,
+							implements: child.implements,
+							implementedBy: child.implementedBy,
+							supersedes: child.supersedes,
+							previousVersion: child.previousVersion,
 						});
 
 						// Recursively place this child's children
@@ -4558,6 +4799,10 @@ private registerCommands(): void {
 							parent: orphan.parent,
 							dependsOn: orphan.dependsOn,
 							enables: orphan.enables,
+							implements: orphan.implements,
+							implementedBy: orphan.implementedBy,
+							supersedes: orphan.supersedes,
+							previousVersion: orphan.previousVersion,
 						});
 					}
 
@@ -4604,6 +4849,10 @@ private registerCommands(): void {
 				parent?: string;
 				dependsOn: string[];
 				enables: string[];
+				implements: string[];
+				implementedBy: string[];
+				supersedes?: string;
+				previousVersion?: string;
 				isNew: boolean;
 			}>();
 
@@ -4666,6 +4915,10 @@ private registerCommands(): void {
 									const parentMatch = frontmatterText.match(/^parent:\s*(.+)$/m);
 									const dependsOn = parseYamlArrayLocal(frontmatterText, 'depends_on');
 									const enables = parseYamlArrayLocal(frontmatterText, 'enables');
+									const implementsArr = parseYamlArrayLocal(frontmatterText, 'implements');
+									const implementedBy = parseYamlArrayLocal(frontmatterText, 'implemented_by');
+									const supersedesMatch = frontmatterText.match(/^supersedes:\s*(.+)$/m);
+									const previousVersionMatch = frontmatterText.match(/^previous_version:\s*(.+)$/m);
 
 									allEntityDependencies.set(entityId, {
 										nodeId: node.id,
@@ -4673,6 +4926,10 @@ private registerCommands(): void {
 										parent: parentMatch?.[1]?.trim(),
 										dependsOn,
 										enables,
+										implements: implementsArr,
+										implementedBy,
+										supersedes: supersedesMatch?.[1]?.trim(),
+										previousVersion: previousVersionMatch?.[1]?.trim(),
 										isNew: false,
 									});
 								}
@@ -4751,8 +5008,68 @@ private registerCommands(): void {
 						} else {
 							edgesSkipped++;
 						}
-					} else {
-						// Enabled entity not on canvas - skip silently
+					}
+				}
+
+				// Create edges for implements relationships (milestone/story -> document)
+				// Edge goes FROM implementer TO document (story implements spec)
+				for (const docId of info.implements || []) {
+					const docNodeId = allEntityToNodeMap.get(docId);
+					if (docNodeId) {
+						if (!edgeExists(canvasDataForEdges, sourceNodeId, docNodeId)) {
+							// Visual: story/milestone --> document (implements)
+							const edge = createEdge(sourceNodeId, docNodeId, undefined, 'right', 'left');
+							newEdges.push(edge);
+							if (info.isNew) edgesFromNewNodes++; else edgesFromExistingNodes++;
+						} else {
+							edgesSkipped++;
+						}
+					}
+				}
+
+				// Create edges for implemented_by relationships (document -> story/milestone)
+				// Edge goes FROM implementer TO document (reverse direction for visual consistency)
+				for (const implId of info.implementedBy || []) {
+					const implNodeId = allEntityToNodeMap.get(implId);
+					if (implNodeId) {
+						if (!edgeExists(canvasDataForEdges, implNodeId, sourceNodeId)) {
+							// Visual: story/milestone --> document (implements)
+							const edge = createEdge(implNodeId, sourceNodeId, undefined, 'right', 'left');
+							newEdges.push(edge);
+							if (info.isNew) edgesFromNewNodes++; else edgesFromExistingNodes++;
+						} else {
+							edgesSkipped++;
+						}
+					}
+				}
+
+				// Create edges for supersedes relationships (decision -> superseded decision)
+				if (info.supersedes) {
+					const supersededNodeId = allEntityToNodeMap.get(info.supersedes);
+					if (supersededNodeId) {
+						if (!edgeExists(canvasDataForEdges, sourceNodeId, supersededNodeId)) {
+							// Visual: new decision --> old decision (supersedes)
+							const edge = createEdge(sourceNodeId, supersededNodeId, undefined, 'right', 'left');
+							newEdges.push(edge);
+							if (info.isNew) edgesFromNewNodes++; else edgesFromExistingNodes++;
+						} else {
+							edgesSkipped++;
+						}
+					}
+				}
+
+				// Create edges for previous_version relationships (document -> previous version)
+				if (info.previousVersion) {
+					const prevNodeId = allEntityToNodeMap.get(info.previousVersion);
+					if (prevNodeId) {
+						if (!edgeExists(canvasDataForEdges, sourceNodeId, prevNodeId)) {
+							// Visual: new version --> old version (evolved from)
+							const edge = createEdge(sourceNodeId, prevNodeId, undefined, 'right', 'left');
+							newEdges.push(edge);
+							if (info.isNew) edgesFromNewNodes++; else edgesFromExistingNodes++;
+						} else {
+							edgesSkipped++;
+						}
 					}
 				}
 			}
@@ -4910,6 +5227,7 @@ private registerCommands(): void {
 				workstream: string; // engineering, business, etc.
 				filePath: string;
 				enables: string[];  // Entity IDs this decision enables/unblocks
+				parent?: string;    // Parent entity ID (e.g., M-021 for a story)
 			};
 			const nodeMeta = new Map<string, NodeMeta>();
 			const entityIdToNodeId = new Map<string, string>(); // Map entity ID -> canvas node ID
@@ -4948,9 +5266,11 @@ private registerCommands(): void {
 					const typeMatch = fmText.match(/^type:\s*(.+)$/m);
 					const workstreamMatch = fmText.match(/^workstream:\s*(.+)$/m);
 					const idMatch = fmText.match(/^id:\s*(.+)$/m);
+					const parentMatch = fmText.match(/^parent:\s*(.+)$/m);
 					const enables = parseYamlArrayRepos(fmText, 'enables');
 
 					const entityId = idMatch?.[1]?.trim();
+					const parent = parentMatch?.[1]?.trim();
 
 					nodeMeta.set(node.id, {
 						id: node.id,
@@ -4959,6 +5279,7 @@ private registerCommands(): void {
 						workstream: workstreamMatch?.[1]?.trim().toLowerCase() || 'unassigned',
 						filePath: node.file,
 						enables,
+						parent,
 					});
 
 					// Build entity ID -> node ID mapping
@@ -5053,22 +5374,50 @@ private registerCommands(): void {
 			// ============================================================
 			// STEP 5: For each milestone, calculate its bounding box
 			// ============================================================
-			const getMilestoneDependencies = (milestoneId: string, visited: Set<string>): string[] => {
-				// Get all non-milestone dependencies recursively
+
+			// Build a map of parent entity ID -> children node IDs (from frontmatter parent field)
+			const childrenByParent = new Map<string, string[]>();
+			for (const [nodeId, meta] of nodeMeta.entries()) {
+				if (meta.parent) {
+					if (!childrenByParent.has(meta.parent)) {
+						childrenByParent.set(meta.parent, []);
+					}
+					childrenByParent.get(meta.parent)!.push(nodeId);
+					console.log(`  Child ${meta.entityId} (node ${nodeId}) has parent ${meta.parent}`);
+				}
+			}
+			console.log('Children by parent (from frontmatter):',
+				Object.fromEntries(Array.from(childrenByParent.entries()).map(([k, v]) => [k, v.length]))
+			);
+			// Debug: show all children for each parent
+			for (const [parentId, childIds] of childrenByParent.entries()) {
+				const childEntityIds = childIds.map(id => nodeMeta.get(id)?.entityId || id);
+				console.log(`  Parent ${parentId} has children: ${childEntityIds.join(', ')}`);
+			}
+
+			// Get all entities that belong to a milestone (by parent field ONLY)
+			// Note: We only use the `parent` field for containment/hierarchy.
+			// The `depends_on` field is for sequencing/blocking, not containment.
+			const getMilestoneChildren = (parentEntityId: string, visited: Set<string>): string[] => {
 				const result: string[] = [];
-				const deps = dependsOn.get(milestoneId) || [];
 
-				for (const depId of deps) {
-					if (visited.has(depId)) continue;
-					visited.add(depId);
+				// Get children by parent field (the ONLY source of truth for containment)
+				const children = childrenByParent.get(parentEntityId) || [];
+				for (const childNodeId of children) {
+					if (visited.has(childNodeId)) continue;
+					visited.add(childNodeId);
 
-					const meta = nodeMeta.get(depId);
+					const meta = nodeMeta.get(childNodeId);
 					if (meta?.type === 'milestone') continue; // Skip other milestones
 
-					result.push(depId);
-					// Recursively get dependencies of this dependency
-					result.push(...getMilestoneDependencies(depId, visited));
+					result.push(childNodeId);
+
+					// Recursively get children of this child (for nested hierarchies like story->task)
+					if (meta?.entityId) {
+						result.push(...getMilestoneChildren(meta.entityId, visited));
+					}
 				}
+
 				return result;
 			};
 
@@ -5119,8 +5468,17 @@ private registerCommands(): void {
 
 				// Process each milestone
 				for (const milestone of sortedMilestones) {
-					const mId = milestone.id;
-					const allDeps = getMilestoneDependencies(mId, new Set([mId]));
+					const mId = milestone.id; // Canvas node ID
+					const mMeta = nodeMeta.get(mId);
+					const mEntityId = mMeta?.entityId; // Entity ID (e.g., M-021)
+
+					// Get all entities belonging to this milestone (by parent field ONLY)
+					const allDeps = mEntityId
+						? getMilestoneChildren(mEntityId, new Set())
+						: [];
+
+					const childEntityIds = allDeps.map(id => nodeMeta.get(id)?.entityId || id);
+					console.log(`Milestone ${mEntityId || mId}: found ${allDeps.length} child entities: ${childEntityIds.join(', ')}`);
 
 					// Mark these nodes as belonging to this milestone
 					for (const depId of allDeps) {
@@ -5138,6 +5496,12 @@ private registerCommands(): void {
 						const t = nodeMeta.get(id)?.type;
 						return t !== 'story' && t !== 'task' && t !== 'decision' && t !== 'document';
 					});
+
+					const storyEntityIds = stories.map(id => nodeMeta.get(id)?.entityId || id);
+					console.log(`  Stories for ${mEntityId}: ${storyEntityIds.join(', ') || 'none'}`);
+					if (mEntityId === 'M-021') {
+						console.log(`  DEBUG M-021: childrenByParent.get('M-021') = ${JSON.stringify(childrenByParent.get('M-021'))}`);
+					}
 
 					// Calculate relative positions
 					// Milestone is at (0, 0) in its local coordinate system
