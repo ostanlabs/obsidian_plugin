@@ -5011,14 +5011,15 @@ private registerCommands(): void {
 					}
 				}
 
-				// Create edges for implements relationships (milestone/story -> document)
-				// Edge goes FROM implementer TO document (story implements spec)
+				// Create edges for implements relationships (document -> milestone/story)
+				// Edge goes FROM document TO implementer (doc flows into implementation)
+				// Visual: document --> milestone/story (spec is implemented by work)
 				for (const docId of info.implements || []) {
 					const docNodeId = allEntityToNodeMap.get(docId);
 					if (docNodeId) {
-						if (!edgeExists(canvasDataForEdges, sourceNodeId, docNodeId)) {
-							// Visual: story/milestone --> document (implements)
-							const edge = createEdge(sourceNodeId, docNodeId, undefined, 'right', 'left');
+						if (!edgeExists(canvasDataForEdges, docNodeId, sourceNodeId)) {
+							// Edge: DOC --> M/S (document is upstream of implementer)
+							const edge = createEdge(docNodeId, sourceNodeId, undefined, 'right', 'left');
 							newEdges.push(edge);
 							if (info.isNew) edgesFromNewNodes++; else edgesFromExistingNodes++;
 						} else {
@@ -5028,13 +5029,13 @@ private registerCommands(): void {
 				}
 
 				// Create edges for implemented_by relationships (document -> story/milestone)
-				// Edge goes FROM implementer TO document (reverse direction for visual consistency)
+				// Edge goes FROM document TO implementer (same direction as implements)
 				for (const implId of info.implementedBy || []) {
 					const implNodeId = allEntityToNodeMap.get(implId);
 					if (implNodeId) {
-						if (!edgeExists(canvasDataForEdges, implNodeId, sourceNodeId)) {
-							// Visual: story/milestone --> document (implements)
-							const edge = createEdge(implNodeId, sourceNodeId, undefined, 'right', 'left');
+						if (!edgeExists(canvasDataForEdges, sourceNodeId, implNodeId)) {
+							// Edge: DOC --> M/S (document is upstream of implementer)
+							const edge = createEdge(sourceNodeId, implNodeId, undefined, 'right', 'left');
 							newEdges.push(edge);
 							if (info.isNew) edgesFromNewNodes++; else edgesFromExistingNodes++;
 						} else {
@@ -5228,6 +5229,8 @@ private registerCommands(): void {
 				filePath: string;
 				enables: string[];  // Entity IDs this decision enables/unblocks
 				parent?: string;    // Parent entity ID (e.g., M-021 for a story)
+				dependsOn: string[];  // Entity IDs this depends on (for ordering)
+				implementedBy: string[];  // Entity IDs that implement this document
 			};
 			const nodeMeta = new Map<string, NodeMeta>();
 			const entityIdToNodeId = new Map<string, string>(); // Map entity ID -> canvas node ID
@@ -5268,6 +5271,8 @@ private registerCommands(): void {
 					const idMatch = fmText.match(/^id:\s*(.+)$/m);
 					const parentMatch = fmText.match(/^parent:\s*(.+)$/m);
 					const enables = parseYamlArrayRepos(fmText, 'enables');
+					const dependsOnArr = parseYamlArrayRepos(fmText, 'depends_on');
+					const implementedByArr = parseYamlArrayRepos(fmText, 'implemented_by');
 
 					const entityId = idMatch?.[1]?.trim();
 					const parent = parentMatch?.[1]?.trim();
@@ -5280,6 +5285,8 @@ private registerCommands(): void {
 						filePath: node.file,
 						enables,
 						parent,
+						dependsOn: dependsOnArr,
+						implementedBy: implementedByArr,
 					});
 
 					// Build entity ID -> node ID mapping
@@ -5424,6 +5431,10 @@ private registerCommands(): void {
 			// Track which milestone each node belongs to (for later positioning)
 			const nodeToMilestone = new Map<string, string>();
 
+			// Track document direction per milestone (opposite of story direction)
+			// -1 = documents above milestone, 1 = documents below milestone
+			const milestoneDocDirection = new Map<string, number>();
+
 			// Alternating top/bottom flag
 			let alternateTop = true;
 
@@ -5513,8 +5524,65 @@ private registerCommands(): void {
 					const storyDirection = alternateTop ? -1 : 1; // -1 = above, 1 = below
 					alternateTop = !alternateTop;
 
+					// Track document direction for this milestone (opposite of stories)
+					milestoneDocDirection.set(mId, -storyDirection);
+
+					// ============================================================
+					// ENHANCEMENT 1: Sort stories by dependency order (topological sort)
+					// Stories that depend on other stories should be positioned BELOW them
+					// ============================================================
+					const sortByDependencies = (nodeIds: string[]): string[] => {
+						if (nodeIds.length <= 1) return nodeIds;
+
+						// Build dependency map for these nodes only
+						const localDeps = new Map<string, string[]>();
+						const nodeEntityIds = new Set(nodeIds.map(id => nodeMeta.get(id)?.entityId).filter(Boolean));
+
+						for (const nodeId of nodeIds) {
+							const meta = nodeMeta.get(nodeId);
+							if (!meta) continue;
+							// Filter to only dependencies within this set
+							const deps = (meta.dependsOn || [])
+								.filter(depEntityId => nodeEntityIds.has(depEntityId))
+								.map(depEntityId => entityIdToNodeId.get(depEntityId))
+								.filter((id): id is string => id !== undefined && nodeIds.includes(id));
+							localDeps.set(nodeId, deps);
+						}
+
+						// Topological sort
+						const sorted: string[] = [];
+						const remaining = new Set(nodeIds);
+
+						while (remaining.size > 0) {
+							let found = false;
+							for (const nodeId of remaining) {
+								const deps = localDeps.get(nodeId) || [];
+								const hasUnresolvedDep = deps.some(d => remaining.has(d));
+								if (!hasUnresolvedDep) {
+									sorted.push(nodeId);
+									remaining.delete(nodeId);
+									found = true;
+									break;
+								}
+							}
+							if (!found) {
+								// Cycle detected, add remaining in original order
+								for (const nodeId of nodeIds) {
+									if (remaining.has(nodeId)) {
+										sorted.push(nodeId);
+										remaining.delete(nodeId);
+									}
+								}
+								break;
+							}
+						}
+						return sorted;
+					};
+
+					// Sort stories by dependency order
+					const sortedStories = sortByDependencies(stories);
 					let storyY = storyDirection * (config.nodeHeight / 2 + config.verticalSpacing);
-					for (const storyId of stories) {
+					for (const storyId of sortedStories) {
 						relativePositions.set(storyId, {
 							x: -config.storySpacing,
 							y: storyY,
@@ -5522,9 +5590,10 @@ private registerCommands(): void {
 						storyY += storyDirection * (config.nodeHeight + config.verticalSpacing);
 					}
 
-					// Position tasks further left
+					// Sort tasks by dependency order
+					const sortedTasks = sortByDependencies(tasks);
 					let taskY = storyDirection * (config.nodeHeight / 2 + config.verticalSpacing);
-					for (const taskId of tasks) {
+					for (const taskId of sortedTasks) {
 						relativePositions.set(taskId, {
 							x: -config.storySpacing - config.taskSpacing,
 							y: taskY,
@@ -5542,14 +5611,50 @@ private registerCommands(): void {
 						decisionY += storyDirection * (config.nodeHeight + config.decisionVerticalSpacing);
 					}
 
-					// Position documents to the left of milestone (further left than decisions)
-					let documentY = storyDirection * (config.nodeHeight / 2 + config.documentVerticalSpacing);
+					// ============================================================
+					// ENHANCEMENT 2: Position documents on OPPOSITE side of stories
+					// Documents go below when stories are above, and vice versa
+					// Multi-milestone documents are deferred to STEP 8.5
+					// ============================================================
+					const documentDirection = -storyDirection; // Opposite of stories
+					let documentY = documentDirection * (config.nodeHeight / 2 + config.documentVerticalSpacing);
+
 					for (const documentId of documents) {
+						const docMeta = nodeMeta.get(documentId);
+
+						// Check if this document has implementers in OTHER milestones
+						// If so, defer positioning to after all milestones are placed
+						if (docMeta?.implementedBy?.length) {
+							const implementerMilestones = new Set<string>();
+							for (const implEntityId of docMeta.implementedBy) {
+								// Check if implementer is a milestone
+								if (implEntityId.startsWith('M-')) {
+									implementerMilestones.add(implEntityId);
+								} else {
+									// Find the parent milestone of this implementer
+									const implNodeId = entityIdToNodeId.get(implEntityId);
+									if (implNodeId) {
+										const implMeta = nodeMeta.get(implNodeId);
+										if (implMeta?.parent) {
+											implementerMilestones.add(implMeta.parent);
+										}
+									}
+								}
+							}
+
+							// If document spans multiple milestones, defer positioning
+							if (implementerMilestones.size > 1) {
+								console.log(`  Document ${docMeta.entityId} spans ${implementerMilestones.size} milestones - deferring`);
+								continue; // Will be positioned in STEP 8.5
+							}
+						}
+
+						// Position document on opposite side of stories
 						relativePositions.set(documentId, {
-							x: -config.documentSpacing, // Left side of milestone, further out
+							x: -config.documentSpacing,
 							y: documentY,
 						});
-						documentY += storyDirection * (config.nodeHeight + config.documentVerticalSpacing);
+						documentY += documentDirection * (config.nodeHeight + config.documentVerticalSpacing);
 					}
 
 					// Position other types
@@ -5711,11 +5816,250 @@ private registerCommands(): void {
 			}
 
 			// ============================================================
-			// STEP 8: Handle orphan nodes and nodes not assigned to milestones
+			// STEP 8: Position unpositioned documents based on their implementers
+			// - Single implementer: position to the LEFT of implementer
+			// - Multiple implementers: position BETWEEN them (centered, above)
+			// ============================================================
+			// Track documents that span multiple milestones for special edge handling
+			const multiMilestoneDocuments = new Map<string, { leftmost: string; rightmost: string }>();
+
+			// Track used positions to avoid stacking documents on top of each other
+			// Key: "x,y" position string, Value: count of docs at that position
+			const usedDocPositions = new Map<string, number>();
+
+			// Find all documents that haven't been positioned yet
+			const unpositionedDocs = fileNodes.filter(n => {
+				const meta = nodeMeta.get(n.id);
+				return meta?.type === 'document' && !finalPositions.has(n.id);
+			});
+
+			for (const doc of unpositionedDocs) {
+				const meta = nodeMeta.get(doc.id);
+				if (!meta?.implementedBy?.length) continue;
+
+				// Find all implementer positions
+				const implementerPositions: { entityId: string; nodeId: string; x: number; y: number }[] = [];
+
+				for (const implEntityId of meta.implementedBy) {
+					const implNodeId = entityIdToNodeId.get(implEntityId);
+					if (!implNodeId) continue;
+
+					const implPos = finalPositions.get(implNodeId);
+					if (implPos) {
+						implementerPositions.push({
+							entityId: implEntityId,
+							nodeId: implNodeId,
+							x: implPos.x,
+							y: implPos.y,
+						});
+					}
+				}
+
+				if (implementerPositions.length === 0) continue;
+
+				// Sort by X position to find leftmost and rightmost
+				implementerPositions.sort((a, b) => a.x - b.x);
+				const leftmost = implementerPositions[0];
+				const rightmost = implementerPositions[implementerPositions.length - 1];
+
+				let docX: number;
+				let docY: number;
+
+				if (implementerPositions.length === 1) {
+					// SINGLE IMPLEMENTER: Position to the LEFT of the implementer
+					// Y offset based on milestone's document direction (opposite of stories)
+					docX = leftmost.x - config.documentSpacing - config.nodeWidth;
+
+					// Find the milestone this implementer belongs to
+					let implMilestoneId: string | undefined;
+					if (leftmost.entityId.startsWith('M-')) {
+						implMilestoneId = leftmost.entityId;
+					} else {
+						// Find parent milestone of this implementer
+						const implMeta = nodeMeta.get(leftmost.nodeId);
+						implMilestoneId = implMeta?.parent;
+					}
+
+					// Get document direction for this milestone
+					const docDir = implMilestoneId ? milestoneDocDirection.get(entityIdToNodeId.get(implMilestoneId) || '') : 1;
+					const direction = docDir || 1; // Default to below if not found
+
+					// Position document offset from implementer in the document direction
+					docY = leftmost.y + direction * (config.nodeHeight / 2 + config.documentVerticalSpacing);
+
+					// Check if this position is already used by another document
+					const posKey = `${Math.round(docX)},${Math.round(docY)}`;
+					const existingCount = usedDocPositions.get(posKey) || 0;
+					if (existingCount > 0) {
+						// Offset this document in the stacking direction (use smaller spacing for doc-to-doc)
+						docY += direction * existingCount * (config.nodeHeight + config.verticalSpacing);
+					}
+					usedDocPositions.set(posKey, existingCount + 1);
+
+					console.log(`  Single-implementer document ${meta.entityId} positioned LEFT of ${leftmost.entityId} (dir=${direction}, offset=${existingCount})`);
+				} else {
+					// MULTIPLE IMPLEMENTERS: Position BETWEEN them (centered)
+					docX = (leftmost.x + rightmost.x + config.nodeWidth) / 2 - config.nodeWidth / 2;
+
+					// Calculate Y position: above both (minimum Y minus offset)
+					// Use 2x vertical offset for multi-implementer docs to give more visual separation
+					const minY = Math.min(...implementerPositions.map(p => p.y));
+					const maxY = Math.max(...implementerPositions.map(p => p.y));
+
+					// Determine stacking direction for multi-implementer docs
+					let stackDirection: number;
+					if (maxY - minY > config.nodeHeight) {
+						// Different workstreams - position between them, stack downward
+						docY = (minY + maxY) / 2;
+						stackDirection = 1;
+					} else {
+						// Same workstream - position above with 2x offset, stack upward
+						docY = minY - config.nodeHeight - 2 * config.documentVerticalSpacing;
+						stackDirection = -1;
+					}
+
+					// Check if this position is already used by another document
+					const posKey = `${Math.round(docX)},${Math.round(docY)}`;
+					const existingCount = usedDocPositions.get(posKey) || 0;
+					if (existingCount > 0) {
+						// Offset this document in the stacking direction (use smaller spacing for doc-to-doc)
+						docY += stackDirection * existingCount * (config.nodeHeight + config.verticalSpacing);
+					}
+					usedDocPositions.set(posKey, existingCount + 1);
+
+					// Track for edge side handling (only for multi-implementer docs)
+					multiMilestoneDocuments.set(doc.id, {
+						leftmost: leftmost.nodeId,
+						rightmost: rightmost.nodeId,
+					});
+
+					console.log(`  Multi-implementer document ${meta.entityId} positioned between ${leftmost.entityId} and ${rightmost.entityId} (offset=${existingCount})`);
+				}
+
+				finalPositions.set(doc.id, {
+					x: docX,
+					y: docY,
+					width: config.nodeWidth,
+					height: config.nodeHeight,
+				});
+			}
+
+			// ============================================================
+			// STEP 9: Position decisions that enable documents
+			// Decisions are positioned to the LEFT of the document they enable
+			// Stacking direction follows the document's Y position relative to implementers:
+			// - Doc above implementers → stack decisions upward
+			// - Doc below implementers → stack decisions downward
+			// - Doc between implementers → stack decisions downward
+			// ============================================================
+			// Track document stacking direction for decisions
+			const documentStackDirection = new Map<string, number>(); // docNodeId -> direction (-1=up, 1=down)
+
+			// Calculate stacking direction for each positioned document
+			for (const doc of fileNodes) {
+				const meta = nodeMeta.get(doc.id);
+				if (meta?.type !== 'document') continue;
+
+				const docPos = finalPositions.get(doc.id);
+				if (!docPos) continue;
+
+				// Find implementer positions
+				const implementerYs: number[] = [];
+				for (const implEntityId of meta.implementedBy || []) {
+					const implNodeId = entityIdToNodeId.get(implEntityId);
+					if (implNodeId) {
+						const implPos = finalPositions.get(implNodeId);
+						if (implPos) implementerYs.push(implPos.y);
+					}
+				}
+
+				if (implementerYs.length === 0) {
+					// No implementers found, default to downward
+					documentStackDirection.set(doc.id, 1);
+					continue;
+				}
+
+				const minImplY = Math.min(...implementerYs);
+				const maxImplY = Math.max(...implementerYs);
+
+				// Determine stacking direction based on doc position relative to implementers
+				if (maxImplY - minImplY > config.nodeHeight) {
+					// Doc is between implementers (vertically) → stack downward
+					documentStackDirection.set(doc.id, 1);
+				} else if (docPos.y < minImplY) {
+					// Doc is above implementers → stack upward
+					documentStackDirection.set(doc.id, -1);
+				} else {
+					// Doc is below or at same level as implementers → stack downward
+					documentStackDirection.set(doc.id, 1);
+				}
+			}
+
+			// Find all unpositioned decisions that enable documents
+			const unpositionedDecisions = fileNodes.filter(n => {
+				const meta = nodeMeta.get(n.id);
+				return meta?.type === 'decision' && !finalPositions.has(n.id) && meta.enables.length > 0;
+			});
+
+			// Group decisions by the document they enable
+			const decisionsByEnabledDoc = new Map<string, string[]>(); // docNodeId -> [decisionNodeIds]
+			for (const dec of unpositionedDecisions) {
+				const meta = nodeMeta.get(dec.id);
+				if (!meta) continue;
+
+				for (const enabledEntityId of meta.enables) {
+					const enabledNodeId = entityIdToNodeId.get(enabledEntityId);
+					if (!enabledNodeId) continue;
+
+					const enabledMeta = nodeMeta.get(enabledNodeId);
+					if (enabledMeta?.type !== 'document') continue;
+
+					// Check if the document is positioned
+					if (!finalPositions.has(enabledNodeId)) continue;
+
+					const existing = decisionsByEnabledDoc.get(enabledNodeId) || [];
+					if (!existing.includes(dec.id)) {
+						existing.push(dec.id);
+						decisionsByEnabledDoc.set(enabledNodeId, existing);
+					}
+				}
+			}
+
+			// Position decisions relative to their enabled documents
+			for (const [docNodeId, decisionNodeIds] of decisionsByEnabledDoc) {
+				const docPos = finalPositions.get(docNodeId);
+				if (!docPos) continue;
+
+				const stackDir = documentStackDirection.get(docNodeId) || 1;
+
+				// Position decisions to the LEFT of the document, stacked in the appropriate direction
+				let decX = docPos.x - config.documentSpacing - config.nodeWidth;
+				let decY = docPos.y; // Start at same Y as document
+
+				for (const decNodeId of decisionNodeIds) {
+					finalPositions.set(decNodeId, {
+						x: decX,
+						y: decY,
+						width: config.nodeWidth,
+						height: config.nodeHeight,
+					});
+
+					const decMeta = nodeMeta.get(decNodeId);
+					console.log(`  Decision ${decMeta?.entityId} positioned LEFT of document (stackDir=${stackDir})`);
+
+					// Stack next decision in the appropriate direction
+					decY += stackDir * (config.nodeHeight + config.verticalSpacing);
+				}
+			}
+
+			// ============================================================
+			// STEP 10: Handle orphan nodes and nodes not assigned to milestones
 			// ============================================================
 			const orphans = fileNodes.filter(n => !finalPositions.has(n.id));
 			if (orphans.length > 0) {
 				console.log(`Positioning ${orphans.length} orphan nodes`);
+
+				// Position orphans in the orphan area
 				let orphanX = config.startX;
 				let orphanY = currentLaneY + config.streamSpacing;
 
@@ -5737,7 +6081,7 @@ private registerCommands(): void {
 			}
 
 			// ============================================================
-			// STEP 9: Apply positions to nodes
+			// STEP 11: Apply positions to nodes
 			// ============================================================
 			let repositionedCount = 0;
 			for (const node of fileNodes) {
@@ -5752,26 +6096,64 @@ private registerCommands(): void {
 			}
 
 			// ============================================================
-			// STEP 10: Update edge sides for cleaner connections
+			// STEP 12: Update edge sides for cleaner connections
 			// ============================================================
 			for (const edge of canvasData.edges) {
 				const fromPos = finalPositions.get(edge.fromNode);
 				const toPos = finalPositions.get(edge.toNode);
 
 				if (fromPos && toPos) {
-					// Determine best edge sides based on relative positions
-					if (fromPos.x < toPos.x) {
-						edge.fromSide = 'right';
-						edge.toSide = 'left';
-					} else if (fromPos.x > toPos.x) {
-						edge.fromSide = 'left';
-						edge.toSide = 'right';
-					} else if (fromPos.y < toPos.y) {
-						edge.fromSide = 'bottom';
-						edge.toSide = 'top';
+					// Special handling for multi-milestone documents
+					// DOC's LEFT side connects to entities on its LEFT
+					// DOC's RIGHT side connects to entities on its RIGHT
+					const fromMultiDoc = multiMilestoneDocuments.get(edge.fromNode);
+					const toMultiDoc = multiMilestoneDocuments.get(edge.toNode);
+
+					if (fromMultiDoc) {
+						// Edge FROM a multi-milestone document TO an implementer
+						if (edge.toNode === fromMultiDoc.leftmost || toPos.x < fromPos.x) {
+							// Target is on the left - use document's LEFT side
+							edge.fromSide = 'left';
+							edge.toSide = 'right';
+						} else if (edge.toNode === fromMultiDoc.rightmost || toPos.x > fromPos.x) {
+							// Target is on the right - use document's RIGHT side
+							edge.fromSide = 'right';
+							edge.toSide = 'left';
+						} else {
+							// Fallback to position-based
+							edge.fromSide = fromPos.x < toPos.x ? 'right' : 'left';
+							edge.toSide = fromPos.x < toPos.x ? 'left' : 'right';
+						}
+					} else if (toMultiDoc) {
+						// Edge TO a multi-milestone document FROM an implementer
+						if (edge.fromNode === toMultiDoc.leftmost || fromPos.x < toPos.x) {
+							// Source is on the left - connect to document's LEFT side
+							edge.fromSide = 'right';
+							edge.toSide = 'left';
+						} else if (edge.fromNode === toMultiDoc.rightmost || fromPos.x > toPos.x) {
+							// Source is on the right - connect to document's RIGHT side
+							edge.fromSide = 'left';
+							edge.toSide = 'right';
+						} else {
+							// Fallback to position-based
+							edge.fromSide = fromPos.x < toPos.x ? 'right' : 'left';
+							edge.toSide = fromPos.x < toPos.x ? 'left' : 'right';
+						}
 					} else {
-						edge.fromSide = 'top';
-						edge.toSide = 'bottom';
+						// Standard edge side logic based on relative positions
+						if (fromPos.x < toPos.x) {
+							edge.fromSide = 'right';
+							edge.toSide = 'left';
+						} else if (fromPos.x > toPos.x) {
+							edge.fromSide = 'left';
+							edge.toSide = 'right';
+						} else if (fromPos.y < toPos.y) {
+							edge.fromSide = 'bottom';
+							edge.toSide = 'top';
+						} else {
+							edge.fromSide = 'top';
+							edge.toSide = 'bottom';
+						}
 					}
 				}
 			}
