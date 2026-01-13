@@ -443,6 +443,48 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 						void this.plugin.saveSettings();
 					})
 			);
+
+		// HTTP Server Section
+		new Setting(containerEl).setName("HTTP Server").setHeading();
+
+		new Setting(containerEl)
+			.setName("Enable HTTP server")
+			.setDesc("Start an HTTP server to allow external tools to trigger plugin actions")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.httpServerEnabled)
+					.onChange((value) => {
+						this.plugin.settings.httpServerEnabled = value;
+						void this.plugin.saveSettings();
+						this.plugin.restartHttpServer();
+						this.display(); // Refresh to show/hide port setting
+					})
+			);
+
+		if (this.plugin.settings.httpServerEnabled) {
+			new Setting(containerEl)
+				.setName("Server port")
+				.setDesc("Port number for the HTTP server (default: 12312)")
+				.addText((text) =>
+					text
+						.setPlaceholder("12312")
+						.setValue(String(this.plugin.settings.httpServerPort))
+						.onChange((value) => {
+							const port = parseInt(value, 10);
+							if (!isNaN(port) && port > 0 && port < 65536) {
+								this.plugin.settings.httpServerPort = port;
+								void this.plugin.saveSettings();
+							}
+						})
+				)
+				.addButton((button) =>
+					button
+						.setButtonText("Restart Server")
+						.onClick(() => {
+							this.plugin.restartHttpServer();
+						})
+				);
+		}
 	}
 }
 

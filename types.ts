@@ -49,6 +49,9 @@ export interface CanvasItemFromTemplateSettings {
 	autoSyncOnMdChange: boolean; // Auto-sync when MD file is modified
 	// Entity Navigator
 	entityNavigator: EntityNavigatorSettings;
+	// HTTP Server
+	httpServerEnabled: boolean;
+	httpServerPort: number;
 }
 
 export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
@@ -80,6 +83,8 @@ export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
 	notionSyncIntervalMinutes: 5,
 	autoSyncOnMdChange: true,
 	entityNavigator: DEFAULT_ENTITY_NAVIGATOR_SETTINGS,
+	httpServerEnabled: false,
+	httpServerPort: 12312,
 };
 
 export type ItemType = "accomplishment";
