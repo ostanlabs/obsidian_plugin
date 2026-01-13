@@ -430,6 +430,15 @@ private registerCommands(): void {
 			}
 		},
 	});
+
+	// Command: Focus on In Progress entities
+	this.addCommand({
+		id: "focus-in-progress",
+		name: "Project Canvas: Focus on In Progress",
+		callback: async () => {
+			await this.focusOnInProgressEntities();
+		},
+	});
 }
 
 	/**
@@ -6187,6 +6196,177 @@ private registerCommands(): void {
 			console.groupEnd();
 			this.isUpdatingCanvas = false;
 			new Notice("❌ Failed to reposition nodes: " + (error as Error).message);
+		}
+	}
+
+	/**
+	 * Focus on entities that are currently "In Progress" or equivalent active status.
+	 * Selects all in-progress nodes and zooms the canvas to fit them.
+	 *
+	 * Limited to milestones, stories, and tasks only.
+	 * Active statuses:
+	 * - Milestone/Story: "In Progress"
+	 * - Task: "InProgress"
+	 */
+	private async focusOnInProgressEntities(): Promise<void> {
+		console.group('[Canvas Plugin] focusOnInProgressEntities');
+
+		const canvasFile = this.getActiveCanvasFile();
+		if (!canvasFile) {
+			console.warn('No active canvas file found');
+			console.groupEnd();
+			new Notice("Please open a canvas file first");
+			return;
+		}
+
+		try {
+			// Get the canvas view
+			const activeLeaf = this.app.workspace.activeLeaf;
+			if (!activeLeaf || activeLeaf.view?.getViewType() !== "canvas") {
+				new Notice("Please open a canvas file first");
+				console.groupEnd();
+				return;
+			}
+
+			// @ts-ignore - canvas view internals
+			const canvas = activeLeaf.view?.canvas;
+			if (!canvas) {
+				new Notice("Could not access canvas");
+				console.groupEnd();
+				return;
+			}
+
+			// Active status values (normalized to lowercase with underscores)
+			const activeStatuses = new Set([
+				"in_progress",    // Milestone, Story
+				"inprogress",     // Task (normalized)
+			]);
+
+			// Entity types to include (milestones, stories, tasks only)
+			const includedTypes = new Set([
+				"milestone",
+				"story",
+				"task",
+			]);
+
+			// Find all nodes with active status
+			const inProgressNodes: unknown[] = [];
+
+			// @ts-ignore - canvas.nodes is a Map<string, CanvasNode>
+			const canvasNodes = canvas.nodes as Map<string, unknown> | undefined;
+			if (!canvasNodes) {
+				new Notice("No nodes found on canvas");
+				console.groupEnd();
+				return;
+			}
+
+			for (const [nodeId, canvasNode] of canvasNodes) {
+				// @ts-ignore - get node's DOM element
+				const nodeEl = (canvasNode as { nodeEl?: HTMLElement }).nodeEl;
+				if (!nodeEl) continue;
+
+				// Check entity type - only include milestones, stories, tasks
+				const entityType = nodeEl.getAttribute("data-canvas-pm-type");
+				if (!entityType || !includedTypes.has(entityType)) continue;
+
+				// Check the data-canvas-pm-status attribute
+				const status = nodeEl.getAttribute("data-canvas-pm-status");
+				if (status && activeStatuses.has(status)) {
+					inProgressNodes.push(canvasNode);
+					console.debug('[Canvas Plugin] Found in-progress node:', nodeId, 'type:', entityType, 'status:', status);
+				}
+			}
+
+			if (inProgressNodes.length === 0) {
+				new Notice("No in-progress entities found");
+				console.groupEnd();
+				return;
+			}
+
+			console.log('[Canvas Plugin] Found', inProgressNodes.length, 'in-progress nodes');
+
+			// Clear current selection and select in-progress nodes
+			// @ts-ignore - canvas.deselectAll
+			if (typeof canvas.deselectAll === 'function') {
+				canvas.deselectAll();
+			}
+
+			// Select all in-progress nodes
+			// @ts-ignore - canvas.select or canvas.addToSelection
+			if (canvas.selection && typeof canvas.selection.clear === 'function') {
+				canvas.selection.clear();
+			}
+
+			for (const node of inProgressNodes) {
+				// @ts-ignore - canvas.select or node.select
+				if (typeof canvas.addToSelection === 'function') {
+					canvas.addToSelection(node);
+				} else if (canvas.selection && typeof canvas.selection.add === 'function') {
+					canvas.selection.add(node);
+				}
+			}
+
+			// Calculate bounding box of all in-progress nodes
+			let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+			for (const node of inProgressNodes) {
+				// @ts-ignore - get node position and size
+				const x = (node as any).x ?? 0;
+				const y = (node as any).y ?? 0;
+				const width = (node as any).width ?? 350;
+				const height = (node as any).height ?? 350;
+
+				minX = Math.min(minX, x);
+				minY = Math.min(minY, y);
+				maxX = Math.max(maxX, x + width);
+				maxY = Math.max(maxY, y + height);
+			}
+
+			// Add padding around the bounding box
+			const padding = 100;
+			minX -= padding;
+			minY -= padding;
+			maxX += padding;
+			maxY += padding;
+
+			console.log('[Canvas Plugin] Bounding box:', { minX, minY, maxX, maxY });
+
+			// Zoom to the bounding box
+			// @ts-ignore - canvas.zoomToBbox
+			if (typeof canvas.zoomToBbox === 'function') {
+				canvas.zoomToBbox({ minX, minY, maxX, maxY });
+				console.log('[Canvas Plugin] Zoomed to bbox using zoomToBbox');
+			}
+			// @ts-ignore - alternative: canvas.zoomToSelection
+			else if (typeof canvas.zoomToSelection === 'function') {
+				canvas.zoomToSelection();
+				console.log('[Canvas Plugin] Zoomed using zoomToSelection');
+			}
+			// @ts-ignore - alternative: canvas.setViewport
+			else if (typeof canvas.setViewport === 'function') {
+				const centerX = (minX + maxX) / 2;
+				const centerY = (minY + maxY) / 2;
+				const width = maxX - minX;
+				const height = maxY - minY;
+				// Calculate zoom to fit
+				const viewWidth = canvas.wrapperEl?.clientWidth ?? 1000;
+				const viewHeight = canvas.wrapperEl?.clientHeight ?? 800;
+				const zoom = Math.min(viewWidth / width, viewHeight / height) * 0.9;
+				canvas.setViewport(centerX, centerY, zoom);
+				console.log('[Canvas Plugin] Set viewport manually');
+			}
+			else {
+				console.warn('[Canvas Plugin] No zoom method found on canvas');
+				// At least we selected the nodes
+			}
+
+			new Notice(`✅ Focused on ${inProgressNodes.length} in-progress entities`);
+			console.groupEnd();
+
+		} catch (error) {
+			console.error('ERROR in focusOnInProgressEntities:', error);
+			console.groupEnd();
+			new Notice("❌ Failed to focus on in-progress entities: " + (error as Error).message);
 		}
 	}
 
