@@ -1,4 +1,5 @@
 import { Plugin, TFile, Notice, normalizePath, Menu, MenuItem, WorkspaceLeaf } from "obsidian";
+import * as http from "http";
 import {
 	CanvasItemFromTemplateSettings,
 	DEFAULT_SETTINGS,
@@ -99,6 +100,8 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	private controlPanelEl: HTMLElement | null = null;
 	// Entity Navigator index
 	private entityIndex: EntityIndex | null = null;
+	// HTTP Server instance
+	private httpServer: http.Server | null = null;
 
 	private getCanvasNodeFromEventTarget(target: EventTarget | null): CanvasNodeResult | null {
 		if (!(target instanceof HTMLElement)) return null;
@@ -235,6 +238,8 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 			this.applyStylesToAllCanvasViews();
 			// Initialize Entity Navigator index
 			await this.initializeEntityNavigator();
+			// Start HTTP server if enabled
+			this.startHttpServer();
 		});
 
 		// Watch for canvas views opening to apply styles
@@ -260,6 +265,8 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	onunload() {
 		// Stop bi-directional sync polling
 		this.stopNotionSyncPolling();
+		// Stop HTTP server
+		this.stopHttpServer();
 		// Remove control panel if exists
 		this.removeControlPanel();
 		void this.logger?.info("Plugin unloaded");
@@ -5212,16 +5219,16 @@ private registerCommands(): void {
 
 			// Layout configuration (exposed as params for tuning)
 			const config = {
-				milestoneSpacing: 1200,     // Horizontal spacing between milestones (doubled)
+				milestoneSpacing: 1800,     // Horizontal spacing between milestones (+50%)
 				storySpacing: 800,          // Horizontal spacing between milestone and stories (doubled)
 				taskSpacing: 700,           // Horizontal spacing between story and tasks (doubled)
 				decisionSpacing: 800,       // Horizontal spacing for decisions (left of milestone)
 				documentSpacing: 1000,      // Horizontal spacing for documents (left of milestone)
-				verticalSpacing: 60,        // Vertical spacing between dependency nodes
+				verticalSpacing: 150,       // Vertical spacing between dependency nodes
 				decisionVerticalSpacing: 260, // Vertical spacing for decisions (60 + 200)
 				documentVerticalSpacing: 460, // Vertical spacing for documents (60 + 400)
 				streamSpacing: 400,         // Vertical spacing between workstream lanes
-				nodeWidth: 350,
+				nodeWidth: 462,
 				nodeHeight: 250,
 				startX: 500,
 				startY: 500,
@@ -6042,7 +6049,8 @@ private registerCommands(): void {
 				const stackDir = documentStackDirection.get(docNodeId) || 1;
 
 				// Position decisions to the LEFT of the document, stacked in the appropriate direction
-				let decX = docPos.x - config.documentSpacing - config.nodeWidth;
+				// Use 60% of documentSpacing for tighter horizontal positioning
+				let decX = docPos.x - (config.documentSpacing * 0.6) - config.nodeWidth;
 				let decY = docPos.y; // Start at same Y as document
 
 				for (const decNodeId of decisionNodeIds) {
@@ -6849,6 +6857,124 @@ private registerCommands(): void {
 		} else {
 			new Notice("No enabled entities found");
 		}
+	}
+
+	// ==================== HTTP SERVER ====================
+
+	/**
+	 * Start the HTTP server for external API access.
+	 * Listens for POST requests to trigger plugin functions.
+	 */
+	private startHttpServer(): void {
+		if (!this.settings.httpServerEnabled) {
+			console.debug('[Canvas Plugin] HTTP server disabled in settings');
+			return;
+		}
+
+		const port = this.settings.httpServerPort;
+
+		this.httpServer = http.createServer(async (req, res) => {
+			// Set CORS headers
+			res.setHeader('Access-Control-Allow-Origin', '*');
+			res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+			res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+			// Handle preflight
+			if (req.method === 'OPTIONS') {
+				res.writeHead(204);
+				res.end();
+				return;
+			}
+
+			// Only accept POST requests
+			if (req.method !== 'POST') {
+				res.writeHead(405, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ error: 'Method not allowed. Use POST.' }));
+				return;
+			}
+
+			// Parse request body
+			let body = '';
+			req.on('data', chunk => { body += chunk.toString(); });
+			req.on('end', async () => {
+				try {
+					const data = body ? JSON.parse(body) : {};
+					const action = data.action || req.url?.replace('/', '');
+
+					console.log('[Canvas Plugin] HTTP request received:', { action, data });
+
+					let result: { success: boolean; message: string; error?: string };
+
+					switch (action) {
+						case 'populate':
+						case 'populate-from-vault':
+							await this.populateCanvasFromVault();
+							result = { success: true, message: 'Populate from vault completed' };
+							break;
+
+						case 'reposition':
+						case 'reposition-nodes':
+							await this.repositionCanvasNodes();
+							result = { success: true, message: 'Reposition nodes completed' };
+							break;
+
+						default:
+							result = {
+								success: false,
+								message: 'Unknown action',
+								error: `Unknown action: ${action}. Valid actions: populate, reposition`
+							};
+					}
+
+					res.writeHead(result.success ? 200 : 400, { 'Content-Type': 'application/json' });
+					res.end(JSON.stringify(result));
+
+				} catch (error) {
+					console.error('[Canvas Plugin] HTTP request error:', error);
+					res.writeHead(500, { 'Content-Type': 'application/json' });
+					res.end(JSON.stringify({
+						success: false,
+						error: (error as Error).message
+					}));
+				}
+			});
+		});
+
+		this.httpServer.on('error', (error: NodeJS.ErrnoException) => {
+			if (error.code === 'EADDRINUSE') {
+				console.error(`[Canvas Plugin] HTTP server port ${port} is already in use`);
+				new Notice(`❌ HTTP server port ${port} is already in use`);
+			} else {
+				console.error('[Canvas Plugin] HTTP server error:', error);
+				new Notice(`❌ HTTP server error: ${error.message}`);
+			}
+			this.httpServer = null;
+		});
+
+		this.httpServer.listen(port, '127.0.0.1', () => {
+			console.log(`[Canvas Plugin] HTTP server listening on http://127.0.0.1:${port}`);
+			new Notice(`✅ HTTP server started on port ${port}`);
+		});
+	}
+
+	/**
+	 * Stop the HTTP server.
+	 */
+	private stopHttpServer(): void {
+		if (this.httpServer) {
+			this.httpServer.close(() => {
+				console.log('[Canvas Plugin] HTTP server stopped');
+			});
+			this.httpServer = null;
+		}
+	}
+
+	/**
+	 * Restart the HTTP server (e.g., when settings change).
+	 */
+	public restartHttpServer(): void {
+		this.stopHttpServer();
+		this.startHttpServer();
 	}
 }
 
