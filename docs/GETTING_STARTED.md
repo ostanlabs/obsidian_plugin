@@ -338,8 +338,7 @@ your-vault/
 │   ├── stories/
 │   ├── tasks/
 │   ├── decisions/
-│   ├── documents/
-│   └── accomplishments/
+│   └── documents/
 └── [your entity files]              # Active entities
     ├── M-001_project_alpha.md
     ├── S-001_user_auth.md

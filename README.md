@@ -11,7 +11,7 @@ Canvas Project Manager enables structured project planning directly within Obsid
 - **Tasks** - Actionable work items (children of stories)
 - **Decisions** - Architectural or design decisions that enable/unblock other entities
 - **Documents** - Technical specs, designs, and documentation
-- **Accomplishments** - Completed achievements and outcomes
+- **Features** - Product features with tier (OSS/Premium) and phase classification
 
 ## Features
 
@@ -41,9 +41,13 @@ Canvas Project Manager enables structured project planning directly within Obsid
 - **Index-based**: Fast lookups via in-memory entity index
 
 ### Notion Sync (Optional)
-- **Bidirectional sync**: Create/update Notion database entries
+- **One-way sync**: Push entities from Obsidian to Notion database
 - **Dependency sync**: Canvas edges sync to Notion relations
 - **Archive sync**: Deleted notes archive corresponding Notion pages
+
+### HTTP Server (Optional)
+- **External tool integration**: Enable HTTP server for MCP or other tools
+- **Configurable port**: Default port 12312
 
 ### Smart File Management
 - **Title-based naming**: Files named by title (not ID)
@@ -81,7 +85,7 @@ Entities use YAML frontmatter with these fields:
 ```yaml
 ---
 id: M-001                    # Entity ID (prefix + number)
-type: milestone              # milestone, story, task, decision, document, accomplishment
+type: milestone              # milestone, story, task, decision, document
 title: "Project Alpha"       # Display title
 status: active               # active, in_progress, completed, archived
 parent: M-001                # Parent entity ID (for hierarchy)
@@ -105,10 +109,12 @@ created_by_plugin: true      # Plugin-created marker
 | **Project Canvas: Sync edges to dependencies** | Sync canvas edges to `depends_on` fields |
 | **Project Canvas: Remove duplicate nodes** | Remove duplicate entity nodes from canvas |
 | **Project Canvas: Strip IDs from filenames** | Remove ID prefixes from entity filenames |
+| **Project Canvas: Focus on In Progress** | Zoom canvas to show only in-progress entities |
 | **Project Canvas: Initialize Notion database** | Create Notion database for sync |
 | **Project Canvas: Sync current note to Notion** | Sync active note to Notion |
 | **Project Canvas: Sync all canvas notes to Notion** | Sync all canvas entities to Notion |
 | **Project Canvas: Regenerate templates** | Regenerate default entity templates |
+| **Project Canvas: [DEBUG] Inspect canvas API** | Debug tool to inspect canvas internals |
 | **Entity Navigator: Go to Parent** | Navigate to parent entity (Ctrl+Shift+P) |
 | **Entity Navigator: Go to Children** | Navigate to child entities |
 | **Entity Navigator: Go to Dependencies** | Navigate to dependency entities |
@@ -163,8 +169,7 @@ When **Populate from vault** runs, it automatically:
    ├── stories/
    ├── tasks/
    ├── decisions/
-   ├── documents/
-   └── accomplishments/
+   └── documents/
    ```
 3. **Removes from canvas**: Archived nodes are removed from the canvas
 4. **Excludes from scans**: Archive folder is excluded from future vault scans
@@ -191,7 +196,7 @@ npm run lint       # Lint code
 ### Project Structure
 
 ```
-├── main.ts              # Plugin entry point (~5900 lines)
+├── main.ts              # Plugin entry point (~7000 lines)
 ├── types.ts             # TypeScript interfaces
 ├── settings.ts          # Settings UI
 ├── styles.css           # Visual styling for entities

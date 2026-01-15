@@ -1,15 +1,28 @@
 import { App } from "obsidian";
-import { CanvasItemFromTemplateSettings } from "../types";
+import { CanvasItemFromTemplateSettings, EntityType } from "../types";
 
 /**
- * Generate a unique ID for a new accomplishment
+ * ID prefixes for each entity type
+ */
+const ENTITY_ID_PREFIXES: Record<EntityType, string> = {
+	milestone: "M-",
+	story: "S-",
+	task: "T-",
+	decision: "DEC-",
+	document: "DOC-",
+	feature: "F-",
+};
+
+/**
+ * Generate a unique ID for a new entity
  * Scans existing notes to find the highest ID and increments
  */
 export function generateId(
 	app: App,
-	settings: CanvasItemFromTemplateSettings
+	settings: CanvasItemFromTemplateSettings,
+	entityType: EntityType = "task"
 ): string {
-	const prefix = settings.idPrefixAccomplishment;
+	const prefix = ENTITY_ID_PREFIXES[entityType];
 	const padLength = settings.idZeroPadLength;
 
 	// Get all markdown files

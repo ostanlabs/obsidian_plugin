@@ -18,10 +18,10 @@ Priority: {{priority}}
 `;
 
 			const frontmatter: ItemFrontmatter = {
-				type: "accomplishment",
-				title: "Test Accomplishment",
+				type: "task",
+				title: "Test Task",
 				effort: "Engineering",
-				id: "A001",
+				id: "T-001",
 				status: "Not Started",
 				priority: "Medium",
 				created: "2025-01-01T00:00:00.000Z",
@@ -33,10 +33,10 @@ Priority: {{priority}}
 
 			const result = replacePlaceholders(template, frontmatter);
 
-			expect(result).toContain("type: accomplishment");
-			expect(result).toContain("title: Test Accomplishment");
-			expect(result).toContain("id: A001");
-			expect(result).toContain("# Test Accomplishment");
+			expect(result).toContain("type: task");
+			expect(result).toContain("title: Test Task");
+			expect(result).toContain("id: T-001");
+			expect(result).toContain("# Test Task");
 			expect(result).toContain("Effort: Engineering");
 			expect(result).toContain("Status: Not Started");
 			expect(result).toContain("Priority: Medium");
@@ -46,10 +46,10 @@ Priority: {{priority}}
 			const template = `Notion ID: {{notion_page_id}}`;
 
 			const frontmatter: ItemFrontmatter = {
-				type: "accomplishment",
+				type: "task",
 				title: "Test",
 				effort: "Engineering",
-				id: "A001",
+				id: "T-001",
 				status: "Not Started",
 				priority: "Medium",
 				created: "2025-01-01T00:00:00.000Z",

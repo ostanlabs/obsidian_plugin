@@ -1,12 +1,16 @@
-import { Plugin, TFile, Notice, normalizePath, Menu, MenuItem, WorkspaceLeaf } from "obsidian";
+import { Plugin, TFile, Notice, normalizePath, Menu, MenuItem, WorkspaceLeaf, Modal, App } from "obsidian";
 import * as http from "http";
 import {
 	CanvasItemFromTemplateSettings,
 	DEFAULT_SETTINGS,
 	ItemFrontmatter,
-	ItemType,
+	FeatureFrontmatter,
+	EntityType,
 	ItemStatus,
 	ItemPriority,
+	FeatureTier,
+	FeaturePhase,
+	FeatureStatus,
 	InternalCanvasNode,
 	InternalCanvas,
 	CanvasNodeResult,
@@ -17,11 +21,15 @@ import {
 } from "./types";
 import { CanvasStructuredItemsSettingTab } from "./settings";
 import { StructuredItemModal, StructuredItemResult, StructuredItemModalOptions } from "./ui/StructuredItemModal";
+import { FeatureModal, FeatureModalResult } from "./ui/FeatureModal";
+import { LinkFeatureModal, LinkFeatureModalResult, FeatureOption } from "./ui/LinkFeatureModal";
+import { FeatureDetailsView, FEATURE_DETAILS_VIEW_TYPE } from "./ui/FeatureDetailsView";
+import { FeatureCoverageView, FEATURE_COVERAGE_VIEW_TYPE } from "./ui/FeatureCoverageView";
 import { NotionClient } from "./notion/notionClient";
 
 // Result interfaces for internal mapping
 interface ConvertNoteResult {
-	type: ItemType;
+	type: EntityType;
 	effort: string;
 	alias?: string;
 }
@@ -30,9 +38,11 @@ import { Logger } from "./util/logger";
 import { generateId } from "./util/idGenerator";
 import {
 	DEFAULT_ACCOMPLISHMENT_TEMPLATE,
+	DEFAULT_FEATURE_TEMPLATE,
 	replacePlaceholders,
+	replaceFeaturePlaceholders,
 } from "./util/template";
-import { parseFrontmatter, updateFrontmatter, parseFrontmatterAndBody, createWithFrontmatter } from "./util/frontmatter";
+import { parseFrontmatter, parseAnyFrontmatter, updateFrontmatter, parseFrontmatterAndBody, createWithFrontmatter } from "./util/frontmatter";
 import {
 	loadCanvasData,
 	saveCanvasData,
@@ -82,19 +92,20 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	private isResizing: boolean = false;
 	// Debounce timers for MD file sync to Notion
 	private mdSyncDebounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
-	// Cache file path -> accomplishment ID for deletion sync
-	private fileAccomplishmentIdCache: Map<string, string> = new Map();
+	// Cache file path -> entity ID for deletion sync
+	private fileEntityIdCache: Map<string, string> = new Map();
 	// Bi-directional sync polling interval
 	private notionSyncIntervalId: ReturnType<typeof setInterval> | null = null;
 	// Debounce timer for edge sync (per canvas file)
 	private edgeSyncDebounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 	// Canvas visibility toggles state
-	private visibilityState: { tasks: boolean; stories: boolean; milestones: boolean; decisions: boolean; documents: boolean } = {
+	private visibilityState: { tasks: boolean; stories: boolean; milestones: boolean; decisions: boolean; documents: boolean; features: boolean } = {
 		tasks: true,
 		stories: true,
 		milestones: true,
 		decisions: true,
 		documents: true,
+		features: true,
 	};
 	// Control panel element reference
 	private controlPanelEl: HTMLElement | null = null;
@@ -166,6 +177,18 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 		// Add settings tab
 		this.addSettingTab(new CanvasStructuredItemsSettingTab(this.app, this));
 
+		// Register Feature Details View
+		this.registerView(
+			FEATURE_DETAILS_VIEW_TYPE,
+			(leaf) => new FeatureDetailsView(leaf)
+		);
+
+		// Register Feature Coverage View
+		this.registerView(
+			FEATURE_COVERAGE_VIEW_TYPE,
+			(leaf) => new FeatureCoverageView(leaf)
+		);
+
 		// Register commands
 		this.registerCommands();
 
@@ -231,7 +254,7 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 		this.app.workspace.onLayoutReady(async () => {
 			console.debug('[Canvas Plugin] Layout ready, initializing caches...');
 			await this.initializeCanvasNodeCache();
-			await this.initializeFileAccomplishmentIdCache();
+			await this.initializeFileEntityIdCache();
 			// Start bi-directional sync polling if enabled
 			this.startNotionSyncPolling();
 			// Apply visual styles to any open canvas views
@@ -446,6 +469,118 @@ private registerCommands(): void {
 			await this.focusOnInProgressEntities();
 		},
 	});
+
+	// Feature Entity Commands
+	this.addCommand({
+		id: "create-feature",
+		name: "Project Canvas: Create Feature",
+		callback: async () => {
+			await this.createFeature();
+		},
+	});
+
+	this.addCommand({
+		id: "set-feature-phase",
+		name: "Project Canvas: Set Feature Phase",
+		callback: async () => {
+			await this.setFeaturePhase();
+		},
+	});
+
+	this.addCommand({
+		id: "set-feature-tier",
+		name: "Project Canvas: Set Feature Tier",
+		callback: async () => {
+			await this.setFeatureTier();
+		},
+	});
+
+	this.addCommand({
+		id: "entity-nav-go-to-features",
+		name: "Entity Navigator: Go to Features",
+		callback: () => this.navigateToFeatures(),
+	});
+
+	// Feature Canvas Commands
+	this.addCommand({
+		id: "create-features-canvas",
+		name: "Project Canvas: Create Features Canvas",
+		callback: async () => {
+			await this.createFeaturesCanvas();
+		},
+	});
+
+	this.addCommand({
+		id: "auto-layout-features",
+		name: "Project Canvas: Auto-Layout Features Canvas",
+		callback: async () => {
+			await this.autoLayoutFeaturesCanvas();
+		},
+	});
+
+	this.addCommand({
+		id: "populate-features-canvas",
+		name: "Project Canvas: Populate Features Canvas from Vault",
+		callback: async () => {
+			await this.populateFeaturesCanvas();
+		},
+	});
+
+	this.addCommand({
+		id: "reconcile-relationships",
+		name: "Project Canvas: Reconcile All Relationships",
+		callback: async () => {
+			await this.reconcileAllRelationships();
+		},
+	});
+
+	this.addCommand({
+		id: "link-to-feature",
+		name: "Project Canvas: Link Current Entity to Feature",
+		callback: async () => {
+			await this.linkCurrentEntityToFeature();
+		},
+	});
+
+	this.addCommand({
+		id: "open-feature-details",
+		name: "Project Canvas: Open Feature Details Panel",
+		callback: async () => {
+			await this.activateFeatureDetailsView();
+		},
+	});
+
+	this.addCommand({
+		id: "view-feature-coverage",
+		name: "Project Canvas: View Feature Coverage Report",
+		callback: async () => {
+			await this.activateFeatureCoverageView();
+		},
+	});
+
+	this.addCommand({
+		id: "import-future-features",
+		name: "Project Canvas: Import from FUTURE_FEATURES.md",
+		callback: async () => {
+			await this.importFromFutureFeatures();
+		},
+	});
+
+	this.addCommand({
+		id: "suggest-feature-links",
+		name: "Project Canvas: Suggest Feature Links",
+		callback: async () => {
+			await this.suggestFeatureLinks();
+		},
+	});
+
+	this.addCommand({
+		id: "bulk-link-features",
+		name: "Project Canvas: Bulk Link Features",
+		callback: async () => {
+			await this.bulkLinkFeatures();
+		},
+	});
 }
 
 	/**
@@ -532,7 +667,7 @@ private registerCommands(): void {
 	 * Load template for a given type
 	 */
 	private async loadTemplate(
-		type: ItemType,
+		type: EntityType,
 		customPath?: string
 	): Promise<string> {
 		let templatePath: string;
@@ -541,8 +676,8 @@ private registerCommands(): void {
 		if (customPath) {
 			templatePath = customPath;
 		} else {
-			// Use default template path from settings
-			templatePath = this.settings.accomplishmentTemplatePath;
+			// Use default template path from settings (fallback to template folder)
+			templatePath = `${this.settings.templateFolder}/canvas-entity-template.md`;
 		}
 
 		const file = this.app.vault.getAbstractFileByPath(templatePath);
@@ -567,7 +702,7 @@ private registerCommands(): void {
 		existingNodeId: string | null,
 		title: string,
 		effort: string | undefined,
-		type: ItemType,
+		type: EntityType,
 		options?: { alias?: string },
 		inProgress?: boolean
 	): Promise<void> {
@@ -761,8 +896,10 @@ private registerCommands(): void {
 				return;
 			}
 
-			if (frontmatter.type !== "accomplishment") {
-				new Notice("This note is not an accomplishment");
+			// Verify it's a valid entity type
+			const validTypes = ['milestone', 'story', 'task', 'decision', 'document'];
+			if (!validTypes.includes(frontmatter.type)) {
+				new Notice("This note is not a valid entity type");
 				return;
 			}
 
@@ -813,7 +950,7 @@ private registerCommands(): void {
 				return;
 			}
 
-			// Find all file nodes that are plugin-created accomplishments
+			// Find all file nodes that are plugin-created entities
 			const fileNodes = canvasData.nodes.filter(
 				(node) => node.type === "file" && node.file?.endsWith(".md")
 			);
@@ -828,8 +965,8 @@ private registerCommands(): void {
 			let errorCount = 0;
 
 			// Maps for dependency sync
-			const nodeIdToAccomplishmentId: Map<string, string> = new Map();
-			const accomplishmentIdToNotionPageId: Map<string, string> = new Map();
+			const nodeIdToEntityId: Map<string, string> = new Map();
+			const entityIdToNotionPageId: Map<string, string> = new Map();
 
 			new Notice(`Pass 1: Syncing ${fileNodes.length} notes to Notion...`);
 
@@ -842,26 +979,26 @@ private registerCommands(): void {
 				}
 
 				try {
-					// Read frontmatter to check if it's a plugin-created accomplishment
+					// Read frontmatter to check if it's a plugin-created entity
 					const content = await this.app.vault.read(file);
 					const frontmatter = parseFrontmatter(content);
 
-					if (!frontmatter || frontmatter.type !== "accomplishment" || !frontmatter.created_by_plugin) {
+					if (!frontmatter || !frontmatter.created_by_plugin) {
 						skippedCount++;
 						continue;
 					}
 
-					// Build node ID -> accomplishment ID mapping
+					// Build node ID -> entity ID mapping
 					if (frontmatter.id) {
-						nodeIdToAccomplishmentId.set(node.id, frontmatter.id);
+						nodeIdToEntityId.set(node.id, frontmatter.id);
 					}
 
 					// Sync the file
 					const pageId = await this.notionClient.syncNote(frontmatter);
 
-					// Build accomplishment ID -> Notion page ID mapping
+					// Build entity ID -> Notion page ID mapping
 					if (frontmatter.id) {
-						accomplishmentIdToNotionPageId.set(frontmatter.id, pageId);
+						entityIdToNotionPageId.set(frontmatter.id, pageId);
 					}
 
 					// Update note with page ID if it was created
@@ -892,24 +1029,24 @@ private registerCommands(): void {
 					const targetNodeId = edge.toNode;
 					const dependencyNodeId = edge.fromNode;
 
-					const targetAccomplishmentId = nodeIdToAccomplishmentId.get(targetNodeId);
-					const dependencyAccomplishmentId = nodeIdToAccomplishmentId.get(dependencyNodeId);
+					const targetEntityId = nodeIdToEntityId.get(targetNodeId);
+					const dependencyEntityId = nodeIdToEntityId.get(dependencyNodeId);
 
-					if (targetAccomplishmentId && dependencyAccomplishmentId) {
-						const deps = dependenciesByTarget.get(targetAccomplishmentId) || [];
-						deps.push(dependencyAccomplishmentId);
-						dependenciesByTarget.set(targetAccomplishmentId, deps);
+					if (targetEntityId && dependencyEntityId) {
+						const deps = dependenciesByTarget.get(targetEntityId) || [];
+						deps.push(dependencyEntityId);
+						dependenciesByTarget.set(targetEntityId, deps);
 					}
 				}
 
 				// Update dependencies for each target
-				for (const [targetAccomplishmentId, dependencyAccomplishmentIds] of dependenciesByTarget) {
-					const targetPageId = accomplishmentIdToNotionPageId.get(targetAccomplishmentId);
+				for (const [targetEntityId, dependencyEntityIds] of dependenciesByTarget) {
+					const targetPageId = entityIdToNotionPageId.get(targetEntityId);
 					if (!targetPageId) continue;
 
-					// Convert accomplishment IDs to Notion page IDs
-					const dependencyPageIds = dependencyAccomplishmentIds
-						.map(id => accomplishmentIdToNotionPageId.get(id))
+					// Convert entity IDs to Notion page IDs
+					const dependencyPageIds = dependencyEntityIds
+						.map(id => entityIdToNotionPageId.get(id))
 						.filter((id): id is string => id !== undefined);
 
 					if (dependencyPageIds.length > 0) {
@@ -917,7 +1054,7 @@ private registerCommands(): void {
 							await this.notionClient.updateDependencies(targetPageId, dependencyPageIds);
 							dependencySyncCount++;
 						} catch (error) {
-							this.logger?.error("Failed to sync dependencies", { targetAccomplishmentId, error });
+							this.logger?.error("Failed to sync dependencies", { targetEntityId, error });
 							dependencyErrorCount++;
 						}
 					}
@@ -1344,6 +1481,7 @@ private registerCommands(): void {
 			{ key: "tasks", label: "T", title: "Toggle Tasks" },
 			{ key: "decisions", label: "De", title: "Toggle Decisions" },
 			{ key: "documents", label: "Do", title: "Toggle Documents" },
+			{ key: "features", label: "F", title: "Toggle Features" },
 		] as const;
 
 		for (const { key, label, title } of types) {
@@ -1410,6 +1548,10 @@ private registerCommands(): void {
 					<input type="checkbox" data-type="documents" ${this.visibilityState.documents ? "checked" : ""}>
 					<span class="canvas-pm-toggle-label">Documents</span>
 				</label>
+				<label class="canvas-pm-toggle">
+					<input type="checkbox" data-type="features" ${this.visibilityState.features ? "checked" : ""}>
+					<span class="canvas-pm-toggle-label">Features</span>
+				</label>
 			</div>
 		`;
 
@@ -1417,7 +1559,7 @@ private registerCommands(): void {
 		panel.querySelectorAll("input[type='checkbox']").forEach((checkbox) => {
 			checkbox.addEventListener("change", (e) => {
 				const target = e.target as HTMLInputElement;
-				const type = target.getAttribute("data-type") as "tasks" | "stories" | "milestones" | "decisions" | "documents";
+				const type = target.getAttribute("data-type") as "tasks" | "stories" | "milestones" | "decisions" | "documents" | "features";
 				if (type) {
 					this.visibilityState[type] = target.checked;
 					this.applyVisibilityState(canvasEl);
@@ -1463,6 +1605,7 @@ private registerCommands(): void {
 		targetEl.classList.toggle("canvas-pm-hide-milestones", !this.visibilityState.milestones);
 		targetEl.classList.toggle("canvas-pm-hide-decisions", !this.visibilityState.decisions);
 		targetEl.classList.toggle("canvas-pm-hide-documents", !this.visibilityState.documents);
+		targetEl.classList.toggle("canvas-pm-hide-features", !this.visibilityState.features);
 
 		console.debug("[Canvas Plugin] Applied visibility state", this.visibilityState);
 	}
@@ -1483,9 +1626,9 @@ private registerCommands(): void {
 	async ensureTemplatesExist(force = false): Promise<void> {
 		const templates = [
 			{
-				path: this.settings.accomplishmentTemplatePath,
+				path: `${this.settings.templateFolder}/canvas-entity-template.md`,
 				content: DEFAULT_ACCOMPLISHMENT_TEMPLATE,
-				name: "Accomplishment",
+				name: "Entity",
 			},
 		];
 
@@ -1626,6 +1769,92 @@ private registerCommands(): void {
 					.setDisabled(implementors.length === 0)
 					.onClick(() => this.openEntities(implementors));
 			});
+		}
+
+		// Feature-related menu items
+		menu.addSeparator();
+
+		// For features: show implemented_by, documented_by, decided_by
+		if (entity.type === 'feature') {
+			const implementedBy = (entity as any).implemented_by || [];
+			const documentedBy = (entity as any).documented_by || [];
+			const decidedBy = (entity as any).decided_by || [];
+
+			menu.addItem((item: MenuItem) => {
+				item
+					.setTitle(`Implemented By (${implementedBy.length})`)
+					.setIcon("check-circle")
+					.setDisabled(implementedBy.length === 0)
+					.onClick(() => this.navigateToEntityIds(implementedBy));
+			});
+
+			menu.addItem((item: MenuItem) => {
+				item
+					.setTitle(`Documented By (${documentedBy.length})`)
+					.setIcon("file-text")
+					.setDisabled(documentedBy.length === 0)
+					.onClick(() => this.navigateToEntityIds(documentedBy));
+			});
+
+			menu.addItem((item: MenuItem) => {
+				item
+					.setTitle(`Decided By (${decidedBy.length})`)
+					.setIcon("scale")
+					.setDisabled(decidedBy.length === 0)
+					.onClick(() => this.navigateToEntityIds(decidedBy));
+			});
+		}
+
+		// For non-features: show link to feature option
+		if (entity.type !== 'feature') {
+			menu.addItem((item: MenuItem) => {
+				item
+					.setTitle("Link to Feature...")
+					.setIcon("star")
+					.onClick(() => this.linkCurrentEntityToFeature());
+			});
+
+			// Show which features this entity implements/documents/affects
+			const implements_ = (entity as any).implements || [];
+			const documents_ = (entity as any).documents || [];
+			const affects_ = (entity as any).affects || [];
+			const allFeatures = [...implements_, ...documents_, ...affects_];
+
+			if (allFeatures.length > 0) {
+				menu.addItem((item: MenuItem) => {
+					item
+						.setTitle(`Go to Features (${allFeatures.length})`)
+						.setIcon("star")
+						.onClick(() => this.navigateToEntityIds(allFeatures));
+				});
+			}
+		}
+
+		// Open Feature Details panel
+		menu.addItem((item: MenuItem) => {
+			item
+				.setTitle("Open Feature Details Panel")
+				.setIcon("layout-sidebar-right")
+				.onClick(() => this.activateFeatureDetailsView());
+		});
+	}
+
+	/**
+	 * Navigate to entities by their IDs
+	 */
+	private async navigateToEntityIds(ids: string[]): Promise<void> {
+		if (!this.entityIndex?.isReady()) return;
+
+		const entries: EntityIndexEntry[] = [];
+		for (const id of ids) {
+			const entry = this.entityIndex.get(id);
+			if (entry) entries.push(entry);
+		}
+
+		if (entries.length > 0) {
+			this.openEntities(entries);
+		} else {
+			new Notice("No matching entities found");
 		}
 	}
 
@@ -1985,7 +2214,7 @@ private registerCommands(): void {
 				mode = "convert";
 			} else if (nodeType === "file" && nodeInFile.file) {
 				// Check if it's a plugin-created note by checking canvas metadata OR MD frontmatter
-				const hasPluginMetadata = metadata?.plugin === "canvas-project-manager" || metadata?.plugin === "structured-canvas-notes" || metadata?.plugin === "canvas-accomplishments";
+				const hasPluginMetadata = metadata?.plugin === "canvas-project-manager" || metadata?.plugin === "structured-canvas-notes";
 				const isPluginFile = await this.isPluginCreatedFile(nodeInFile.file);
 
 				if (hasPluginMetadata || isPluginFile) {
@@ -2466,8 +2695,8 @@ private registerCommands(): void {
 		body: string
 	): Promise<void> {
 		try {
-			// Generate ID
-			const id = generateId(this.app, this.settings);
+			// Generate ID based on entity type
+			const id = generateId(this.app, this.settings, result.type);
 
 			// Keep the same file path
 			const newPath = file.path;
@@ -2482,7 +2711,7 @@ private registerCommands(): void {
 				id,
 				status: this.normalizeStatus(existingFrontmatter.status),
 				priority: this.normalizePriority(
-					existingFrontmatter.priority || (result.type === "accomplishment" ? "High" : "Medium")
+					existingFrontmatter.priority || "Medium"
 				),
 				depends_on: existingFrontmatter.depends_on || [],
 				created_by_plugin: existingFrontmatter.created_by_plugin ?? true,
@@ -2645,14 +2874,14 @@ private registerCommands(): void {
 				if (existingFile instanceof TFile) {
 					const fileContent = await this.app.vault.read(existingFile);
 					const parsed = parseFrontmatter(fileContent);
-					id = parsed?.id || generateId(this.app, this.settings);
+					id = parsed?.id || generateId(this.app, this.settings, result.type);
 					console.debug('[Canvas Plugin] Read ID from existing file:', id);
 				} else {
-					id = generateId(this.app, this.settings);
+					id = generateId(this.app, this.settings, result.type);
 				}
 			} else {
 				// Generate new path (conversion flow)
-				id = generateId(this.app, this.settings);
+				id = generateId(this.app, this.settings, result.type);
 				const baseFolder = canvasFile.parent?.path || this.settings.notesBaseFolder;
 				// Use title as filename, preserving whitespaces
 				notePath = generateUniqueFilename(
@@ -2934,7 +3163,7 @@ private registerCommands(): void {
 	 * Build canvas metadata payload for structured notes
 	 */
 	private buildCanvasMetadata(
-		type: ItemType,
+		type: EntityType,
 		title: string,
 		effort?: string,
 		options?: { alias?: string },
@@ -2943,7 +3172,7 @@ private registerCommands(): void {
 		const metadata: CanvasNode["metadata"] = {
 			plugin: "canvas-project-manager",
 			alias: options?.alias ?? title,
-			shape: this.settings.shapeAccomplishment,
+			shape: "entity",
 			showId: this.settings.showIdInCanvas,
 		};
 
@@ -2986,11 +3215,11 @@ private registerCommands(): void {
 	}
 
 	/**
-	 * Initialize cache of file path -> accomplishment ID for deletion sync
+	 * Initialize cache of file path -> entity ID for deletion sync
 	 */
-	private async initializeFileAccomplishmentIdCache(): Promise<void> {
+	private async initializeFileEntityIdCache(): Promise<void> {
 		try {
-			console.debug('[Canvas Plugin] Initializing file accomplishment ID cache...');
+			console.debug('[Canvas Plugin] Initializing file entity ID cache...');
 			const mdFiles = this.app.vault.getMarkdownFiles();
 			let cachedCount = 0;
 
@@ -3000,7 +3229,7 @@ private registerCommands(): void {
 					const frontmatter = parseFrontmatter(content);
 
 					if (frontmatter && isPluginCreatedNote(frontmatter) && frontmatter.id) {
-						this.fileAccomplishmentIdCache.set(file.path, frontmatter.id);
+						this.fileEntityIdCache.set(file.path, frontmatter.id);
 						cachedCount++;
 					}
 				} catch (error) {
@@ -3008,10 +3237,10 @@ private registerCommands(): void {
 				}
 			}
 
-			console.debug('[Canvas Plugin] File accomplishment ID cache initialized with', cachedCount, 'entries');
+			console.debug('[Canvas Plugin] File entity ID cache initialized with', cachedCount, 'entries');
 		} catch (error) {
-			console.error('[Canvas Plugin] Failed to initialize file accomplishment ID cache:', error);
-			this.logger?.error("Failed to initialize file accomplishment ID cache", error);
+			console.error('[Canvas Plugin] Failed to initialize file entity ID cache:', error);
+			this.logger?.error("Failed to initialize file entity ID cache", error);
 		}
 	}
 
@@ -3188,7 +3417,7 @@ private registerCommands(): void {
 					continue;
 				}
 
-				// Get the accomplishment ID of the dependency (fromNode)
+				// Get the entity ID of the dependency (fromNode)
 				const fromFile = this.app.vault.getAbstractFileByPath(fromNode.file);
 				if (!(fromFile instanceof TFile)) {
 					continue;
@@ -3296,7 +3525,8 @@ private registerCommands(): void {
 	 * Sync reverse relationships in MD files based on ENTITY_SCHEMAS.md spec
 	 * This auto-syncs: blocks (reverse of depends_on), children (reverse of parent),
 	 * implemented_by (reverse of implements), superseded_by (reverse of supersedes),
-	 * next_version (reverse of previous_version)
+	 * next_version (reverse of previous_version), documented_by (reverse of documents),
+	 * decided_by (reverse of affects)
 	 */
 	private async syncReverseRelationships(canvasFile: TFile): Promise<void> {
 		console.debug('[Canvas Plugin] ===== Syncing reverse relationships =====');
@@ -3305,11 +3535,13 @@ private registerCommands(): void {
 			const canvasData = await loadCanvasData(this.app, canvasFile);
 
 			// Build maps for all relationships
-			// entityId -> { blocks: [], children: [], implementedBy: [], supersededBy: string, nextVersion: string }
+			// entityId -> { blocks: [], children: [], implementedBy: [], documentedBy: [], decidedBy: [], supersededBy: string, nextVersion: string }
 			const reverseRels = new Map<string, {
 				blocks: string[];
 				children: string[];
 				implementedBy: string[];
+				documentedBy: string[];
+				decidedBy: string[];
 				supersededBy?: string;
 				nextVersion?: string;
 			}>();
@@ -3321,6 +3553,8 @@ private registerCommands(): void {
 						blocks: [],
 						children: [],
 						implementedBy: [],
+						documentedBy: [],
+						decidedBy: [],
 					});
 				}
 				return reverseRels.get(entityId)!;
@@ -3385,11 +3619,32 @@ private registerCommands(): void {
 					}
 
 					// implements -> implemented_by (reverse)
+					// Milestones/Stories implement Features
 					const implementsArr = parseYamlArray(fm, 'implements');
-					for (const docId of implementsArr) {
-						const docRels = ensureEntity(docId);
-						if (!docRels.implementedBy.includes(entityId)) {
-							docRels.implementedBy.push(entityId);
+					for (const featureId of implementsArr) {
+						const featureRels = ensureEntity(featureId);
+						if (!featureRels.implementedBy.includes(entityId)) {
+							featureRels.implementedBy.push(entityId);
+						}
+					}
+
+					// documents -> documented_by (reverse)
+					// Documents document Features
+					const documentsArr = parseYamlArray(fm, 'documents');
+					for (const featureId of documentsArr) {
+						const featureRels = ensureEntity(featureId);
+						if (!featureRels.documentedBy.includes(entityId)) {
+							featureRels.documentedBy.push(entityId);
+						}
+					}
+
+					// affects -> decided_by (reverse)
+					// Decisions affect Features
+					const affectsArr = parseYamlArray(fm, 'affects');
+					for (const featureId of affectsArr) {
+						const featureRels = ensureEntity(featureId);
+						if (!featureRels.decidedBy.includes(entityId)) {
+							featureRels.decidedBy.push(entityId);
 						}
 					}
 
@@ -3438,6 +3693,8 @@ private registerCommands(): void {
 					const currentBlocks = parseYamlArray(fm, 'blocks');
 					const currentChildren = parseYamlArray(fm, 'children');
 					const currentImplementedBy = parseYamlArray(fm, 'implemented_by');
+					const currentDocumentedBy = parseYamlArray(fm, 'documented_by');
+					const currentDecidedBy = parseYamlArray(fm, 'decided_by');
 					const supersededByMatch = fm.match(/^superseded_by:\s*(.+)$/m);
 					const currentSupersededBy = supersededByMatch?.[1]?.trim();
 					const nextVersionMatch = fm.match(/^next_version:\s*(.+)$/m);
@@ -3447,10 +3704,12 @@ private registerCommands(): void {
 					const blocksChanged = JSON.stringify([...currentBlocks].sort()) !== JSON.stringify([...rels.blocks].sort());
 					const childrenChanged = JSON.stringify([...currentChildren].sort()) !== JSON.stringify([...rels.children].sort());
 					const implementedByChanged = JSON.stringify([...currentImplementedBy].sort()) !== JSON.stringify([...rels.implementedBy].sort());
+					const documentedByChanged = JSON.stringify([...currentDocumentedBy].sort()) !== JSON.stringify([...rels.documentedBy].sort());
+					const decidedByChanged = JSON.stringify([...currentDecidedBy].sort()) !== JSON.stringify([...rels.decidedBy].sort());
 					const supersededByChanged = currentSupersededBy !== rels.supersededBy;
 					const nextVersionChanged = currentNextVersion !== rels.nextVersion;
 
-					if (blocksChanged || childrenChanged || implementedByChanged || supersededByChanged || nextVersionChanged) {
+					if (blocksChanged || childrenChanged || implementedByChanged || documentedByChanged || decidedByChanged || supersededByChanged || nextVersionChanged) {
 						// Build update object
 						const updates: Record<string, unknown> = {
 							updated: new Date().toISOString(),
@@ -3464,6 +3723,12 @@ private registerCommands(): void {
 						}
 						if (implementedByChanged && rels.implementedBy.length > 0) {
 							updates.implemented_by = rels.implementedBy;
+						}
+						if (documentedByChanged && rels.documentedBy.length > 0) {
+							updates.documented_by = rels.documentedBy;
+						}
+						if (decidedByChanged && rels.decidedBy.length > 0) {
+							updates.decided_by = rels.decidedBy;
 						}
 						if (supersededByChanged && rels.supersededBy) {
 							updates.superseded_by = rels.supersededBy;
@@ -3508,9 +3773,9 @@ private registerCommands(): void {
 				return;
 			}
 
-			// Cache the accomplishment ID for deletion sync
+			// Cache the entity ID for deletion sync
 			if (frontmatter.id) {
-				this.fileAccomplishmentIdCache.set(file.path, frontmatter.id);
+				this.fileEntityIdCache.set(file.path, frontmatter.id);
 			}
 
 			// Get the canvas source
@@ -3599,28 +3864,28 @@ private registerCommands(): void {
 		}
 
 		try {
-			// Get the accomplishment ID from cache
-			const accomplishmentId = this.fileAccomplishmentIdCache.get(file.path);
-			if (!accomplishmentId) {
-				console.debug('[Canvas Plugin] No cached accomplishment ID for deleted file:', file.path);
+			// Get the entity ID from cache
+			const entityId = this.fileEntityIdCache.get(file.path);
+			if (!entityId) {
+				console.debug('[Canvas Plugin] No cached entity ID for deleted file:', file.path);
 				return;
 			}
 
 			// Remove from cache
-			this.fileAccomplishmentIdCache.delete(file.path);
+			this.fileEntityIdCache.delete(file.path);
 
-			// Find the Notion page by accomplishment ID
-			const page = await this.notionClient.findPageByAccomplishmentId(accomplishmentId);
+			// Find the Notion page by entity ID
+			const page = await this.notionClient.findPageByEntityId(entityId);
 			if (!page) {
-				console.debug('[Canvas Plugin] No Notion page found for accomplishment:', accomplishmentId);
+				console.debug('[Canvas Plugin] No Notion page found for entity:', entityId);
 				return;
 			}
 
 			// Archive the page
-			console.debug('[Canvas Plugin] Archiving Notion page for deleted file:', file.path, 'accomplishment:', accomplishmentId);
+			console.debug('[Canvas Plugin] Archiving Notion page for deleted file:', file.path, 'entity:', entityId);
 			await this.notionClient.archivePage(page.id);
 			console.debug('[Canvas Plugin] Notion page archived successfully');
-			new Notice(`Notion page archived for deleted note: ${accomplishmentId}`);
+			new Notice(`Notion page archived for deleted note: ${entityId}`);
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to archive Notion page:', error);
 			this.logger?.error("Failed to archive Notion page for deleted file", error);
@@ -3748,14 +4013,14 @@ private registerCommands(): void {
 
 			for (const page of pages) {
 				try {
-					// Get accomplishment ID from page
+					// Get entity ID from page
 					const notionPage = page as NotionPage;
 					const idProperty = notionPage.properties?.ID;
-					const accomplishmentId = idProperty?.rich_text?.[0]?.plain_text;
-					if (!accomplishmentId) continue;
+					const entityId = idProperty?.rich_text?.[0]?.plain_text;
+					if (!entityId) continue;
 
-					// Find local file by accomplishment ID
-					const localFilePath = this.findFileByAccomplishmentId(accomplishmentId);
+					// Find local file by entity ID
+					const localFilePath = this.findFileByEntityId(entityId);
 					if (!localFilePath) continue;
 
 					const localFile = this.app.vault.getAbstractFileByPath(localFilePath);
@@ -3792,11 +4057,11 @@ private registerCommands(): void {
 	}
 
 	/**
-	 * Find local file path by accomplishment ID
+	 * Find local file path by entity ID
 	 */
-	private findFileByAccomplishmentId(accomplishmentId: string): string | null {
-		for (const [filePath, id] of this.fileAccomplishmentIdCache) {
-			if (id === accomplishmentId) {
+	private findFileByEntityId(entityId: string): string | null {
+		for (const [filePath, id] of this.fileEntityIdCache) {
+			if (id === entityId) {
 				return filePath;
 			}
 		}
@@ -3969,14 +4234,13 @@ private registerCommands(): void {
 		console.log('Base folder:', baseFolder);
 		new Notice(`🔍 Scanning for archived files in: ${baseFolder}`);
 
-		const entityTypes = ['milestone', 'story', 'task', 'decision', 'document', 'accomplishment'];
+		const entityTypes = ['milestone', 'story', 'task', 'decision', 'document'];
 		const typeToFolder: Record<string, string> = {
 			milestone: 'milestones',
 			story: 'stories',
 			task: 'tasks',
 			decision: 'decisions',
 			document: 'documents',
-			accomplishment: 'accomplishments',
 		};
 
 		let movedCount = 0;
@@ -4258,7 +4522,7 @@ private registerCommands(): void {
 			console.log('Existing entity IDs on canvas:', existingEntityIds.size);
 
 			// Entity types to scan for (V2 schema)
-			const entityTypes = ['milestone', 'story', 'task', 'decision', 'document', 'accomplishment'];
+			const entityTypes = ['milestone', 'story', 'task', 'decision', 'document', 'feature'];
 
 			// Node sizes by entity type
 			const nodeSizes: Record<string, { width: number; height: number }> = {
@@ -4267,7 +4531,7 @@ private registerCommands(): void {
 				task: { width: 160, height: 100 },
 				decision: { width: 180, height: 120 },
 				document: { width: 200, height: 150 },
-				accomplishment: { width: 200, height: 150 },
+				feature: { width: 300, height: 220 },
 			};
 
 			// Colors by entity type (Obsidian canvas colors 1-6)
@@ -4277,7 +4541,7 @@ private registerCommands(): void {
 				task: "2",         // green
 				decision: "4",     // orange
 				document: "5",     // yellow
-				accomplishment: "3", // blue (default)
+				feature: "1",      // red
 			};
 
 			console.log('\n=== STAGE 3: SCAN VAULT FOR ENTITIES ===');
@@ -4361,6 +4625,8 @@ private registerCommands(): void {
 
 				const entityType = typeMatch[1].trim().toLowerCase();
 				if (!entityTypes.includes(entityType)) continue;
+
+	
 
 				// Skip archived items (status: archived or archived: true)
 				const statusMatch = frontmatterText.match(/^status:\s*(.+)$/m);
@@ -4569,7 +4835,6 @@ private registerCommands(): void {
 				'task': 2,
 				'decision': 3,
 				'document': 4,
-				'accomplishment': 5,
 			};
 
 			// Get entities by type
@@ -4767,7 +5032,7 @@ private registerCommands(): void {
 					const bHasDeps = b.dependsOn.length > 0 ? 1 : 0;
 					if (bHasDeps !== aHasDeps) return bHasDeps - aHasDeps;
 
-					const typeOrder = ['story', 'task', 'decision', 'document', 'accomplishment'];
+					const typeOrder = ['story', 'task', 'decision', 'document'];
 					const aTypeIdx = typeOrder.indexOf(a.type);
 					const bTypeIdx = typeOrder.indexOf(b.type);
 					if (aTypeIdx !== bTypeIdx) return aTypeIdx - bTypeIdx;
@@ -5044,13 +5309,13 @@ private registerCommands(): void {
 					}
 				}
 
-				// Create edges for implemented_by relationships (document -> story/milestone)
-				// Edge goes FROM document TO implementer (same direction as implements)
+				// Create edges for implemented_by relationships (feature/document -> story/milestone)
+				// Edge goes FROM feature/document TO implementer
 				for (const implId of info.implementedBy || []) {
 					const implNodeId = allEntityToNodeMap.get(implId);
 					if (implNodeId) {
 						if (!edgeExists(canvasDataForEdges, sourceNodeId, implNodeId)) {
-							// Edge: DOC --> M/S (document is upstream of implementer)
+							// Edge: Feature/Doc --> M/S (feature/document is upstream of implementer)
 							const edge = createEdge(sourceNodeId, implNodeId, undefined, 'right', 'left');
 							newEdges.push(edge);
 							if (info.isNew) edgesFromNewNodes++; else edgesFromExistingNodes++;
@@ -5224,9 +5489,11 @@ private registerCommands(): void {
 				taskSpacing: 700,           // Horizontal spacing between story and tasks (doubled)
 				decisionSpacing: 800,       // Horizontal spacing for decisions (left of milestone)
 				documentSpacing: 1000,      // Horizontal spacing for documents (left of milestone)
+				featureSpacing: 1200,       // Horizontal spacing for features (left of implementers)
 				verticalSpacing: 150,       // Vertical spacing between dependency nodes
 				decisionVerticalSpacing: 260, // Vertical spacing for decisions (60 + 200)
 				documentVerticalSpacing: 460, // Vertical spacing for documents (60 + 400)
+				featureVerticalSpacing: 200,  // Vertical spacing for features
 				streamSpacing: 400,         // Vertical spacing between workstream lanes
 				nodeWidth: 462,
 				nodeHeight: 250,
@@ -5244,6 +5511,7 @@ private registerCommands(): void {
 				workstream: string; // engineering, business, etc.
 				filePath: string;
 				enables: string[];  // Entity IDs this decision enables/unblocks
+				blocks: string[];   // Entity IDs this decision blocks
 				parent?: string;    // Parent entity ID (e.g., M-021 for a story)
 				dependsOn: string[];  // Entity IDs this depends on (for ordering)
 				implementedBy: string[];  // Entity IDs that implement this document
@@ -5287,6 +5555,7 @@ private registerCommands(): void {
 					const idMatch = fmText.match(/^id:\s*(.+)$/m);
 					const parentMatch = fmText.match(/^parent:\s*(.+)$/m);
 					const enables = parseYamlArrayRepos(fmText, 'enables');
+					const blocksArr = parseYamlArrayRepos(fmText, 'blocks');
 					const dependsOnArr = parseYamlArrayRepos(fmText, 'depends_on');
 					const implementedByArr = parseYamlArrayRepos(fmText, 'implemented_by');
 
@@ -5300,6 +5569,7 @@ private registerCommands(): void {
 						workstream: workstreamMatch?.[1]?.trim().toLowerCase() || 'unassigned',
 						filePath: node.file,
 						enables,
+						blocks: blocksArr,
 						parent,
 						dependsOn: dependsOnArr,
 						implementedBy: implementedByArr,
@@ -5518,11 +5788,83 @@ private registerCommands(): void {
 					const stories = allDeps.filter(id => nodeMeta.get(id)?.type === 'story');
 					const tasks = allDeps.filter(id => nodeMeta.get(id)?.type === 'task');
 					const decisions = allDeps.filter(id => nodeMeta.get(id)?.type === 'decision');
-					const documents = allDeps.filter(id => nodeMeta.get(id)?.type === 'document');
+					let documents = allDeps.filter(id => nodeMeta.get(id)?.type === 'document');
+					const features = allDeps.filter(id => nodeMeta.get(id)?.type === 'feature');
 					const others = allDeps.filter(id => {
 						const t = nodeMeta.get(id)?.type;
-						return t !== 'story' && t !== 'task' && t !== 'decision' && t !== 'document';
+						return t !== 'story' && t !== 'task' && t !== 'decision' && t !== 'document' && t !== 'feature';
 					});
+
+					// ENHANCEMENT: Also include documents that have implemented_by pointing to this milestone
+					// These documents don't have parent field but are implemented by this milestone
+					if (mEntityId) {
+						for (const [nodeId, meta] of nodeMeta.entries()) {
+							if (meta.type !== 'document') continue;
+							if (documents.includes(nodeId)) continue; // Already included via parent
+							if (!meta.implementedBy?.length) continue;
+
+							// Check if this document is implemented by this milestone
+							const implementerMilestones = new Set<string>();
+							for (const implEntityId of meta.implementedBy) {
+								if (implEntityId.startsWith('M-')) {
+									implementerMilestones.add(implEntityId);
+								} else {
+									// Find the parent milestone of this implementer
+									const implNodeId = entityIdToNodeId.get(implEntityId);
+									if (implNodeId) {
+										const implMeta = nodeMeta.get(implNodeId);
+										if (implMeta?.parent) {
+											implementerMilestones.add(implMeta.parent);
+										}
+									}
+								}
+							}
+
+							// Only include if this milestone is the ONLY implementer (single-milestone doc)
+							if (implementerMilestones.size === 1 && implementerMilestones.has(mEntityId)) {
+								documents.push(nodeId);
+								allDeps.push(nodeId);
+								if (!nodeToMilestone.has(nodeId)) {
+									nodeToMilestone.set(nodeId, mId);
+								}
+								console.log(`  Document ${meta.entityId} added to ${mEntityId} via implemented_by`);
+							}
+						}
+
+						// Also include features that have implemented_by pointing to this milestone
+						for (const [nodeId, meta] of nodeMeta.entries()) {
+							if (meta.type !== 'feature') continue;
+							if (features.includes(nodeId)) continue; // Already included via parent
+							if (!meta.implementedBy?.length) continue;
+
+							// Check if this feature is implemented by this milestone
+							const implementerMilestones = new Set<string>();
+							for (const implEntityId of meta.implementedBy) {
+								if (implEntityId.startsWith('M-')) {
+									implementerMilestones.add(implEntityId);
+								} else {
+									// Find the parent milestone of this implementer
+									const implNodeId = entityIdToNodeId.get(implEntityId);
+									if (implNodeId) {
+										const implMeta = nodeMeta.get(implNodeId);
+										if (implMeta?.parent) {
+											implementerMilestones.add(implMeta.parent);
+										}
+									}
+								}
+							}
+
+							// Only include if this milestone is the ONLY implementer (single-milestone feature)
+							if (implementerMilestones.size === 1 && implementerMilestones.has(mEntityId)) {
+								features.push(nodeId);
+								allDeps.push(nodeId);
+								if (!nodeToMilestone.has(nodeId)) {
+									nodeToMilestone.set(nodeId, mId);
+								}
+								console.log(`  Feature ${meta.entityId} added to ${mEntityId} via implemented_by`);
+							}
+						}
+					}
 
 					const storyEntityIds = stories.map(id => nodeMeta.get(id)?.entityId || id);
 					console.log(`  Stories for ${mEntityId}: ${storyEntityIds.join(', ') || 'none'}`);
@@ -5595,27 +5937,47 @@ private registerCommands(): void {
 						return sorted;
 					};
 
-					// Sort stories by dependency order
-					const sortedStories = sortByDependencies(stories);
-					let storyY = storyDirection * (config.nodeHeight / 2 + config.verticalSpacing);
-					for (const storyId of sortedStories) {
-						relativePositions.set(storyId, {
-							x: -config.storySpacing,
-							y: storyY,
-						});
-						storyY += storyDirection * (config.nodeHeight + config.verticalSpacing);
-					}
+					// ============================================================
+					// ENHANCEMENT: Adaptive multi-column layout for stories/tasks
+					// 1-4 items → 1 column, 5-8 items → 2 columns, 9+ items → 3 columns
+					// ============================================================
+					const getAdaptiveColumns = (count: number): number => {
+						if (count <= 4) return 1;
+						if (count <= 8) return 2;
+						return 3;
+					};
 
-					// Sort tasks by dependency order
+					const positionInGrid = (
+						nodeIds: string[],
+						baseX: number,
+						direction: number,
+						columnSpacing: number
+					) => {
+						const columns = getAdaptiveColumns(nodeIds.length);
+						const rows = Math.ceil(nodeIds.length / columns);
+
+						// Position nodes in grid: rightmost column first (closest to milestone)
+						// Within each column, top to bottom (or bottom to top based on direction)
+						for (let i = 0; i < nodeIds.length; i++) {
+							const col = columns - 1 - (i % columns); // Rightmost column = 0, leftmost = columns-1
+							const row = Math.floor(i / columns);
+
+							const x = baseX - (col * (config.nodeWidth + columnSpacing));
+							const y = direction * (config.nodeHeight / 2 + config.verticalSpacing + row * (config.nodeHeight + config.verticalSpacing));
+
+							relativePositions.set(nodeIds[i], { x, y });
+						}
+					};
+
+					// Sort stories by dependency order and position in adaptive grid
+					const sortedStories = sortByDependencies(stories);
+					const storyColumnSpacing = 80; // Gap between story columns
+					positionInGrid(sortedStories, -config.storySpacing, storyDirection, storyColumnSpacing);
+
+					// Sort tasks by dependency order and position in adaptive grid
 					const sortedTasks = sortByDependencies(tasks);
-					let taskY = storyDirection * (config.nodeHeight / 2 + config.verticalSpacing);
-					for (const taskId of sortedTasks) {
-						relativePositions.set(taskId, {
-							x: -config.storySpacing - config.taskSpacing,
-							y: taskY,
-						});
-						taskY += storyDirection * (config.nodeHeight + config.verticalSpacing);
-					}
+					const taskColumnSpacing = 80; // Gap between task columns
+					positionInGrid(sortedTasks, -config.storySpacing - config.taskSpacing, storyDirection, taskColumnSpacing);
 
 					// Position decisions to the left of milestone (same side as stories/tasks but different spacing)
 					let decisionY = storyDirection * (config.nodeHeight / 2 + config.decisionVerticalSpacing);
@@ -5631,10 +5993,12 @@ private registerCommands(): void {
 					// ENHANCEMENT 2: Position documents on OPPOSITE side of stories
 					// Documents go below when stories are above, and vice versa
 					// Multi-milestone documents are deferred to STEP 8.5
+					// Use grid layout for multiple documents
 					// ============================================================
 					const documentDirection = -storyDirection; // Opposite of stories
-					let documentY = documentDirection * (config.nodeHeight / 2 + config.documentVerticalSpacing);
 
+					// Filter out multi-milestone documents first
+					const singleMilestoneDocuments: string[] = [];
 					for (const documentId of documents) {
 						const docMeta = nodeMeta.get(documentId);
 
@@ -5665,12 +6029,82 @@ private registerCommands(): void {
 							}
 						}
 
-						// Position document on opposite side of stories
-						relativePositions.set(documentId, {
-							x: -config.documentSpacing,
-							y: documentY,
+						singleMilestoneDocuments.push(documentId);
+					}
+
+					// Position documents in a grid (like stories/tasks)
+					const documentColumnSpacing = 80;
+					positionInGrid(singleMilestoneDocuments, -config.documentSpacing, documentDirection, documentColumnSpacing);
+
+					// ============================================================
+					// ENHANCEMENT 3: Position single-parent features as children
+					// Features with single implementer in this milestone are positioned here.
+					// Multi-milestone features are deferred to STEP 8.6
+					// Features are positioned in the same column as stories, AFTER stories
+					// ============================================================
+					const featureDirection = storyDirection; // Same side as stories
+
+					// Find the furthest story position in the story direction to start features after
+					let maxStoryY = 0;
+					for (const storyId of stories) {
+						const storyPos = relativePositions.get(storyId);
+						if (storyPos) {
+							if (storyDirection > 0) {
+								maxStoryY = Math.max(maxStoryY, storyPos.y + config.nodeHeight);
+							} else {
+								maxStoryY = Math.min(maxStoryY, storyPos.y);
+							}
+						}
+					}
+
+					// Start features after the last story (with spacing)
+					let featureY = maxStoryY + featureDirection * config.featureVerticalSpacing;
+					if (stories.length === 0) {
+						// No stories, start from milestone center
+						featureY = featureDirection * (config.nodeHeight / 2 + config.featureVerticalSpacing);
+					}
+
+					// Filter single-milestone features
+					const singleMilestoneFeatures: string[] = [];
+					for (const featureId of features) {
+						const featureMeta = nodeMeta.get(featureId);
+
+						// Check if this feature has implementers in OTHER milestones
+						if (featureMeta?.implementedBy?.length) {
+							const implementerMilestones = new Set<string>();
+							for (const implEntityId of featureMeta.implementedBy) {
+								// Check if implementer is a milestone
+								if (implEntityId.startsWith('M-')) {
+									implementerMilestones.add(implEntityId);
+								} else {
+									// Find the parent milestone of this implementer
+									const implNodeId = entityIdToNodeId.get(implEntityId);
+									if (implNodeId) {
+										const implMeta = nodeMeta.get(implNodeId);
+										if (implMeta?.parent) {
+											implementerMilestones.add(implMeta.parent);
+										}
+									}
+								}
+							}
+
+							// If feature spans multiple milestones, defer positioning
+							if (implementerMilestones.size > 1) {
+								console.log(`  Feature ${featureMeta.entityId} spans ${implementerMilestones.size} milestones - deferring`);
+								continue; // Will be positioned in STEP 8.6
+							}
+						}
+
+						singleMilestoneFeatures.push(featureId);
+					}
+
+					// Position features after stories in the same column
+					for (const featureId of singleMilestoneFeatures) {
+						relativePositions.set(featureId, {
+							x: -config.storySpacing,
+							y: featureY,
 						});
-						documentY += documentDirection * (config.nodeHeight + config.documentVerticalSpacing);
+						featureY += featureDirection * (config.nodeHeight + config.featureVerticalSpacing);
 					}
 
 					// Position other types
@@ -5917,20 +6351,69 @@ private registerCommands(): void {
 					// MULTIPLE IMPLEMENTERS: Position BETWEEN them (centered)
 					docX = (leftmost.x + rightmost.x + config.nodeWidth) / 2 - config.nodeWidth / 2;
 
-					// Calculate Y position: above both (minimum Y minus offset)
-					// Use 2x vertical offset for multi-implementer docs to give more visual separation
-					const minY = Math.min(...implementerPositions.map(p => p.y));
-					const maxY = Math.max(...implementerPositions.map(p => p.y));
+					// ============================================================
+					// ENHANCEMENT: Consider full bounding boxes of milestones
+					// including their children (stories/tasks) to avoid overlap
+					// ============================================================
+
+					// Calculate the actual occupied Y range considering milestone bounding boxes
+					let actualMinY = Infinity;
+					let actualMaxY = -Infinity;
+
+					for (const impl of implementerPositions) {
+						// Find the milestone this implementer belongs to
+						let milestoneNodeId: string | undefined;
+						if (impl.entityId.startsWith('M-')) {
+							milestoneNodeId = impl.nodeId;
+						} else {
+							const implMeta = nodeMeta.get(impl.nodeId);
+							if (implMeta?.parent) {
+								milestoneNodeId = entityIdToNodeId.get(implMeta.parent);
+							}
+						}
+
+						// Get the milestone's bounding box from tracker
+						if (milestoneNodeId) {
+							const milestoneBox = tracker.get(milestoneNodeId);
+							if (milestoneBox) {
+								// The milestone position + relative bounding box
+								const milestonePos = finalPositions.get(milestoneNodeId);
+								if (milestonePos) {
+									// Calculate actual min/max Y from all children positions
+									for (const [, relPos] of milestoneBox.relativePositions) {
+										const absoluteY = milestonePos.y + relPos.y;
+										actualMinY = Math.min(actualMinY, absoluteY);
+										actualMaxY = Math.max(actualMaxY, absoluteY + config.nodeHeight);
+									}
+									// Also include the milestone itself
+									actualMinY = Math.min(actualMinY, milestonePos.y);
+									actualMaxY = Math.max(actualMaxY, milestonePos.y + config.nodeHeight);
+								}
+							}
+						}
+
+						// Fallback: use implementer position directly
+						if (actualMinY === Infinity) {
+							actualMinY = Math.min(actualMinY, impl.y);
+							actualMaxY = Math.max(actualMaxY, impl.y + config.nodeHeight);
+						}
+					}
+
+					// Fallback if no bounding boxes found
+					if (actualMinY === Infinity) {
+						actualMinY = Math.min(...implementerPositions.map(p => p.y));
+						actualMaxY = Math.max(...implementerPositions.map(p => p.y)) + config.nodeHeight;
+					}
 
 					// Determine stacking direction for multi-implementer docs
 					let stackDirection: number;
-					if (maxY - minY > config.nodeHeight) {
+					if (actualMaxY - actualMinY > 2 * config.nodeHeight) {
 						// Different workstreams - position between them, stack downward
-						docY = (minY + maxY) / 2;
+						docY = (actualMinY + actualMaxY) / 2 - config.nodeHeight / 2;
 						stackDirection = 1;
 					} else {
-						// Same workstream - position above with 2x offset, stack upward
-						docY = minY - config.nodeHeight - 2 * config.documentVerticalSpacing;
+						// Same workstream - position ABOVE the topmost child with offset
+						docY = actualMinY - config.nodeHeight - 2 * config.documentVerticalSpacing;
 						stackDirection = -1;
 					}
 
@@ -5949,12 +6432,148 @@ private registerCommands(): void {
 						rightmost: rightmost.nodeId,
 					});
 
-					console.log(`  Multi-implementer document ${meta.entityId} positioned between ${leftmost.entityId} and ${rightmost.entityId} (offset=${existingCount})`);
+					console.log(`  Multi-implementer document ${meta.entityId} positioned between ${leftmost.entityId} and ${rightmost.entityId} (actualMinY=${actualMinY}, actualMaxY=${actualMaxY}, docY=${docY}, offset=${existingCount})`);
 				}
 
 				finalPositions.set(doc.id, {
 					x: docX,
 					y: docY,
+					width: config.nodeWidth,
+					height: config.nodeHeight,
+				});
+			}
+
+			// ============================================================
+			// STEP 8.6: Position multi-milestone features
+			// Features spanning multiple milestones are positioned ABOVE/BELOW
+			// the spanning containers (similar to multi-milestone documents)
+			// Single-parent features are already positioned in Step 4
+			// ============================================================
+			const usedFeaturePositions = new Map<string, number>();
+
+			// Find all features that haven't been positioned yet (multi-milestone or orphan)
+			const unpositionedFeatures = fileNodes.filter(n => {
+				const meta = nodeMeta.get(n.id);
+				return meta?.type === 'feature' && !finalPositions.has(n.id);
+			});
+
+			for (const feature of unpositionedFeatures) {
+				const meta = nodeMeta.get(feature.id);
+				if (!meta?.implementedBy?.length) {
+					// Feature without implementers - position at default location
+					// Find a reasonable default position (left of all milestones)
+					let minX = Infinity;
+					let avgY = 0;
+					let count = 0;
+					for (const [, pos] of finalPositions) {
+						minX = Math.min(minX, pos.x);
+						avgY += pos.y;
+						count++;
+					}
+					if (count > 0) {
+						avgY /= count;
+						finalPositions.set(feature.id, {
+							x: minX - config.featureSpacing - config.nodeWidth,
+							y: avgY,
+							width: config.nodeWidth,
+							height: config.nodeHeight,
+						});
+					}
+					continue;
+				}
+
+				// Find all implementer positions and their milestone containers
+				const implementerPositions: { entityId: string; nodeId: string; x: number; y: number; milestoneId?: string }[] = [];
+				const implementerMilestones = new Set<string>();
+
+				for (const implEntityId of meta.implementedBy) {
+					const implNodeId = entityIdToNodeId.get(implEntityId);
+					if (!implNodeId) continue;
+
+					const implPos = finalPositions.get(implNodeId);
+					if (!implPos) continue;
+
+					// Find the milestone this implementer belongs to
+					let milestoneId: string | undefined;
+					if (implEntityId.startsWith('M-')) {
+						milestoneId = implEntityId;
+					} else {
+						const implMeta = nodeMeta.get(implNodeId);
+						milestoneId = implMeta?.parent;
+					}
+					if (milestoneId) implementerMilestones.add(milestoneId);
+
+					implementerPositions.push({
+						entityId: implEntityId,
+						nodeId: implNodeId,
+						x: implPos.x,
+						y: implPos.y,
+						milestoneId,
+					});
+				}
+
+				if (implementerPositions.length === 0) continue;
+
+				// Sort by X position to find leftmost and rightmost
+				implementerPositions.sort((a, b) => a.x - b.x);
+				const leftmost = implementerPositions[0];
+				const rightmost = implementerPositions[implementerPositions.length - 1];
+
+				let featureX: number;
+				let featureY: number;
+
+				// MULTI-MILESTONE FEATURE: Position ABOVE or BELOW the spanning containers
+				// Centered horizontally between leftmost and rightmost implementers
+				featureX = (leftmost.x + rightmost.x + config.nodeWidth) / 2 - config.nodeWidth / 2;
+
+				// Get bounding boxes of all involved milestone containers
+				let containerMinY = Infinity;
+				let containerMaxY = -Infinity;
+
+				for (const milestoneEntityId of implementerMilestones) {
+					const milestoneNodeId = entityIdToNodeId.get(milestoneEntityId);
+					if (!milestoneNodeId) continue;
+
+					const box = tracker.get(milestoneNodeId);
+					const mPos = finalPositions.get(milestoneNodeId);
+					if (!box || !mPos) continue;
+
+					// Calculate actual bounds of this milestone container
+					for (const [childNodeId] of box.relativePositions) {
+						const childPos = finalPositions.get(childNodeId);
+						if (childPos) {
+							containerMinY = Math.min(containerMinY, childPos.y);
+							containerMaxY = Math.max(containerMaxY, childPos.y + childPos.height);
+						}
+					}
+					containerMinY = Math.min(containerMinY, mPos.y);
+					containerMaxY = Math.max(containerMaxY, mPos.y + mPos.height);
+				}
+
+				// Position above or below based on available space
+				// Default to above (negative Y direction)
+				const featureAbove = true; // Could be made smarter based on context
+				if (featureAbove) {
+					featureY = containerMinY - config.featureVerticalSpacing - config.nodeHeight;
+				} else {
+					featureY = containerMaxY + config.featureVerticalSpacing;
+				}
+
+				// Check if this position is already used
+				const posKey = `${Math.round(featureX)},${Math.round(featureY)}`;
+				const existingCount = usedFeaturePositions.get(posKey) || 0;
+				if (existingCount > 0) {
+					// Stack further above/below
+					const stackDir = featureAbove ? -1 : 1;
+					featureY += stackDir * existingCount * (config.nodeHeight + config.verticalSpacing);
+				}
+				usedFeaturePositions.set(posKey, existingCount + 1);
+
+				console.log(`  Multi-milestone feature ${meta.entityId} positioned ${featureAbove ? 'ABOVE' : 'BELOW'} ${implementerMilestones.size} milestone containers`);
+
+				finalPositions.set(feature.id, {
+					x: featureX,
+					y: featureY,
 					width: config.nodeWidth,
 					height: config.nodeHeight,
 				});
@@ -6070,6 +6689,55 @@ private registerCommands(): void {
 			}
 
 			// ============================================================
+			// STEP 9.5: Position orphan decisions that have blocks/enables relationships
+			// These decisions don't have a parent but block/enable other entities
+			// Position them to the LEFT of the entities they block
+			// ============================================================
+			const orphanDecisions = fileNodes.filter(n => {
+				const meta = nodeMeta.get(n.id);
+				return meta?.type === 'decision' && !finalPositions.has(n.id) && (meta.blocks?.length > 0 || meta.enables?.length > 0);
+			});
+
+			for (const decision of orphanDecisions) {
+				const meta = nodeMeta.get(decision.id);
+				if (!meta) continue;
+
+				// Find positions of entities this decision blocks or enables
+				const relatedPositions: { x: number; y: number }[] = [];
+
+				for (const blockedEntityId of meta.blocks || []) {
+					const blockedNodeId = entityIdToNodeId.get(blockedEntityId);
+					if (blockedNodeId) {
+						const blockedPos = finalPositions.get(blockedNodeId);
+						if (blockedPos) relatedPositions.push({ x: blockedPos.x, y: blockedPos.y });
+					}
+				}
+
+				for (const enabledEntityId of meta.enables || []) {
+					const enabledNodeId = entityIdToNodeId.get(enabledEntityId);
+					if (enabledNodeId) {
+						const enabledPos = finalPositions.get(enabledNodeId);
+						if (enabledPos) relatedPositions.push({ x: enabledPos.x, y: enabledPos.y });
+					}
+				}
+
+				if (relatedPositions.length === 0) continue;
+
+				// Position to the LEFT of the leftmost related entity
+				const leftmostX = Math.min(...relatedPositions.map(p => p.x));
+				const avgY = relatedPositions.reduce((sum, p) => sum + p.y, 0) / relatedPositions.length;
+
+				finalPositions.set(decision.id, {
+					x: leftmostX - config.decisionSpacing - config.nodeWidth,
+					y: avgY,
+					width: config.nodeWidth,
+					height: config.nodeHeight,
+				});
+
+				console.log(`  Orphan decision ${meta.entityId} positioned LEFT of ${relatedPositions.length} related entities`);
+			}
+
+			// ============================================================
 			// STEP 10: Handle orphan nodes and nodes not assigned to milestones
 			// ============================================================
 			const orphans = fileNodes.filter(n => !finalPositions.has(n.id));
@@ -6096,6 +6764,319 @@ private registerCommands(): void {
 					}
 				}
 			}
+
+			// ============================================================
+			// STEP 10.5: AFTER PASS - Resolve overlaps within and between milestone containers
+			// 1. First, resolve overlaps within each milestone container
+			// 2. Then, ensure milestone containers don't overlap (push later ones right)
+			// ============================================================
+			const MIN_CONTAINER_SPACING = 500; // Minimum gap between milestone containers
+			const MIN_ENTITY_SPACING = 50;     // Minimum gap between entities within a container
+
+			// Helper: Check if two rectangles overlap
+			const rectsOverlap = (
+				r1: { x: number; y: number; width: number; height: number },
+				r2: { x: number; y: number; width: number; height: number },
+				padding: number = 0
+			): boolean => {
+				return !(
+					r1.x + r1.width + padding <= r2.x ||
+					r2.x + r2.width + padding <= r1.x ||
+					r1.y + r1.height + padding <= r2.y ||
+					r2.y + r2.height + padding <= r1.y
+				);
+			};
+
+			// Helper: Calculate bounding box for a milestone container (milestone + ALL descendants)
+			// Uses nodeToMilestone map to include children of children (e.g., tasks under stories)
+			// Excludes multi-milestone documents
+			const getMilestoneContainerBounds = (milestoneNodeId: string): { minX: number; maxX: number; minY: number; maxY: number } | null => {
+				const mPos = finalPositions.get(milestoneNodeId);
+				if (!mPos) return null;
+
+				let minX = mPos.x;
+				let maxX = mPos.x + mPos.width;
+				let minY = mPos.y;
+				let maxY = mPos.y + mPos.height;
+
+				// Include ALL entities assigned to this milestone (including children of children)
+				for (const [nodeId, assignedMilestoneId] of nodeToMilestone) {
+					if (assignedMilestoneId !== milestoneNodeId) continue;
+
+					// Skip multi-milestone documents
+					if (multiMilestoneDocuments.has(nodeId)) continue;
+
+					const childPos = finalPositions.get(nodeId);
+					if (childPos) {
+						minX = Math.min(minX, childPos.x);
+						maxX = Math.max(maxX, childPos.x + childPos.width);
+						minY = Math.min(minY, childPos.y);
+						maxY = Math.max(maxY, childPos.y + childPos.height);
+					}
+				}
+
+				return { minX, maxX, minY, maxY };
+			};
+
+			// PART 1: Resolve overlaps within each milestone container
+			console.log('\n=== AFTER PASS: Resolving overlaps ===');
+
+			for (const milestone of milestones) {
+				const mId = milestone.id;
+				const box = tracker.get(mId);
+				if (!box) continue;
+
+				const mMeta = nodeMeta.get(mId);
+				const mEntityId = mMeta?.entityId || mId;
+
+				// Get all entities in this container (excluding multi-milestone docs)
+				const containerEntities: string[] = [mId];
+				for (const [childNodeId] of box.relativePositions) {
+					if (!multiMilestoneDocuments.has(childNodeId)) {
+						containerEntities.push(childNodeId);
+					}
+				}
+
+				// Check for overlaps and resolve them
+				let overlapResolved = false;
+				let iterations = 0;
+				const maxIterations = 50; // Prevent infinite loops
+
+				while (iterations < maxIterations) {
+					iterations++;
+					let foundOverlap = false;
+
+					for (let i = 0; i < containerEntities.length; i++) {
+						const nodeA = containerEntities[i];
+						const posA = finalPositions.get(nodeA);
+						if (!posA) continue;
+
+						for (let j = i + 1; j < containerEntities.length; j++) {
+							const nodeB = containerEntities[j];
+							const posB = finalPositions.get(nodeB);
+							if (!posB) continue;
+
+							if (rectsOverlap(posA, posB, MIN_ENTITY_SPACING)) {
+								foundOverlap = true;
+
+								// Determine which node to move based on type priority
+								// Milestone stays fixed, then stories, then tasks, then others
+								const metaA = nodeMeta.get(nodeA);
+								const metaB = nodeMeta.get(nodeB);
+								const priorityOrder = ['milestone', 'story', 'task', 'decision', 'document', 'feature'];
+								const priorityA = priorityOrder.indexOf(metaA?.type || 'feature');
+								const priorityB = priorityOrder.indexOf(metaB?.type || 'feature');
+
+								// Move the lower priority node (higher index), or if same priority, move the second one
+								const nodeToMove = priorityB >= priorityA ? nodeB : nodeA;
+								const posToMove = nodeToMove === nodeB ? posB : posA;
+								const otherPos = nodeToMove === nodeB ? posA : posB;
+
+								// Calculate overlap amount and push apart vertically
+								const overlapY = Math.min(
+									otherPos.y + otherPos.height + MIN_ENTITY_SPACING - posToMove.y,
+									posToMove.y + posToMove.height + MIN_ENTITY_SPACING - otherPos.y
+								);
+
+								// Push in the direction the node is already offset
+								const pushDirection = posToMove.y >= otherPos.y ? 1 : -1;
+								posToMove.y += pushDirection * (overlapY / 2 + MIN_ENTITY_SPACING);
+
+								if (!overlapResolved) {
+									const metaToMove = nodeMeta.get(nodeToMove);
+									console.log(`  Container ${mEntityId}: Resolved overlap between ${metaA?.entityId || nodeA} and ${metaB?.entityId || nodeB}, moved ${metaToMove?.entityId || nodeToMove}`);
+									overlapResolved = true;
+								}
+							}
+						}
+					}
+
+					if (!foundOverlap) break;
+				}
+
+				if (iterations >= maxIterations) {
+					console.warn(`  Container ${mEntityId}: Max iterations reached while resolving overlaps`);
+				}
+			}
+
+			// PART 2: Ensure milestone containers don't overlap (push later ones right)
+			// Process milestones in order (left to right) within each workstream
+			for (const [workstream, wsMilestones] of milestonesByWorkstream) {
+				// Sort milestones by their current X position (left to right)
+				const sortedByX = [...wsMilestones].sort((a, b) => {
+					const posA = finalPositions.get(a.id);
+					const posB = finalPositions.get(b.id);
+					return (posA?.x || 0) - (posB?.x || 0);
+				});
+
+				for (let i = 1; i < sortedByX.length; i++) {
+					const currentMilestone = sortedByX[i];
+					const currentBounds = getMilestoneContainerBounds(currentMilestone.id);
+					if (!currentBounds) continue;
+
+					// Check against all previous milestones
+					for (let j = 0; j < i; j++) {
+						const prevMilestone = sortedByX[j];
+						const prevBounds = getMilestoneContainerBounds(prevMilestone.id);
+						if (!prevBounds) continue;
+
+						// Check if containers overlap horizontally (with minimum spacing)
+						const currentLeft = currentBounds.minX;
+						const prevRight = prevBounds.maxX;
+
+						if (currentLeft < prevRight + MIN_CONTAINER_SPACING) {
+							// Calculate shift needed
+							const shift = prevRight + MIN_CONTAINER_SPACING - currentLeft;
+
+							const currentMeta = nodeMeta.get(currentMilestone.id);
+							const prevMeta = nodeMeta.get(prevMilestone.id);
+							console.log(`  Workstream ${workstream}: Shifting ${currentMeta?.entityId || currentMilestone.id} right by ${Math.round(shift)}px (overlaps with ${prevMeta?.entityId || prevMilestone.id})`);
+
+							// Shift current milestone and all its children
+							const currentPos = finalPositions.get(currentMilestone.id);
+							if (currentPos) currentPos.x += shift;
+
+							const currentBox = tracker.get(currentMilestone.id);
+							if (currentBox) {
+								for (const [childNodeId] of currentBox.relativePositions) {
+									const childPos = finalPositions.get(childNodeId);
+									if (childPos) childPos.x += shift;
+								}
+							}
+
+							// Also shift any features linked to this milestone
+							for (const feature of unpositionedFeatures) {
+								const featureMeta = nodeMeta.get(feature.id);
+								if (!featureMeta?.implementedBy) continue;
+
+								// Check if this feature is linked to the current milestone
+								const linkedToCurrentMilestone = featureMeta.implementedBy.some(implId => {
+									if (implId === currentMeta?.entityId) return true;
+									// Check if implementer's parent is this milestone
+									const implNodeId = entityIdToNodeId.get(implId);
+									if (implNodeId) {
+										const implMeta = nodeMeta.get(implNodeId);
+										return implMeta?.parent === currentMeta?.entityId;
+									}
+									return false;
+								});
+
+								if (linkedToCurrentMilestone) {
+									const featurePos = finalPositions.get(feature.id);
+									if (featurePos) featurePos.x += shift;
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// PART 3: Ensure workstreams don't overlap vertically
+			// Calculate actual Y bounds for each workstream and push down if needed
+			const workstreamOrder = Array.from(milestonesByWorkstream.keys());
+
+			// Helper: Get all entities in a workstream (all milestones + their children)
+			const getWorkstreamBounds = (workstream: string): { minY: number; maxY: number } | null => {
+				const wsMilestones = milestonesByWorkstream.get(workstream);
+				if (!wsMilestones || wsMilestones.length === 0) return null;
+
+				let minY = Infinity;
+				let maxY = -Infinity;
+
+				for (const milestone of wsMilestones) {
+					// Include milestone itself
+					const mPos = finalPositions.get(milestone.id);
+					if (mPos) {
+						minY = Math.min(minY, mPos.y);
+						maxY = Math.max(maxY, mPos.y + mPos.height);
+					}
+
+					// Include all children
+					const box = tracker.get(milestone.id);
+					if (box) {
+						for (const [childNodeId] of box.relativePositions) {
+							const childPos = finalPositions.get(childNodeId);
+							if (childPos) {
+								minY = Math.min(minY, childPos.y);
+								maxY = Math.max(maxY, childPos.y + childPos.height);
+							}
+						}
+					}
+				}
+
+				return minY === Infinity ? null : { minY, maxY };
+			};
+
+			// Helper: Shift all entities in a workstream by deltaY
+			const shiftWorkstreamVertically = (workstream: string, deltaY: number) => {
+				const wsMilestones = milestonesByWorkstream.get(workstream);
+				if (!wsMilestones) return;
+
+				for (const milestone of wsMilestones) {
+					// Shift milestone
+					const mPos = finalPositions.get(milestone.id);
+					if (mPos) mPos.y += deltaY;
+
+					// Shift all children
+					const box = tracker.get(milestone.id);
+					if (box) {
+						for (const [childNodeId] of box.relativePositions) {
+							const childPos = finalPositions.get(childNodeId);
+							if (childPos) childPos.y += deltaY;
+						}
+					}
+
+					// Shift features linked to this milestone
+					const mMeta = nodeMeta.get(milestone.id);
+					for (const feature of unpositionedFeatures) {
+						const featureMeta = nodeMeta.get(feature.id);
+						if (!featureMeta?.implementedBy) continue;
+
+						const linkedToMilestone = featureMeta.implementedBy.some(implId => {
+							if (implId === mMeta?.entityId) return true;
+							const implNodeId = entityIdToNodeId.get(implId);
+							if (implNodeId) {
+								const implMeta = nodeMeta.get(implNodeId);
+								return implMeta?.parent === mMeta?.entityId;
+							}
+							return false;
+						});
+
+						if (linkedToMilestone) {
+							const featurePos = finalPositions.get(feature.id);
+							if (featurePos) featurePos.y += deltaY;
+						}
+					}
+				}
+			};
+
+			// Process workstreams in order (top to bottom)
+			for (let i = 1; i < workstreamOrder.length; i++) {
+				const currentWorkstream = workstreamOrder[i];
+				const currentBounds = getWorkstreamBounds(currentWorkstream);
+				if (!currentBounds) continue;
+
+				// Check against all previous workstreams
+				for (let j = 0; j < i; j++) {
+					const prevWorkstream = workstreamOrder[j];
+					const prevBounds = getWorkstreamBounds(prevWorkstream);
+					if (!prevBounds) continue;
+
+					// Check if workstreams overlap vertically (with minimum spacing)
+					if (currentBounds.minY < prevBounds.maxY + MIN_CONTAINER_SPACING) {
+						const shift = prevBounds.maxY + MIN_CONTAINER_SPACING - currentBounds.minY;
+						console.log(`  Workstream ${currentWorkstream}: Shifting down by ${Math.round(shift)}px (overlaps with ${prevWorkstream})`);
+
+						shiftWorkstreamVertically(currentWorkstream, shift);
+
+						// Update bounds for subsequent checks
+						currentBounds.minY += shift;
+						currentBounds.maxY += shift;
+					}
+				}
+			}
+
+			console.log('=== AFTER PASS complete ===\n');
 
 			// ============================================================
 			// STEP 11: Apply positions to nodes
@@ -6857,6 +7838,1089 @@ private registerCommands(): void {
 		} else {
 			new Notice("No enabled entities found");
 		}
+	}
+
+	/** Navigate to features that the current entity implements */
+	private navigateToFeatures(): void {
+		const entity = this.getCurrentEntity();
+		if (!entity) {
+			new Notice("No entity found in current file");
+			return;
+		}
+		const features = this.entityIndex?.getFeaturesImplementedBy(entity.id) || [];
+		if (features.length > 0) {
+			this.openEntities(features);
+			new Notice(`Opening ${features.length} features`);
+		} else {
+			new Notice("No features found for this entity");
+		}
+	}
+
+	// ==================== FEATURE ENTITY METHODS ====================
+
+	/**
+	 * Create a new feature entity
+	 */
+	private async createFeature(): Promise<void> {
+		const modal = new FeatureModal(
+			this.app,
+			{
+				modalTitle: "Create New Feature",
+				submitButtonText: "Create Feature",
+				workstreamOptions: this.settings.effortOptions,
+			},
+			async (result: FeatureModalResult) => {
+				await this.createFeatureFile(result);
+			}
+		);
+		modal.open();
+	}
+
+	/**
+	 * Create the feature file from modal result
+	 */
+	private async createFeatureFile(result: FeatureModalResult): Promise<void> {
+		const featuresFolder = this.settings.entityNavigator.featuresFolder;
+		await this.ensureFolderExists(featuresFolder);
+
+		// Generate feature ID
+		const id = generateId(this.app, this.settings, "feature");
+		const now = new Date().toISOString();
+
+		// Create frontmatter
+		const frontmatter: FeatureFrontmatter = {
+			id,
+			type: "feature",
+			title: result.title,
+			workstream: result.workstream,
+			user_story: result.user_story,
+			tier: result.tier,
+			phase: result.phase,
+			status: result.status,
+			priority: result.priority,
+			personas: result.personas,
+			acceptance_criteria: result.acceptance_criteria,
+			implemented_by: result.implemented_by || [],
+			documented_by: [],
+			decided_by: [],
+			depends_on: [],
+			blocks: [],
+			last_updated: now,
+			created_at: now,
+			created_by_plugin: true,
+		};
+
+		// Generate file content
+		const content = replaceFeaturePlaceholders(DEFAULT_FEATURE_TEMPLATE, frontmatter);
+
+		// Create file
+		const sanitizedTitle = result.title.replace(/[\\/:*?"<>|]/g, "-").substring(0, 50);
+		const filename = `${id}_${sanitizedTitle}.md`;
+		const filePath = normalizePath(`${featuresFolder}/${filename}`);
+
+		await this.app.vault.create(filePath, content);
+		new Notice(`Feature ${id} created: ${result.title}`);
+
+		// Open the new file
+		const file = this.app.vault.getAbstractFileByPath(filePath);
+		if (file instanceof TFile) {
+			await this.app.workspace.getLeaf().openFile(file);
+		}
+
+		// Rebuild entity index
+		if (this.entityIndex) {
+			await this.entityIndex.buildIndex();
+		}
+	}
+
+	/**
+	 * Set the phase of the current feature
+	 */
+	private async setFeaturePhase(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) {
+			new Notice("No active file");
+			return;
+		}
+
+		const content = await this.app.vault.read(file);
+		const fm = parseAnyFrontmatter(content);
+		if (!fm || fm.type !== "feature") {
+			new Notice("Current file is not a feature");
+			return;
+		}
+
+		// Show phase selector
+		const phases: FeaturePhase[] = ["MVP", "0", "1", "2", "3", "4", "5"];
+		const currentPhase = (fm.phase as FeaturePhase) || "MVP";
+
+		// Simple prompt for now - could be enhanced with a modal
+		const newPhase = await this.showPhaseSelector(phases, currentPhase);
+		if (newPhase && newPhase !== currentPhase) {
+			const updatedContent = updateFrontmatter(content, { phase: newPhase, last_updated: new Date().toISOString() });
+			await this.app.vault.modify(file, updatedContent);
+			new Notice(`Feature phase updated to ${newPhase}`);
+		}
+	}
+
+	/**
+	 * Set the tier of the current feature
+	 */
+	private async setFeatureTier(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) {
+			new Notice("No active file");
+			return;
+		}
+
+		const content = await this.app.vault.read(file);
+		const fm = parseAnyFrontmatter(content);
+		if (!fm || fm.type !== "feature") {
+			new Notice("Current file is not a feature");
+			return;
+		}
+
+		const currentTier = (fm.tier as FeatureTier) || "OSS";
+		const newTier: FeatureTier = currentTier === "OSS" ? "Premium" : "OSS";
+
+		const updatedContent = updateFrontmatter(content, { tier: newTier, last_updated: new Date().toISOString() });
+		await this.app.vault.modify(file, updatedContent);
+		new Notice(`Feature tier updated to ${newTier}`);
+	}
+
+	/**
+	 * Show a simple phase selector (could be enhanced with a proper modal)
+	 */
+	private async showPhaseSelector(phases: FeaturePhase[], currentPhase: FeaturePhase): Promise<FeaturePhase | null> {
+		return new Promise((resolve) => {
+			const modal = new (class extends Modal {
+				result: FeaturePhase | null = null;
+				constructor(app: App) {
+					super(app);
+				}
+				onOpen() {
+					const { contentEl } = this;
+					contentEl.createEl("h3", { text: "Select Feature Phase" });
+					phases.forEach((phase) => {
+						const btn = contentEl.createEl("button", {
+							text: `Phase ${phase}${phase === currentPhase ? " (current)" : ""}`,
+							cls: phase === currentPhase ? "mod-cta" : "",
+						});
+						btn.style.display = "block";
+						btn.style.marginBottom = "8px";
+						btn.style.width = "100%";
+						btn.addEventListener("click", () => {
+							this.result = phase;
+							this.close();
+						});
+					});
+				}
+				onClose() {
+					resolve(this.result);
+				}
+			})(this.app);
+			modal.open();
+		});
+	}
+
+	// ==================== FEATURE CANVAS ====================
+
+	/**
+	 * Create a new features.canvas file with predefined structure
+	 */
+	private async createFeaturesCanvas(): Promise<void> {
+		const canvasPath = this.settings.entityNavigator.featuresFolder
+			? `${this.settings.entityNavigator.featuresFolder}/features.canvas`
+			: "features.canvas";
+
+		// Check if canvas already exists
+		const existingFile = this.app.vault.getAbstractFileByPath(canvasPath);
+		if (existingFile) {
+			new Notice(`Features canvas already exists at ${canvasPath}`);
+			// Open the existing canvas
+			const leaf = this.app.workspace.getLeaf(false);
+			await leaf.openFile(existingFile as TFile);
+			return;
+		}
+
+		// Create the canvas structure
+		const canvasData: CanvasData = {
+			nodes: [
+				// OSS Header
+				{
+					id: "header-oss",
+					type: "text",
+					text: "# OSS Features",
+					x: 0,
+					y: 0,
+					width: 2000,
+					height: 60,
+				},
+				// Premium Header
+				{
+					id: "header-premium",
+					type: "text",
+					text: "# Premium Features",
+					x: 2200,
+					y: 0,
+					width: 1000,
+					height: 60,
+				},
+				// Phase column headers for OSS
+				{ id: "phase-mvp", type: "text", text: "## MVP", x: 0, y: 80, width: 300, height: 40 },
+				{ id: "phase-0", type: "text", text: "## Phase 0", x: 350, y: 80, width: 300, height: 40 },
+				{ id: "phase-1", type: "text", text: "## Phase 1", x: 700, y: 80, width: 300, height: 40 },
+				{ id: "phase-2", type: "text", text: "## Phase 2", x: 1050, y: 80, width: 300, height: 40 },
+				{ id: "phase-3", type: "text", text: "## Phase 3", x: 1400, y: 80, width: 300, height: 40 },
+				{ id: "phase-4", type: "text", text: "## Phase 4", x: 1750, y: 80, width: 300, height: 40 },
+				// Phase column headers for Premium
+				{ id: "phase-premium-mvp", type: "text", text: "## MVP", x: 2200, y: 80, width: 300, height: 40 },
+				{ id: "phase-premium-1", type: "text", text: "## Phase 1+", x: 2550, y: 80, width: 300, height: 40 },
+			],
+			edges: [],
+		};
+
+		// Ensure folder exists
+		const folderPath = canvasPath.substring(0, canvasPath.lastIndexOf("/"));
+		if (folderPath) {
+			await this.ensureFolderExists(folderPath);
+		}
+
+		// Create the canvas file
+		const content = JSON.stringify(canvasData, null, 2);
+		const file = await this.app.vault.create(canvasPath, content);
+
+		new Notice(`Features canvas created at ${canvasPath}`);
+
+		// Open the new canvas
+		const leaf = this.app.workspace.getLeaf(false);
+		await leaf.openFile(file);
+	}
+
+	/**
+	 * Auto-layout features on the features canvas by tier and phase
+	 */
+	private async autoLayoutFeaturesCanvas(): Promise<void> {
+		const canvasFile = this.getActiveCanvasFile();
+		if (!canvasFile) {
+			new Notice("Please open a canvas file first");
+			return;
+		}
+
+		// Load canvas data
+		const canvasData = await loadCanvasData(this.app, canvasFile);
+
+		// Get all feature nodes (file nodes with F- IDs)
+		const featureNodes = canvasData.nodes.filter(node => {
+			if (node.type !== "file" || !node.file) return false;
+			const entityId = node.metadata?.entityId as string;
+			return entityId?.startsWith("F-");
+		});
+
+		if (featureNodes.length === 0) {
+			new Notice("No feature nodes found on canvas");
+			return;
+		}
+
+		// Layout constants
+		const nodeWidth = 300;
+		const nodeHeight = 150;
+		const horizontalGap = 50;
+		const verticalGap = 30;
+		const startY = 140; // Below headers
+
+		// Phase columns (x positions)
+		const phaseColumns: Record<string, number> = {
+			"MVP": 0,
+			"0": 350,
+			"1": 700,
+			"2": 1050,
+			"3": 1400,
+			"4": 1750,
+			"5": 1750, // Same as 4 for now
+		};
+
+		const premiumOffset = 2200;
+
+		// Group features by tier and phase, and collect dependency info
+		const grouped: Record<string, Record<string, typeof featureNodes>> = {
+			OSS: {},
+			Premium: {},
+		};
+
+		// Map feature ID to node ID and dependencies
+		const featureIdToNodeId = new Map<string, string>();
+		const featureDependencies = new Map<string, string[]>(); // featureId -> depends_on IDs
+
+		for (const node of featureNodes) {
+			// Read frontmatter to get tier and phase
+			const file = this.app.vault.getAbstractFileByPath(node.file!);
+			if (!(file instanceof TFile)) continue;
+
+			const content = await this.app.vault.read(file);
+			const fm = parseAnyFrontmatter(content);
+			if (!fm) continue;
+
+			const featureId = (fm.id as string) || "";
+			const tier = (fm.tier as string) || "OSS";
+			const phase = String((fm.phase as string) || "MVP");
+			const dependsOn = (fm.depends_on as string[]) || [];
+
+			if (featureId) {
+				featureIdToNodeId.set(featureId, node.id);
+				featureDependencies.set(featureId, dependsOn);
+			}
+
+			if (!grouped[tier]) grouped[tier] = {};
+			if (!grouped[tier][phase]) grouped[tier][phase] = [];
+			grouped[tier][phase].push(node);
+		}
+
+		// Position nodes
+		for (const tier of ["OSS", "Premium"]) {
+			const tierOffset = tier === "Premium" ? premiumOffset : 0;
+
+			for (const [phase, nodes] of Object.entries(grouped[tier] || {})) {
+				const baseX = (phaseColumns[phase] ?? 0) + tierOffset;
+
+				nodes.forEach((node, index) => {
+					node.x = baseX;
+					node.y = startY + index * (nodeHeight + verticalGap);
+					node.width = nodeWidth;
+					node.height = nodeHeight;
+				});
+			}
+		}
+
+		// Create dependency edges
+		let edgesAdded = 0;
+		for (const [featureId, dependsOnIds] of featureDependencies.entries()) {
+			const toNodeId = featureIdToNodeId.get(featureId);
+			if (!toNodeId) continue;
+
+			for (const depId of dependsOnIds) {
+				const fromNodeId = featureIdToNodeId.get(depId);
+				if (!fromNodeId) continue;
+
+				// Check if edge already exists
+				if (!edgeExists(canvasData, fromNodeId, toNodeId)) {
+					// Edge goes FROM dependency TO this node (A depends on B = B --> A)
+					const edge = createEdge(fromNodeId, toNodeId, undefined, 'right', 'left');
+					canvasData.edges.push(edge);
+					edgesAdded++;
+				}
+			}
+		}
+
+		// Save canvas
+		await saveCanvasData(this.app, canvasFile, canvasData);
+		await reloadCanvasViews(this.app, canvasFile);
+
+		new Notice(`Repositioned ${featureNodes.length} feature nodes, added ${edgesAdded} dependency edges`);
+	}
+
+	/**
+	 * Populate features canvas from vault feature files
+	 */
+	private async populateFeaturesCanvas(): Promise<void> {
+		const canvasFile = this.getActiveCanvasFile();
+		if (!canvasFile) {
+			new Notice("Please open a canvas file first");
+			return;
+		}
+
+		// Load canvas data
+		const canvasData = await loadCanvasData(this.app, canvasFile);
+
+		// Get existing feature node file paths
+		const existingPaths = new Set(
+			canvasData.nodes
+				.filter(n => n.type === "file" && n.file)
+				.map(n => n.file!)
+		);
+
+		// Find all feature files in vault
+		const featuresFolder = this.settings.entityNavigator.featuresFolder || "";
+		const allFiles = this.app.vault.getMarkdownFiles();
+
+		const featureFiles = allFiles.filter(file => {
+			// Check if in features folder (if specified)
+			if (featuresFolder && !file.path.startsWith(featuresFolder)) return false;
+
+			// Check if filename starts with F-
+			return file.basename.match(/^F-\d{3,}/);
+		});
+
+		// Add new feature nodes
+		let addedCount = 0;
+		const startY = 140;
+		const nodeWidth = 300;
+		const nodeHeight = 150;
+		const verticalGap = 30;
+
+		for (const file of featureFiles) {
+			if (existingPaths.has(file.path)) continue;
+
+			// Read frontmatter
+			const content = await this.app.vault.read(file);
+			const fm = parseAnyFrontmatter(content);
+
+			const entityId = fm?.id || file.basename.match(/^(F-\d{3,})/)?.[1] || "";
+			const tier = (fm?.tier as string) || "OSS";
+			const phase = String((fm?.phase as string) || "MVP");
+
+			// Calculate position based on tier and phase
+			const phaseColumns: Record<string, number> = {
+				"MVP": 0, "0": 350, "1": 700, "2": 1050, "3": 1400, "4": 1750, "5": 1750,
+			};
+			const premiumOffset = tier === "Premium" ? 2200 : 0;
+			const baseX = (phaseColumns[phase] ?? 0) + premiumOffset;
+
+			// Count existing nodes in this column to stack vertically
+			const nodesInColumn = canvasData.nodes.filter(n =>
+				n.type === "file" && Math.abs(n.x - baseX) < 50
+			).length;
+
+			const newNode: CanvasNode = {
+				id: generateNodeId(),
+				type: "file",
+				file: file.path,
+				x: baseX,
+				y: startY + nodesInColumn * (nodeHeight + verticalGap),
+				width: nodeWidth,
+				height: nodeHeight,
+				metadata: {
+					plugin: "canvas-project-manager",
+					shape: "feature",
+					entityId,
+				},
+			};
+
+			canvasData.nodes.push(newNode);
+			addedCount++;
+		}
+
+		if (addedCount === 0) {
+			new Notice("No new features to add");
+			return;
+		}
+
+		// Save canvas
+		await saveCanvasData(this.app, canvasFile, canvasData);
+		await reloadCanvasViews(this.app, canvasFile);
+
+		new Notice(`Added ${addedCount} feature nodes to canvas`);
+	}
+
+	/**
+	 * Link the current entity (from active file) to a feature
+	 */
+	private async linkCurrentEntityToFeature(): Promise<void> {
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile || activeFile.extension !== "md") {
+			new Notice("Please open a markdown file first");
+			return;
+		}
+
+		// Read frontmatter
+		const content = await this.app.vault.read(activeFile);
+		const fm = parseAnyFrontmatter(content);
+		if (!fm || !fm.id || !fm.type) {
+			new Notice("This file does not have valid entity frontmatter");
+			return;
+		}
+
+		const entityId = fm.id as string;
+		const entityType = fm.type as EntityType;
+		const entityTitle = (fm.title as string) || activeFile.basename;
+
+		// Features can't link to themselves
+		if (entityType === "feature") {
+			new Notice("Features cannot be linked to other features using this command");
+			return;
+		}
+
+		// Get all features from vault
+		const featuresFolder = this.settings.entityNavigator.featuresFolder || "";
+		const allFiles = this.app.vault.getMarkdownFiles();
+		const availableFeatures: FeatureOption[] = [];
+
+		for (const file of allFiles) {
+			// Check if in features folder (if specified)
+			if (featuresFolder && !file.path.startsWith(featuresFolder)) continue;
+
+			// Check if filename starts with F-
+			if (!file.basename.match(/^F-\d{3,}/)) continue;
+
+			const fileContent = await this.app.vault.read(file);
+			const fileFm = parseAnyFrontmatter(fileContent);
+			if (!fileFm || !fileFm.id) continue;
+
+			availableFeatures.push({
+				id: fileFm.id as string,
+				title: (fileFm.title as string) || file.basename,
+				tier: (fileFm.tier as string) || "OSS",
+				phase: String((fileFm.phase as string) || "MVP"),
+			});
+		}
+
+		if (availableFeatures.length === 0) {
+			new Notice("No features found in vault. Create a feature first.");
+			return;
+		}
+
+		// Sort features by ID
+		availableFeatures.sort((a, b) => a.id.localeCompare(b.id));
+
+		// Show modal
+		const modal = new LinkFeatureModal(
+			this.app,
+			{
+				entityType,
+				entityId,
+				entityTitle,
+				availableFeatures,
+			},
+			async (result: LinkFeatureModalResult) => {
+				await this.applyFeatureLink(activeFile, entityId, result);
+			}
+		);
+		modal.open();
+	}
+
+	/**
+	 * Apply the feature link to the entity file
+	 */
+	private async applyFeatureLink(
+		entityFile: TFile,
+		entityId: string,
+		linkResult: LinkFeatureModalResult
+	): Promise<void> {
+		const content = await this.app.vault.read(entityFile);
+		const fm = parseAnyFrontmatter(content);
+		if (!fm) return;
+
+		// Get current array for the relationship type
+		const fieldName = linkResult.relationshipType;
+		const currentLinks = (fm[fieldName] as string[]) || [];
+
+		// Add the feature ID if not already present
+		if (!currentLinks.includes(linkResult.featureId)) {
+			currentLinks.push(linkResult.featureId);
+		}
+
+		// Update the entity file
+		const updatedContent = updateFrontmatter(content, {
+			[fieldName]: currentLinks,
+			updated: new Date().toISOString(),
+		});
+		await this.app.vault.modify(entityFile, updatedContent);
+
+		new Notice(`Linked ${entityId} to ${linkResult.featureId} (${linkResult.relationshipType})`);
+
+		// Trigger reconcile to update the feature's reverse relationship
+		await this.reconcileAllRelationships();
+	}
+
+	/**
+	 * Activate the Feature Details sidebar view
+	 */
+	private async activateFeatureDetailsView(): Promise<void> {
+		const { workspace } = this.app;
+
+		// Check if view is already open
+		let leaf = workspace.getLeavesOfType(FEATURE_DETAILS_VIEW_TYPE)[0];
+
+		if (!leaf) {
+			// Create new leaf in right sidebar
+			const rightLeaf = workspace.getRightLeaf(false);
+			if (rightLeaf) {
+				await rightLeaf.setViewState({
+					type: FEATURE_DETAILS_VIEW_TYPE,
+					active: true,
+				});
+				leaf = rightLeaf;
+			}
+		}
+
+		if (leaf) {
+			workspace.revealLeaf(leaf);
+		}
+	}
+
+	/**
+	 * Activate the Feature Coverage view
+	 */
+	private async activateFeatureCoverageView(): Promise<void> {
+		const { workspace } = this.app;
+
+		// Check if view is already open
+		let leaf = workspace.getLeavesOfType(FEATURE_COVERAGE_VIEW_TYPE)[0];
+
+		if (!leaf) {
+			// Create new leaf as a tab
+			leaf = workspace.getLeaf("tab");
+			await leaf.setViewState({
+				type: FEATURE_COVERAGE_VIEW_TYPE,
+				active: true,
+			});
+		}
+
+		if (leaf) {
+			workspace.revealLeaf(leaf);
+		}
+	}
+
+	/**
+	 * Import features from FUTURE_FEATURES.md file
+	 */
+	private async importFromFutureFeatures(): Promise<void> {
+		// Look for FUTURE_FEATURES.md in vault root or docs folder
+		const possiblePaths = ["FUTURE_FEATURES.md", "docs/FUTURE_FEATURES.md"];
+		let futureFile: TFile | null = null;
+
+		for (const path of possiblePaths) {
+			const file = this.app.vault.getAbstractFileByPath(path);
+			if (file instanceof TFile) {
+				futureFile = file;
+				break;
+			}
+		}
+
+		if (!futureFile) {
+			new Notice("FUTURE_FEATURES.md not found in vault root or docs folder");
+			return;
+		}
+
+		const content = await this.app.vault.read(futureFile);
+		const features = this.parseFutureFeatures(content);
+
+		if (features.length === 0) {
+			new Notice("No features found in FUTURE_FEATURES.md");
+			return;
+		}
+
+		// Create features folder if needed
+		const featuresFolder = this.settings.entityNavigator.featuresFolder || "features";
+		const folderExists = await this.app.vault.adapter.exists(featuresFolder);
+		if (!folderExists) {
+			await this.app.vault.createFolder(featuresFolder);
+		}
+
+		let created = 0;
+		const now = new Date().toISOString();
+		for (const ff of features) {
+			const id = generateId(this.app, this.settings, "feature");
+			const filename = `${id}_${ff.title.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 50)}.md`;
+			const filePath = `${featuresFolder}/${filename}`;
+
+			// Check if file already exists
+			if (await this.app.vault.adapter.exists(filePath)) continue;
+
+			const tier: FeatureTier = ff.category?.toLowerCase().includes("premium") ? "Premium" : "OSS";
+			const phase = this.mapCategoryToPhase(ff.category || "");
+			const status: FeatureStatus = ff.status === "Not planned" ? "Deferred" : "Planned";
+
+			const featureContent = replaceFeaturePlaceholders(DEFAULT_FEATURE_TEMPLATE, {
+				id,
+				type: "feature",
+				title: ff.title,
+				user_story: ff.description || `As a user, I want to ${ff.title.toLowerCase()}`,
+				tier,
+				phase,
+				status,
+				priority: "Medium",
+				workstream: "engineering",
+				personas: [],
+				acceptance_criteria: [],
+				last_updated: now,
+				created_at: now,
+				created_by_plugin: true,
+			});
+
+			await this.app.vault.create(filePath, featureContent);
+			created++;
+		}
+
+		new Notice(`Imported ${created} features from FUTURE_FEATURES.md`);
+	}
+
+	/**
+	 * Parse FUTURE_FEATURES.md content into feature objects
+	 */
+	private parseFutureFeatures(content: string): Array<{
+		title: string;
+		description?: string;
+		category?: string;
+		status?: string;
+	}> {
+		const features: Array<{
+			title: string;
+			description?: string;
+			category?: string;
+			status?: string;
+		}> = [];
+
+		const lines = content.split("\n");
+		let currentCategory = "";
+
+		for (const line of lines) {
+			// Category headers (## or ###)
+			const categoryMatch = line.match(/^#{2,3}\s+(.+)/);
+			if (categoryMatch) {
+				currentCategory = categoryMatch[1].trim();
+				continue;
+			}
+
+			// Feature items (- [ ] or - [x] or just -)
+			const featureMatch = line.match(/^[-*]\s+\[?[x ]?\]?\s*(.+)/i);
+			if (featureMatch) {
+				const featureText = featureMatch[1].trim();
+				// Skip if it's a sub-item (indented)
+				if (line.match(/^\s{2,}/)) continue;
+
+				// Parse status from checkbox
+				const isChecked = line.includes("[x]") || line.includes("[X]");
+				const status = isChecked ? "Complete" : "Planned";
+
+				features.push({
+					title: featureText,
+					category: currentCategory,
+					status,
+				});
+			}
+		}
+
+		return features;
+	}
+
+	/**
+	 * Map category string to feature phase
+	 */
+	private mapCategoryToPhase(category: string): FeaturePhase {
+		const lower = category.toLowerCase();
+		if (lower.includes("mvp") || lower.includes("core")) return "MVP";
+		if (lower.includes("phase 0") || lower.includes("p0")) return "0";
+		if (lower.includes("phase 1") || lower.includes("p1")) return "1";
+		if (lower.includes("phase 2") || lower.includes("p2")) return "2";
+		if (lower.includes("phase 3") || lower.includes("p3")) return "3";
+		if (lower.includes("phase 4") || lower.includes("p4")) return "4";
+		if (lower.includes("phase 5") || lower.includes("p5")) return "5";
+		if (lower.includes("future") || lower.includes("later")) return "5";
+		return "MVP";
+	}
+
+	/**
+	 * Suggest feature links based on title similarity
+	 */
+	private async suggestFeatureLinks(): Promise<void> {
+		if (!this.entityIndex?.isReady()) {
+			new Notice("Entity index not ready. Please wait...");
+			return;
+		}
+
+		const features = this.entityIndex.getByType("feature");
+		const milestones = this.entityIndex.getByType("milestone");
+		const stories = this.entityIndex.getByType("story");
+
+		if (features.length === 0) {
+			new Notice("No features found in vault");
+			return;
+		}
+
+		const suggestions: Array<{
+			feature: EntityIndexEntry;
+			matches: EntityIndexEntry[];
+		}> = [];
+
+		for (const feature of features) {
+			// Skip features that already have implementations
+			if (feature.implemented_by.length > 0) continue;
+
+			const matches: EntityIndexEntry[] = [];
+
+			// Check milestones and stories for title similarity
+			for (const entity of [...milestones, ...stories]) {
+				if (this.titleSimilarity(feature.title, entity.title) > 0.4) {
+					matches.push(entity);
+				}
+			}
+
+			if (matches.length > 0) {
+				suggestions.push({ feature, matches });
+			}
+		}
+
+		if (suggestions.length === 0) {
+			new Notice("No link suggestions found");
+			return;
+		}
+
+		// Show first suggestion
+		const first = suggestions[0];
+		const matchTitles = first.matches.map(m => `${m.id}: ${m.title}`).join("\n");
+		new Notice(
+			`Feature "${first.feature.title}" may be implemented by:\n${matchTitles}\n\nUse "Link to Feature" command to create links.`,
+			10000
+		);
+	}
+
+	/**
+	 * Simple title similarity check
+	 */
+	private titleSimilarity(a: string, b: string): number {
+		const aWords = new Set(a.toLowerCase().split(/\s+/));
+		const bWords = new Set(b.toLowerCase().split(/\s+/));
+		let matches = 0;
+		for (const word of aWords) {
+			if (word.length > 2 && bWords.has(word)) matches++;
+		}
+		return matches / Math.max(aWords.size, bWords.size);
+	}
+
+	/**
+	 * Bulk link features - show a modal to link multiple entities at once
+	 */
+	private async bulkLinkFeatures(): Promise<void> {
+		if (!this.entityIndex?.isReady()) {
+			new Notice("Entity index not ready. Please wait...");
+			return;
+		}
+
+		const features = this.entityIndex.getByType("feature");
+		if (features.length === 0) {
+			new Notice("No features found in vault");
+			return;
+		}
+
+		// For now, show a notice with instructions
+		// A full bulk editor would require a more complex modal
+		new Notice(
+			"Bulk Link Features:\n\n" +
+			"1. Open a milestone, story, or document\n" +
+			"2. Use 'Link to Feature' command\n" +
+			"3. Select the feature to link\n\n" +
+			"Or use 'Reconcile All Relationships' to sync existing links.",
+			10000
+		);
+	}
+
+	/**
+	 * Reconcile all bidirectional relationships across the entire vault.
+	 * This scans all markdown files and syncs reverse relationships:
+	 * - depends_on ↔ blocks
+	 * - parent ↔ children
+	 * - implements ↔ implemented_by
+	 * - documents ↔ documented_by
+	 * - affects ↔ decided_by
+	 * - supersedes ↔ superseded_by
+	 * - previous_version ↔ next_version
+	 */
+	private async reconcileAllRelationships(): Promise<void> {
+		new Notice("Reconciling relationships across vault...");
+
+		// Build maps for all relationships
+		const reverseRels = new Map<string, {
+			blocks: string[];
+			children: string[];
+			implementedBy: string[];
+			documentedBy: string[];
+			decidedBy: string[];
+			supersededBy?: string;
+			nextVersion?: string;
+		}>();
+
+		const entityIdToFile = new Map<string, TFile>();
+
+		const ensureEntity = (entityId: string) => {
+			if (!reverseRels.has(entityId)) {
+				reverseRels.set(entityId, {
+					blocks: [],
+					children: [],
+					implementedBy: [],
+					documentedBy: [],
+					decidedBy: [],
+				});
+			}
+			return reverseRels.get(entityId)!;
+		};
+
+		const parseYamlArray = (text: string, key: string): string[] => {
+			const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+			if (multilineMatch) {
+				const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+				if (items) {
+					return items.map(item => item.replace(/^\s*-\s*/, '').trim());
+				}
+			}
+			const inlineMatch = text.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+			if (inlineMatch) {
+				return inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+			}
+			const singleMatch = text.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+			if (singleMatch && singleMatch[1].trim()) {
+				return [singleMatch[1].trim()];
+			}
+			return [];
+		};
+
+		// Scan all markdown files
+		const allFiles = this.app.vault.getMarkdownFiles();
+		let scannedCount = 0;
+
+		for (const file of allFiles) {
+			try {
+				const content = await this.app.vault.read(file);
+				const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+				if (!frontmatterMatch) continue;
+
+				const fm = frontmatterMatch[1];
+				const idMatch = fm.match(/^id:\s*(.+)$/m);
+				if (!idMatch) continue;
+
+				const entityId = idMatch[1].trim();
+				ensureEntity(entityId);
+				entityIdToFile.set(entityId, file);
+				scannedCount++;
+
+				// depends_on -> blocks
+				const dependsOn = parseYamlArray(fm, 'depends_on');
+				for (const depId of dependsOn) {
+					const depRels = ensureEntity(depId);
+					if (!depRels.blocks.includes(entityId)) {
+						depRels.blocks.push(entityId);
+					}
+				}
+
+				// parent -> children
+				const parentMatch = fm.match(/^parent:\s*(.+)$/m);
+				if (parentMatch) {
+					const parentId = parentMatch[1].trim();
+					const parentRels = ensureEntity(parentId);
+					if (!parentRels.children.includes(entityId)) {
+						parentRels.children.push(entityId);
+					}
+				}
+
+				// implements -> implemented_by
+				const implementsArr = parseYamlArray(fm, 'implements');
+				for (const featureId of implementsArr) {
+					const featureRels = ensureEntity(featureId);
+					if (!featureRels.implementedBy.includes(entityId)) {
+						featureRels.implementedBy.push(entityId);
+					}
+				}
+
+				// documents -> documented_by
+				const documentsArr = parseYamlArray(fm, 'documents');
+				for (const featureId of documentsArr) {
+					const featureRels = ensureEntity(featureId);
+					if (!featureRels.documentedBy.includes(entityId)) {
+						featureRels.documentedBy.push(entityId);
+					}
+				}
+
+				// affects -> decided_by
+				const affectsArr = parseYamlArray(fm, 'affects');
+				for (const featureId of affectsArr) {
+					const featureRels = ensureEntity(featureId);
+					if (!featureRels.decidedBy.includes(entityId)) {
+						featureRels.decidedBy.push(entityId);
+					}
+				}
+
+				// supersedes -> superseded_by
+				const supersedesMatch = fm.match(/^supersedes:\s*(.+)$/m);
+				if (supersedesMatch) {
+					const supersededId = supersedesMatch[1].trim();
+					const supersededRels = ensureEntity(supersededId);
+					supersededRels.supersededBy = entityId;
+				}
+
+				// previous_version -> next_version
+				const prevVersionMatch = fm.match(/^previous_version:\s*(.+)$/m);
+				if (prevVersionMatch) {
+					const prevId = prevVersionMatch[1].trim();
+					const prevRels = ensureEntity(prevId);
+					prevRels.nextVersion = entityId;
+				}
+			} catch (e) {
+				console.warn('[Canvas Plugin] Failed to read file for reconcile:', file.path, e);
+			}
+		}
+
+		// Now update each entity's file with computed reverse relationships
+		let updatedCount = 0;
+
+		for (const [entityId, rels] of reverseRels.entries()) {
+			const file = entityIdToFile.get(entityId);
+			if (!file) continue;
+
+			try {
+				const content = await this.app.vault.read(file);
+				const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+				if (!frontmatterMatch) continue;
+
+				const fm = frontmatterMatch[1];
+
+				// Check current values
+				const currentBlocks = parseYamlArray(fm, 'blocks');
+				const currentChildren = parseYamlArray(fm, 'children');
+				const currentImplementedBy = parseYamlArray(fm, 'implemented_by');
+				const currentDocumentedBy = parseYamlArray(fm, 'documented_by');
+				const currentDecidedBy = parseYamlArray(fm, 'decided_by');
+				const supersededByMatch = fm.match(/^superseded_by:\s*(.+)$/m);
+				const currentSupersededBy = supersededByMatch?.[1]?.trim();
+				const nextVersionMatch = fm.match(/^next_version:\s*(.+)$/m);
+				const currentNextVersion = nextVersionMatch?.[1]?.trim();
+
+				// Compare
+				const blocksChanged = JSON.stringify([...currentBlocks].sort()) !== JSON.stringify([...rels.blocks].sort());
+				const childrenChanged = JSON.stringify([...currentChildren].sort()) !== JSON.stringify([...rels.children].sort());
+				const implementedByChanged = JSON.stringify([...currentImplementedBy].sort()) !== JSON.stringify([...rels.implementedBy].sort());
+				const documentedByChanged = JSON.stringify([...currentDocumentedBy].sort()) !== JSON.stringify([...rels.documentedBy].sort());
+				const decidedByChanged = JSON.stringify([...currentDecidedBy].sort()) !== JSON.stringify([...rels.decidedBy].sort());
+				const supersededByChanged = currentSupersededBy !== rels.supersededBy;
+				const nextVersionChanged = currentNextVersion !== rels.nextVersion;
+
+				if (blocksChanged || childrenChanged || implementedByChanged || documentedByChanged || decidedByChanged || supersededByChanged || nextVersionChanged) {
+					const updates: Record<string, unknown> = {
+						updated: new Date().toISOString(),
+					};
+
+					if (blocksChanged && rels.blocks.length > 0) {
+						updates.blocks = rels.blocks;
+					}
+					if (childrenChanged && rels.children.length > 0) {
+						updates.children = rels.children;
+					}
+					if (implementedByChanged && rels.implementedBy.length > 0) {
+						updates.implemented_by = rels.implementedBy;
+					}
+					if (documentedByChanged && rels.documentedBy.length > 0) {
+						updates.documented_by = rels.documentedBy;
+					}
+					if (decidedByChanged && rels.decidedBy.length > 0) {
+						updates.decided_by = rels.decidedBy;
+					}
+					if (supersededByChanged && rels.supersededBy) {
+						updates.superseded_by = rels.supersededBy;
+					}
+					if (nextVersionChanged && rels.nextVersion) {
+						updates.next_version = rels.nextVersion;
+					}
+
+					const updatedContent = updateFrontmatter(content, updates);
+					await this.app.vault.modify(file, updatedContent);
+					updatedCount++;
+				}
+			} catch (e) {
+				console.warn('[Canvas Plugin] Failed to update file for reconcile:', file.path, e);
+			}
+		}
+
+		new Notice(`Reconciled ${scannedCount} entities, updated ${updatedCount} files`);
+		console.debug('[Canvas Plugin] Reconcile complete:', { scannedCount, updatedCount });
 	}
 
 	// ==================== HTTP SERVER ====================

@@ -1,6 +1,11 @@
 // Entity Navigator types
-export type EntityType = 'milestone' | 'story' | 'task' | 'decision' | 'document' | 'accomplishment';
+export type EntityType = 'milestone' | 'story' | 'task' | 'decision' | 'document' | 'feature';
 export type OpenBehavior = 'tabs' | 'split-h' | 'split-v';
+
+// Feature-specific types
+export type FeatureTier = 'OSS' | 'Premium';
+export type FeaturePhase = 'MVP' | '0' | '1' | '2' | '3' | '4' | '5';
+export type FeatureStatus = 'Planned' | 'In Progress' | 'Complete' | 'Deferred';
 
 export interface EntityNavigatorSettings {
 	showDataviewWarning: boolean;
@@ -11,6 +16,7 @@ export interface EntityNavigatorSettings {
 	tasksFolder: string;
 	decisionsFolder: string;
 	documentsFolder: string;
+	featuresFolder: string;
 }
 
 export const DEFAULT_ENTITY_NAVIGATOR_SETTINGS: EntityNavigatorSettings = {
@@ -21,20 +27,18 @@ export const DEFAULT_ENTITY_NAVIGATOR_SETTINGS: EntityNavigatorSettings = {
 	tasksFolder: 'tasks',
 	decisionsFolder: 'decisions',
 	documentsFolder: 'documents',
+	featuresFolder: 'features',
 };
 
 export interface CanvasItemFromTemplateSettings {
 	notesBaseFolder: string;
-	accomplishmentTemplatePath: string;
 	templateFolder: string; // Folder to scan for additional templates
 	useTemplateFolder: boolean; // Enable template folder scanning
-	idPrefixAccomplishment: string;
 	idZeroPadLength: number;
 	effortOptions: string[];
 	defaultEffort: string;
 	inferBaseFolderFromCanvas: boolean;
 	showIdInCanvas: boolean;
-	shapeAccomplishment: string;
 	effortColorMap: Record<string, string>;
 	inProgressColor: string; // Color to use when inProgress is true
 	// Notion
@@ -56,16 +60,13 @@ export interface CanvasItemFromTemplateSettings {
 
 export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
 	notesBaseFolder: "Projects",
-	accomplishmentTemplatePath: "Templates/canvas-accomplishment-template.md",
 	templateFolder: "Templates",
 	useTemplateFolder: false,
-	idPrefixAccomplishment: "A",
 	idZeroPadLength: 3,
 	effortOptions: ["Business", "Infra", "Engineering", "Research"],
 	defaultEffort: "Engineering",
 	inferBaseFolderFromCanvas: true,
 	showIdInCanvas: true,
-	shapeAccomplishment: "accomplishment",
 	effortColorMap: {
 		Business: "6",
 		Infra: "4",
@@ -86,14 +87,12 @@ export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
 	httpServerEnabled: false,
 	httpServerPort: 12312,
 };
-
-export type ItemType = "accomplishment";
 // v2.1 spec-aligned status/priority while staying backward compatible with Notion mapping
 export type ItemStatus = "Not Started" | "In Progress" | "Completed" | "Blocked";
 export type ItemPriority = "Low" | "Medium" | "High" | "Critical";
 
 export interface ItemFrontmatter {
-	type: ItemType;
+	type: EntityType;
 	title: string;
 	effort: string;
 	id: string;
@@ -101,13 +100,52 @@ export interface ItemFrontmatter {
 	priority: ItemPriority;
 	inProgress?: boolean; // When true, node border is red
 	time_estimate?: number; // Total time estimate in hours (sum of task estimates)
-	depends_on?: string[]; // Array of accomplishment IDs this depends on
+	depends_on?: string[]; // Array of entity IDs this depends on
+	implements?: string[]; // Array of feature IDs this entity implements (for milestones/stories)
+	documents?: string[]; // Array of feature IDs this document documents (for documents)
+	affects?: string[]; // Array of feature IDs this decision affects (for decisions)
 	created_by_plugin?: boolean;
 	created: string;
 	updated: string;
 	canvas_source: string;
 	vault_path: string;
 	notion_page_id?: string;
+}
+
+/**
+ * Feature entity frontmatter (F-XXX)
+ * Per FEATURE_ENTITY_SPEC.md
+ */
+export interface FeatureFrontmatter {
+	// Identity (required)
+	id: string;                      // F-XXX format
+	type: 'feature';
+	title: string;
+	workstream: string;              // e.g., "engineering"
+
+	// Feature Classification (required)
+	user_story: string;              // "As a..., I want to..., so that..."
+	tier: FeatureTier;               // OSS | Premium
+	phase: FeaturePhase;             // MVP | 0 | 1 | 2 | 3 | 4 | 5
+	status: FeatureStatus;           // Planned | In Progress | Complete | Deferred
+	priority: ItemPriority;          // Low | Medium | High | Critical
+
+	// Detail Fields (optional)
+	personas?: string[];             // Target user personas
+	acceptance_criteria?: string[];  // Completion criteria
+	test_refs?: string[];            // Test file references
+
+	// Relationships
+	implemented_by?: string[];       // Milestones and Stories (M-XXX, S-XXX)
+	documented_by?: string[];        // Documents (DOC-XXX)
+	decided_by?: string[];           // Decisions (DEC-XXX)
+	depends_on?: string[];           // Other Features (F-XXX)
+	blocks?: string[];               // Features this blocks (auto-synced)
+
+	// Metadata (auto-managed)
+	last_updated: string;            // ISO 8601 datetime
+	created_at: string;              // ISO 8601 datetime
+	created_by_plugin?: boolean;
 }
 
 /**

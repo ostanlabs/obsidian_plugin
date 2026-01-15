@@ -1,8 +1,8 @@
 /**
  * Entity Navigator - Index and navigation utilities for project entities
  *
- * Supports entity types: milestone, story, task, decision, document
- * ID patterns: M-xxx, S-xxx, T-xxx, DEC-xxx, DOC-xxx
+ * Supports entity types: milestone, story, task, decision, document, feature
+ * ID patterns: M-xxx, S-xxx, T-xxx, DEC-xxx, DOC-xxx, F-xxx
  */
 
 import { App, TFile } from "obsidian";
@@ -15,6 +15,7 @@ export const ID_PATTERNS: Record<string, RegExp> = {
 	task: /^T-\d{3,}$/,
 	decision: /^DEC-\d{3,}$/,
 	document: /^DOC-\d{3,}$/,
+	feature: /^F-\d{3,}$/,
 };
 
 // Entity frontmatter interface
@@ -24,10 +25,19 @@ export interface EntityFrontmatter {
 	title?: string;
 	parent?: string;
 	depends_on?: string[];
-	implements?: string[];
+	implements?: string[];  // Features this entity implements (for milestones/stories)
+	documents?: string[];   // Features this document documents (for documents)
+	affects?: string[];     // Features this decision affects (for decisions)
 	enables?: string[];
 	affects_documents?: string[];
 	implemented_by?: string[];
+	// Feature-specific fields
+	documented_by?: string[];
+	decided_by?: string[];
+	blocks?: string[];
+	tier?: string;
+	phase?: string;
+	user_story?: string;
 }
 
 // Entity index entry
@@ -38,9 +48,17 @@ export interface EntityIndexEntry {
 	title: string;
 	parent?: string;
 	depends_on: string[];
-	implements: string[];
+	implements: string[];   // Features this entity implements (for milestones/stories)
+	documents: string[];    // Features this document documents (for documents)
+	affects: string[];      // Features this decision affects (for decisions)
 	enables: string[];
 	implemented_by: string[];
+	// Feature-specific fields
+	documented_by: string[];
+	decided_by: string[];
+	blocks: string[];
+	tier?: string;
+	phase?: string;
 }
 
 /** Get entity type from ID string */
@@ -50,6 +68,7 @@ export function getEntityTypeFromId(id: string): EntityType | null {
 	if (ID_PATTERNS.task.test(id)) return 'task';
 	if (ID_PATTERNS.decision.test(id)) return 'decision';
 	if (ID_PATTERNS.document.test(id)) return 'document';
+	if (ID_PATTERNS.feature.test(id)) return 'feature';
 	return null;
 }
 
@@ -94,7 +113,8 @@ export class EntityIndex {
 		const fm = cache.frontmatter as EntityFrontmatter;
 		let id = fm.id;
 		if (!id) {
-			const match = file.basename.match(/^([A-Z]+-\d{3,}|DEC-\d{3,}|DOC-\d{3,})/);
+			// Match F-xxx for features as well
+			const match = file.basename.match(/^([A-Z]+-\d{3,}|DEC-\d{3,}|DOC-\d{3,}|F-\d{3,})/);
 			if (match) id = match[1];
 		}
 		if (!id || !isEntityId(id)) return null;
@@ -106,8 +126,16 @@ export class EntityIndex {
 			parent: fm.parent,
 			depends_on: this.normalizeArray(fm.depends_on),
 			implements: this.normalizeArray(fm.implements),
+			documents: this.normalizeArray(fm.documents),
+			affects: this.normalizeArray(fm.affects),
 			enables: this.normalizeArray(fm.enables),
 			implemented_by: this.normalizeArray(fm.implemented_by),
+			// Feature-specific fields
+			documented_by: this.normalizeArray(fm.documented_by),
+			decided_by: this.normalizeArray(fm.decided_by),
+			blocks: this.normalizeArray(fm.blocks),
+			tier: fm.tier,
+			phase: fm.phase,
 		};
 	}
 
@@ -239,5 +267,69 @@ export class EntityIndex {
 			if (entry.file.path === file.path) return entry;
 		}
 		return undefined;
+	}
+
+	// =========================================================================
+	// Feature-specific Navigation Methods
+	// =========================================================================
+
+	/** Get features that a milestone/story implements */
+	getFeaturesImplementedBy(id: string): EntityIndexEntry[] {
+		return Array.from(this.index.values())
+			.filter(e => e.type === 'feature' && e.implemented_by.includes(id));
+	}
+
+	/** Get milestones/stories that implement a feature */
+	getFeatureImplementors(featureId: string): EntityIndexEntry[] {
+		const feature = this.index.get(featureId);
+		if (!feature || feature.type !== 'feature') return [];
+		return feature.implemented_by
+			.map(id => this.index.get(id))
+			.filter((e): e is EntityIndexEntry => e !== undefined);
+	}
+
+	/** Get documents that document a feature */
+	getFeatureDocuments(featureId: string): EntityIndexEntry[] {
+		const feature = this.index.get(featureId);
+		if (!feature || feature.type !== 'feature') return [];
+		return feature.documented_by
+			.map(id => this.index.get(id))
+			.filter((e): e is EntityIndexEntry => e !== undefined);
+	}
+
+	/** Get decisions that affect a feature */
+	getFeatureDecisions(featureId: string): EntityIndexEntry[] {
+		const feature = this.index.get(featureId);
+		if (!feature || feature.type !== 'feature') return [];
+		return feature.decided_by
+			.map(id => this.index.get(id))
+			.filter((e): e is EntityIndexEntry => e !== undefined);
+	}
+
+	/** Get features that depend on this feature */
+	getFeatureDependents(featureId: string): EntityIndexEntry[] {
+		return Array.from(this.index.values())
+			.filter(e => e.type === 'feature' && e.depends_on.includes(featureId));
+	}
+
+	/** Get features that this feature blocks */
+	getBlockedFeatures(featureId: string): EntityIndexEntry[] {
+		const feature = this.index.get(featureId);
+		if (!feature || feature.type !== 'feature') return [];
+		return feature.blocks
+			.map(id => this.index.get(id))
+			.filter((e): e is EntityIndexEntry => e !== undefined);
+	}
+
+	/** Get features by tier (OSS or Premium) */
+	getFeaturesByTier(tier: string): EntityIndexEntry[] {
+		return Array.from(this.index.values())
+			.filter(e => e.type === 'feature' && e.tier === tier);
+	}
+
+	/** Get features by phase (MVP, 0, 1, 2, 3, 4, 5) */
+	getFeaturesByPhase(phase: string): EntityIndexEntry[] {
+		return Array.from(this.index.values())
+			.filter(e => e.type === 'feature' && e.phase === phase);
 	}
 }

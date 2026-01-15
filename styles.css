@@ -426,3 +426,15 @@
     display: none !important;
 }
 
+/* Hide feature nodes and their connected edges */
+.canvas-pm-hide-features .canvas-node[data-canvas-pm-type="feature"],
+.canvas.canvas-pm-hide-features .canvas-node[data-canvas-pm-type="feature"] {
+    display: none !important;
+}
+
+.canvas-pm-hide-features [data-canvas-pm-from-type="feature"],
+.canvas-pm-hide-features [data-canvas-pm-to-type="feature"],
+.canvas.canvas-pm-hide-features [data-canvas-pm-from-type="feature"],
+.canvas.canvas-pm-hide-features [data-canvas-pm-to-type="feature"] {
+    display: none !important;
+}

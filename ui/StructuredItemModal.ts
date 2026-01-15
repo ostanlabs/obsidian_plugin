@@ -1,5 +1,5 @@
 import { App, Modal, Setting, Notice } from "obsidian";
-import { ItemType, CanvasItemFromTemplateSettings } from "../types";
+import { EntityType, CanvasItemFromTemplateSettings } from "../types";
 
 export interface StructuredItemModalOptions {
 	showTitleInput: boolean;
@@ -10,11 +10,11 @@ export interface StructuredItemModalOptions {
 	submitButtonText: string;
 	defaultTitle?: string;
 	currentTitle?: string; // For display context when title is not editable
-	fixedType?: ItemType; // When typeEditable is false, show this type
+	fixedType?: EntityType; // When typeEditable is false, show this type
 }
 
 export interface StructuredItemResult {
-	type: ItemType;
+	type: EntityType;
 	effort: string;
 	title?: string; // Only set if showTitleInput is true
 	alias?: string;
@@ -41,7 +41,7 @@ export class StructuredItemModal extends Modal {
 		
 		const titleValue = options.defaultTitle || options.currentTitle || "";
 		this.result = {
-			type: options.fixedType || "accomplishment",
+			type: options.fixedType || "task",
 			effort: settings.defaultEffort,
 			title: options.showTitleInput ? titleValue : undefined,
 			alias: titleValue,
@@ -185,12 +185,9 @@ export class StructuredItemModal extends Modal {
 			file.path.startsWith(this.settings.templateFolder + "/")
 		);
 
-		// Include accomplishment templates and generic templates
+		// Include all templates from the template folder
 		for (const file of templateFiles) {
-			const name = file.basename.toLowerCase();
-			if (name.includes("accomplishment") || name.includes("goal") || !name.includes("task")) {
-				this.availableTemplates.push(file.path);
-			}
+			this.availableTemplates.push(file.path);
 		}
 	}
 

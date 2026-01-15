@@ -2,8 +2,8 @@
 
 # Default vault path - override with make deploy VAULT_PATH=/your/vault/path
 VAULT_PATH ?= $(HOME)/Documents/Obsidian/TestVault
-PLUGIN_DIR = $(VAULT_PATH)/.obsidian/plugins/canvas-accomplishments
-
+PLUGIN_ID ?= "canvas-structured-items"
+PLUGIN_DIR = $(VAULT_PATH)/.obsidian/plugins/${PLUGIN_ID}
 help: ## Show this help message
 	@echo "Available targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -44,7 +44,7 @@ check: lint test ## Run linter and tests
 deploy: build ## Deploy to Obsidian vault (set VAULT_PATH env var or pass as argument)
 	@echo "Deploying to $(PLUGIN_DIR)..."
 	@mkdir -p "$(PLUGIN_DIR)"
-	@cp main.js manifest.json "$(PLUGIN_DIR)/"
+	@cp main.js manifest.json styles.css "$(PLUGIN_DIR)/"
 	@echo "Deployed successfully!"
 	@echo "Note: Reload Obsidian or restart the plugin to see changes"
 
