@@ -383,10 +383,19 @@ private registerCommands(): void {
 		},
 	});
 
-	// Command 8: Reposition canvas nodes
+	// Command 8: Reposition canvas nodes (V2 - container algorithm)
 	this.addCommand({
 		id: "reposition-canvas-nodes",
-		name: "Project Canvas: Reposition nodes (graph layout)",
+		name: "Project Canvas: Reposition nodes (container layout)",
+		callback: async () => {
+			await this.repositionCanvasNodesV2();
+		},
+	});
+
+	// Command 8b: Reposition canvas nodes (legacy)
+	this.addCommand({
+		id: "reposition-canvas-nodes-legacy",
+		name: "Project Canvas: Reposition nodes (legacy layout)",
 		callback: async () => {
 			await this.repositionCanvasNodes();
 		},
@@ -5418,7 +5427,7 @@ private registerCommands(): void {
 
 			// Apply the same positioning algorithm used by the reposition command
 			console.log('\n=== STAGE 7: REPOSITION NODES ===');
-			await this.repositionCanvasNodes();
+			await this.repositionCanvasNodesV2();
 
 			// Archive cleanup: move archived files and remove archived nodes
 			console.log('\n=== STAGE 8: ARCHIVE CLEANUP ===');
@@ -7182,6 +7191,664 @@ private registerCommands(): void {
 
 		} catch (error) {
 			console.error('ERROR in repositionCanvasNodes:', error);
+			console.groupEnd();
+			this.isUpdatingCanvas = false;
+			new Notice("❌ Failed to reposition nodes: " + (error as Error).message);
+		}
+	}
+
+	// ============================================================
+	// CONTAINER ALGORITHM V2 - Graph-based container positioning
+	// ============================================================
+
+	/**
+	 * Container node representing a node and all its children
+	 */
+	private containerAlgoTypes() {
+		// Types defined inline in repositionCanvasNodesV2
+	}
+
+	/**
+	 * Reposition canvas nodes using Container Algorithm V2:
+	 * - Container = node + all nodes with incoming containment edges (toNode)
+	 * - Containment edges: parent, implemented_by, blocks, enables
+	 * - Non-containment edges: depends_on (ordering only)
+	 * - Multi-parent nodes positioned centered between/above all parents
+	 * - Recursive size calculation
+	 * - Leaf nodes closest to parent, sub-containers further away
+	 */
+	private async repositionCanvasNodesV2(): Promise<void> {
+		console.group('[Canvas Plugin] repositionCanvasNodesV2 (container-based)');
+
+		const canvasFile = this.getActiveCanvasFile();
+		if (!canvasFile) {
+			console.warn('No active canvas file found');
+			console.groupEnd();
+			new Notice("Please open a canvas file first");
+			return;
+		}
+
+		try {
+			const canvasData = await loadCanvasData(this.app, canvasFile);
+			console.log('Canvas has', canvasData.nodes.length, 'nodes,', canvasData.edges.length, 'edges');
+
+			const fileNodes = canvasData.nodes.filter(n => n.type === 'file');
+			if (fileNodes.length === 0) {
+				new Notice("No file nodes on canvas to reposition");
+				console.groupEnd();
+				return;
+			}
+
+			// Layout configuration
+			const config = {
+				nodeWidth: 462,
+				nodeHeight: 250,
+				horizontalSpacing: 100,   // Spacing between siblings horizontally
+				verticalSpacing: 150,     // Spacing between nodes vertically
+				containerPadding: 50,     // Padding around container contents
+				milestoneSpacing: 500,    // Min spacing between milestone containers
+				workstreamSpacing: 400,   // Vertical spacing between workstreams
+				startX: 500,
+				startY: 500,
+				maxNodesPerColumn: 5,     // Max nodes in a column before starting new column
+			};
+
+			// ============================================================
+			// STEP 1: Parse node metadata from frontmatter
+			// ============================================================
+			type NodeMeta = {
+				id: string;              // Canvas node ID
+				entityId?: string;       // Entity ID (e.g., M-001, S-001)
+				type: string;            // milestone, story, task, etc.
+				workstream: string;      // engineering, business, etc.
+				filePath: string;
+				// Containment relationships (create parent-child)
+				parent?: string;         // Parent entity ID
+				implementedBy: string[]; // Entities that implement this
+				blocks: string[];        // Entities this blocks
+				enables: string[];       // Entities this enables
+				// Non-containment relationships (ordering only)
+				dependsOn: string[];     // Dependencies for ordering
+			};
+
+			const nodeMeta = new Map<string, NodeMeta>();
+			const entityIdToNodeId = new Map<string, string>();
+
+			// Helper to parse YAML arrays
+			const parseYamlArray = (text: string, key: string): string[] => {
+				const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+				if (multilineMatch) {
+					const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+					if (items) {
+						return items.map(item => item.replace(/^\s*-\s*/, '').trim());
+					}
+				}
+				const inlineMatch = text.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+				if (inlineMatch) {
+					return inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+				}
+				const singleMatch = text.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+				if (singleMatch && singleMatch[1].trim()) {
+					return [singleMatch[1].trim()];
+				}
+				return [];
+			};
+
+			// Parse all nodes
+			for (const node of fileNodes) {
+				if (!node.file) continue;
+				const file = this.app.vault.getAbstractFileByPath(node.file);
+				if (!(file instanceof TFile)) continue;
+
+				try {
+					const content = await this.app.vault.read(file);
+					const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+					if (!fmMatch) continue;
+
+					const fmText = fmMatch[1];
+					const typeMatch = fmText.match(/^type:\s*(.+)$/m);
+					const workstreamMatch = fmText.match(/^workstream:\s*(.+)$/m);
+					const idMatch = fmText.match(/^id:\s*(.+)$/m);
+					const parentMatch = fmText.match(/^parent:\s*(.+)$/m);
+
+					const entityId = idMatch?.[1]?.trim();
+
+					nodeMeta.set(node.id, {
+						id: node.id,
+						entityId,
+						type: typeMatch?.[1]?.trim().toLowerCase() || 'unknown',
+						workstream: workstreamMatch?.[1]?.trim().toLowerCase() || 'unassigned',
+						filePath: node.file,
+						parent: parentMatch?.[1]?.trim(),
+						implementedBy: parseYamlArray(fmText, 'implemented_by'),
+						blocks: parseYamlArray(fmText, 'blocks'),
+						enables: parseYamlArray(fmText, 'enables'),
+						dependsOn: parseYamlArray(fmText, 'depends_on'),
+					});
+
+					if (entityId) {
+						entityIdToNodeId.set(entityId, node.id);
+					}
+				} catch (e) {
+					console.warn('Failed to read frontmatter for node:', node.id, e);
+				}
+			}
+
+			console.log('Parsed', nodeMeta.size, 'nodes');
+
+			// ============================================================
+			// STEP 2: Build containment graph
+			// Containment edges: parent, implemented_by, blocks, enables
+			// Edge direction: child -> parent (toNode is parent)
+			// ============================================================
+			type ContainmentTarget = {
+				nodeId: string;
+				entityId: string;
+			};
+
+			// Map: nodeId -> list of containment targets (parents)
+			const containmentTargets = new Map<string, ContainmentTarget[]>();
+
+			for (const [nodeId, meta] of nodeMeta.entries()) {
+				const targets: ContainmentTarget[] = [];
+
+				// parent field -> single containment target
+				if (meta.parent) {
+					const parentNodeId = entityIdToNodeId.get(meta.parent);
+					if (parentNodeId) {
+						targets.push({ nodeId: parentNodeId, entityId: meta.parent });
+					}
+				}
+
+				// implemented_by field -> containment targets
+				for (const implEntityId of meta.implementedBy) {
+					const implNodeId = entityIdToNodeId.get(implEntityId);
+					if (implNodeId && !targets.some(t => t.nodeId === implNodeId)) {
+						targets.push({ nodeId: implNodeId, entityId: implEntityId });
+					}
+				}
+
+				// blocks field -> containment targets (decision blocks entities)
+				for (const blockedEntityId of meta.blocks) {
+					const blockedNodeId = entityIdToNodeId.get(blockedEntityId);
+					if (blockedNodeId && !targets.some(t => t.nodeId === blockedNodeId)) {
+						targets.push({ nodeId: blockedNodeId, entityId: blockedEntityId });
+					}
+				}
+
+				// enables field -> containment targets (decision enables entities)
+				for (const enabledEntityId of meta.enables) {
+					const enabledNodeId = entityIdToNodeId.get(enabledEntityId);
+					if (enabledNodeId && !targets.some(t => t.nodeId === enabledNodeId)) {
+						targets.push({ nodeId: enabledNodeId, entityId: enabledEntityId });
+					}
+				}
+
+				containmentTargets.set(nodeId, targets);
+			}
+
+			// Build reverse map: parentNodeId -> children nodeIds
+			const childrenByParent = new Map<string, string[]>();
+			for (const [nodeId, targets] of containmentTargets.entries()) {
+				if (targets.length === 1) {
+					// Single parent - this node is a child of that parent
+					const parentNodeId = targets[0].nodeId;
+					if (!childrenByParent.has(parentNodeId)) {
+						childrenByParent.set(parentNodeId, []);
+					}
+					childrenByParent.get(parentNodeId)!.push(nodeId);
+				}
+				// Multi-parent nodes are handled separately
+			}
+
+			console.log('Containment graph built');
+			for (const [parentId, children] of childrenByParent.entries()) {
+				const parentMeta = nodeMeta.get(parentId);
+				const childIds = children.map(c => nodeMeta.get(c)?.entityId || c);
+				console.log(`  ${parentMeta?.entityId || parentId} has ${children.length} children: ${childIds.join(', ')}`);
+			}
+
+			// ============================================================
+			// STEP 3: Identify root containers and orphans
+			// Root = milestone OR node with no containment targets
+			// ============================================================
+			const milestones = fileNodes.filter(n => nodeMeta.get(n.id)?.type === 'milestone');
+			const rootContainers: string[] = milestones.map(m => m.id);
+
+			// Find orphans (nodes with no containment targets that aren't milestones)
+			const orphanRoots: string[] = [];
+			for (const [nodeId, targets] of containmentTargets.entries()) {
+				if (targets.length === 0 && !rootContainers.includes(nodeId)) {
+					orphanRoots.push(nodeId);
+				}
+			}
+
+			// Find multi-parent nodes (positioned separately)
+			const multiParentNodes: string[] = [];
+			for (const [nodeId, targets] of containmentTargets.entries()) {
+				if (targets.length > 1) {
+					multiParentNodes.push(nodeId);
+				}
+			}
+
+			console.log('Root containers (milestones):', rootContainers.length);
+			console.log('Orphan roots:', orphanRoots.length);
+			console.log('Multi-parent nodes:', multiParentNodes.length);
+
+			// ============================================================
+			// STEP 4: Recursive container size calculation
+			// Children that are containers use their FULL container size
+			// Leaves are arranged in multi-column grid
+			// ============================================================
+			type ContainerSize = {
+				width: number;
+				height: number;
+				leafCount: number;        // Number of leaf children
+				subContainerCount: number; // Number of sub-containers
+				leafColumns: number;      // Number of columns for leaves
+				leafRows: number;         // Number of rows for leaves
+			};
+
+			const containerSizes = new Map<string, ContainerSize>();
+			const visited = new Set<string>();
+
+			const calculateContainerSize = (nodeId: string): ContainerSize => {
+				if (visited.has(nodeId)) {
+					// Circular reference - return node size only
+					return { width: config.nodeWidth, height: config.nodeHeight, leafCount: 0, subContainerCount: 0, leafColumns: 0, leafRows: 0 };
+				}
+				visited.add(nodeId);
+
+				if (containerSizes.has(nodeId)) {
+					return containerSizes.get(nodeId)!;
+				}
+
+				const children = childrenByParent.get(nodeId) || [];
+				if (children.length === 0) {
+					// Leaf node - no children, just the node itself
+					const size = { width: config.nodeWidth, height: config.nodeHeight, leafCount: 0, subContainerCount: 0, leafColumns: 0, leafRows: 0 };
+					containerSizes.set(nodeId, size);
+					return size;
+				}
+
+				// Separate children into leaves and sub-containers
+				const leaves: string[] = [];
+				const subContainers: string[] = [];
+
+				for (const childId of children) {
+					const childChildren = childrenByParent.get(childId) || [];
+					if (childChildren.length === 0) {
+						leaves.push(childId);
+					} else {
+						subContainers.push(childId);
+					}
+				}
+
+				// Calculate leaf grid dimensions (multi-column layout)
+				const leafColumns = leaves.length > 0 ? Math.ceil(leaves.length / config.maxNodesPerColumn) : 0;
+				const leafRows = leaves.length > 0 ? Math.min(leaves.length, config.maxNodesPerColumn) : 0;
+				const leafGridWidth = leafColumns > 0 ? leafColumns * config.nodeWidth + (leafColumns - 1) * config.horizontalSpacing : 0;
+				const leafGridHeight = leafRows > 0 ? leafRows * config.nodeHeight + (leafRows - 1) * config.verticalSpacing : 0;
+
+				// Calculate sub-container sizes recursively
+				// Sub-containers are stacked vertically, each using their FULL container size
+				let subContainerTotalHeight = 0;
+				let subContainerMaxWidth = 0;
+
+				for (const subId of subContainers) {
+					const subSize = calculateContainerSize(subId);
+					// Use the FULL container size for spacing, not just node size
+					subContainerTotalHeight += subSize.height;
+					subContainerMaxWidth = Math.max(subContainerMaxWidth, subSize.width);
+				}
+				if (subContainers.length > 1) {
+					subContainerTotalHeight += (subContainers.length - 1) * config.verticalSpacing;
+				}
+
+				// Total children width = leaf grid + spacing + sub-containers
+				let childrenWidth = 0;
+				if (leafGridWidth > 0) {
+					childrenWidth += leafGridWidth + config.horizontalSpacing;
+				}
+				if (subContainerMaxWidth > 0) {
+					childrenWidth += subContainerMaxWidth;
+				}
+
+				// Total children height = max of leaf grid height and sub-container stack height
+				const childrenHeight = Math.max(leafGridHeight, subContainerTotalHeight);
+
+				// Container size = parent node + spacing + children area + padding
+				const width = config.nodeWidth + config.horizontalSpacing + childrenWidth + config.containerPadding * 2;
+				const height = Math.max(config.nodeHeight, childrenHeight) + config.containerPadding * 2;
+
+				const size = {
+					width,
+					height,
+					leafCount: leaves.length,
+					subContainerCount: subContainers.length,
+					leafColumns,
+					leafRows
+				};
+				containerSizes.set(nodeId, size);
+
+				const meta = nodeMeta.get(nodeId);
+				console.log(`  Container ${meta?.entityId || nodeId}: ${width}x${height}, leaves=${leaves.length} (${leafColumns}x${leafRows}), subContainers=${subContainers.length}`);
+
+				return size;
+			};
+
+			// Calculate sizes for all root containers
+			for (const rootId of [...rootContainers, ...orphanRoots]) {
+				calculateContainerSize(rootId);
+			}
+
+			console.log('Container sizes calculated');
+
+			// ============================================================
+			// STEP 5: Position root containers by workstream
+			// ============================================================
+			type NodePosition = { x: number; y: number; width: number; height: number };
+			const finalPositions = new Map<string, NodePosition>();
+
+			// Group milestones by workstream
+			const milestonesByWorkstream = new Map<string, string[]>();
+			for (const mId of rootContainers) {
+				const ws = nodeMeta.get(mId)?.workstream || 'unassigned';
+				if (!milestonesByWorkstream.has(ws)) {
+					milestonesByWorkstream.set(ws, []);
+				}
+				milestonesByWorkstream.get(ws)!.push(mId);
+			}
+
+			// Sort milestones within each workstream by depends_on
+			const sortByDependencies = (nodeIds: string[]): string[] => {
+				const sorted: string[] = [];
+				const remaining = new Set(nodeIds);
+				const inSorted = new Set<string>();
+
+				while (remaining.size > 0) {
+					let added = false;
+					for (const nodeId of remaining) {
+						const meta = nodeMeta.get(nodeId);
+						const deps = meta?.dependsOn || [];
+						// Check if all dependencies are either not in our set or already sorted
+						const depsInSet = deps.filter(d => {
+							const depNodeId = entityIdToNodeId.get(d);
+							return depNodeId && nodeIds.includes(depNodeId);
+						});
+						const allDepsSatisfied = depsInSet.every(d => {
+							const depNodeId = entityIdToNodeId.get(d);
+							return depNodeId && inSorted.has(depNodeId);
+						});
+
+						if (allDepsSatisfied) {
+							sorted.push(nodeId);
+							inSorted.add(nodeId);
+							remaining.delete(nodeId);
+							added = true;
+						}
+					}
+					if (!added) {
+						// Circular dependency - just add remaining
+						for (const nodeId of remaining) {
+							sorted.push(nodeId);
+						}
+						break;
+					}
+				}
+				return sorted;
+			};
+
+			// Position milestones
+			let currentY = config.startY;
+
+			for (const [workstream, wsMillestones] of milestonesByWorkstream) {
+				console.log(`Positioning workstream: ${workstream}`);
+
+				const sortedMilestones = sortByDependencies(wsMillestones);
+				let currentX = config.startX;
+				let maxHeight = 0;
+
+				for (const mId of sortedMilestones) {
+					const size = containerSizes.get(mId) || { width: config.nodeWidth, height: config.nodeHeight };
+
+					finalPositions.set(mId, {
+						x: currentX,
+						y: currentY,
+						width: config.nodeWidth,
+						height: config.nodeHeight,
+					});
+
+					console.log(`  Milestone ${nodeMeta.get(mId)?.entityId} at (${currentX}, ${currentY}), container size: ${size.width}x${size.height}`);
+
+					currentX += size.width + config.milestoneSpacing;
+					maxHeight = Math.max(maxHeight, size.height);
+				}
+
+				currentY += maxHeight + config.workstreamSpacing;
+			}
+
+			// Position orphan roots
+			let orphanX = config.startX;
+			for (const orphanId of orphanRoots) {
+				const size = containerSizes.get(orphanId) || { width: config.nodeWidth, height: config.nodeHeight };
+
+				finalPositions.set(orphanId, {
+					x: orphanX,
+					y: currentY,
+					width: config.nodeWidth,
+					height: config.nodeHeight,
+				});
+
+				orphanX += size.width + config.milestoneSpacing;
+			}
+
+			// ============================================================
+			// STEP 6: Position children within each container
+			// Leaf nodes in multi-column grid (closest to parent)
+			// Sub-containers stacked vertically (further from parent)
+			// Sub-containers use their FULL container size for spacing
+			// ============================================================
+			const positionChildren = (parentId: string, parentPos: NodePosition) => {
+				const children = childrenByParent.get(parentId) || [];
+				if (children.length === 0) return;
+
+				const parentSize = containerSizes.get(parentId);
+
+				// Separate into leaves and sub-containers
+				const leaves: string[] = [];
+				const subContainers: string[] = [];
+
+				for (const childId of children) {
+					const childChildren = childrenByParent.get(childId) || [];
+					if (childChildren.length === 0) {
+						leaves.push(childId);
+					} else {
+						subContainers.push(childId);
+					}
+				}
+
+				// Calculate leaf grid dimensions
+				const leafColumns = leaves.length > 0 ? Math.ceil(leaves.length / config.maxNodesPerColumn) : 0;
+				const leafRows = Math.min(leaves.length, config.maxNodesPerColumn);
+				const leafGridWidth = leafColumns > 0 ? leafColumns * config.nodeWidth + (leafColumns - 1) * config.horizontalSpacing : 0;
+				const leafGridHeight = leafRows > 0 ? leafRows * config.nodeHeight + (leafRows - 1) * config.verticalSpacing : 0;
+
+				// Position leaves in a multi-column grid to the LEFT of parent
+				// Rightmost column is closest to parent
+				const leafGridStartX = parentPos.x - config.horizontalSpacing - leafGridWidth;
+				const leafGridStartY = parentPos.y - (leafGridHeight - config.nodeHeight) / 2;
+
+				for (let i = 0; i < leaves.length; i++) {
+					const leafId = leaves[i];
+					// Column 0 is leftmost, column (leafColumns-1) is rightmost (closest to parent)
+					const col = Math.floor(i / config.maxNodesPerColumn);
+					const row = i % config.maxNodesPerColumn;
+
+					// Position from left to right (col 0 = leftmost)
+					const leafX = leafGridStartX + col * (config.nodeWidth + config.horizontalSpacing);
+					const leafY = leafGridStartY + row * (config.nodeHeight + config.verticalSpacing);
+
+					finalPositions.set(leafId, {
+						x: leafX,
+						y: leafY,
+						width: config.nodeWidth,
+						height: config.nodeHeight,
+					});
+				}
+
+				// Calculate total height of sub-containers (using their FULL container sizes)
+				let subContainerTotalHeight = 0;
+				for (const subId of subContainers) {
+					const subSize = containerSizes.get(subId) || { width: config.nodeWidth, height: config.nodeHeight };
+					subContainerTotalHeight += subSize.height;
+				}
+				if (subContainers.length > 1) {
+					subContainerTotalHeight += (subContainers.length - 1) * config.verticalSpacing;
+				}
+
+				// Position sub-containers further LEFT, stacked vertically
+				// Each sub-container uses its FULL container size for vertical spacing
+				let subX: number;
+				if (leafGridWidth > 0) {
+					subX = leafGridStartX - config.horizontalSpacing - config.nodeWidth;
+				} else {
+					subX = parentPos.x - config.horizontalSpacing - config.nodeWidth;
+				}
+
+				// Center the sub-container stack vertically relative to parent
+				let subY = parentPos.y - (subContainerTotalHeight - config.nodeHeight) / 2;
+
+				for (const subId of subContainers) {
+					const subSize = containerSizes.get(subId) || { width: config.nodeWidth, height: config.nodeHeight };
+
+					finalPositions.set(subId, {
+						x: subX,
+						y: subY,
+						width: config.nodeWidth,
+						height: config.nodeHeight,
+					});
+
+					// Recursively position children of this sub-container
+					positionChildren(subId, finalPositions.get(subId)!);
+
+					// Move down by the FULL container height (not just node height)
+					subY += subSize.height + config.verticalSpacing;
+				}
+			};
+
+			// Position children for all root containers
+			for (const rootId of [...rootContainers, ...orphanRoots]) {
+				const rootPos = finalPositions.get(rootId);
+				if (rootPos) {
+					positionChildren(rootId, rootPos);
+				}
+			}
+
+			// ============================================================
+			// STEP 7: Position multi-parent nodes
+			// Centered between/above all their parents
+			// ============================================================
+			for (const nodeId of multiParentNodes) {
+				const targets = containmentTargets.get(nodeId) || [];
+				if (targets.length < 2) continue;
+
+				// Find positions of all parents
+				const parentPositions: NodePosition[] = [];
+				for (const target of targets) {
+					const pos = finalPositions.get(target.nodeId);
+					if (pos) {
+						parentPositions.push(pos);
+					}
+				}
+
+				if (parentPositions.length === 0) continue;
+
+				// Calculate center position
+				let minX = Infinity, maxX = -Infinity;
+				let minY = Infinity;
+
+				for (const pos of parentPositions) {
+					minX = Math.min(minX, pos.x);
+					maxX = Math.max(maxX, pos.x + pos.width);
+					minY = Math.min(minY, pos.y);
+				}
+
+				// Position centered horizontally, above all parents
+				const centerX = (minX + maxX) / 2 - config.nodeWidth / 2;
+				const aboveY = minY - config.verticalSpacing - config.nodeHeight;
+
+				finalPositions.set(nodeId, {
+					x: centerX,
+					y: aboveY,
+					width: config.nodeWidth,
+					height: config.nodeHeight,
+				});
+
+				console.log(`Multi-parent node ${nodeMeta.get(nodeId)?.entityId} positioned at (${centerX}, ${aboveY})`);
+			}
+
+			// ============================================================
+			// STEP 8: Apply positions to canvas nodes
+			// ============================================================
+			let repositionedCount = 0;
+
+			for (const node of canvasData.nodes) {
+				const pos = finalPositions.get(node.id);
+				if (pos) {
+					node.x = pos.x;
+					node.y = pos.y;
+					node.width = pos.width;
+					node.height = pos.height;
+					repositionedCount++;
+				}
+			}
+
+			// ============================================================
+			// STEP 9: Update edge sides based on positions
+			// ============================================================
+			for (const edge of canvasData.edges) {
+				const fromPos = finalPositions.get(edge.fromNode);
+				const toPos = finalPositions.get(edge.toNode);
+
+				if (fromPos && toPos) {
+					if (fromPos.x < toPos.x) {
+						edge.fromSide = 'right';
+						edge.toSide = 'left';
+					} else if (fromPos.x > toPos.x) {
+						edge.fromSide = 'left';
+						edge.toSide = 'right';
+					} else if (fromPos.y < toPos.y) {
+						edge.fromSide = 'bottom';
+						edge.toSide = 'top';
+					} else {
+						edge.fromSide = 'top';
+						edge.toSide = 'bottom';
+					}
+				}
+			}
+
+			// ============================================================
+			// STEP 10: Save and reopen canvas
+			// ============================================================
+			this.isUpdatingCanvas = true;
+			const closedLeaves = await closeCanvasViews(this.app, canvasFile);
+			console.log('Closed', closedLeaves.length, 'canvas views');
+
+			await new Promise(resolve => setTimeout(resolve, 100));
+			await saveCanvasData(this.app, canvasFile, canvasData);
+			console.log('Saved canvas with new positions');
+
+			await new Promise(resolve => setTimeout(resolve, 200));
+			await this.app.workspace.openLinkText(canvasFile.path, '', false);
+
+			this.isUpdatingCanvas = false;
+			console.groupEnd();
+
+			new Notice(`✅ Repositioned ${repositionedCount} nodes (V2 algorithm)`);
+
+		} catch (error) {
+			console.error('ERROR in repositionCanvasNodesV2:', error);
 			console.groupEnd();
 			this.isUpdatingCanvas = false;
 			new Notice("❌ Failed to reposition nodes: " + (error as Error).message);
@@ -8978,7 +9645,7 @@ private registerCommands(): void {
 
 						case 'reposition':
 						case 'reposition-nodes':
-							await this.repositionCanvasNodes();
+							await this.repositionCanvasNodesV2();
 							result = { success: true, message: 'Reposition nodes completed' };
 							break;
 
