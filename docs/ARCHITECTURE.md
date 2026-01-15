@@ -15,7 +15,7 @@
 │                                                                   │
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │                     Main Plugin (main.ts)                 │   │
-│  │  • Command Registration (17 commands)                     │   │
+│  │  • Command Registration (19 commands)                     │   │
 │  │  • Entity Management & Archiving                          │   │
 │  │  • Canvas Population & Layout                             │   │
 │  │  • Entity Navigator                                       │   │
@@ -116,7 +116,7 @@
 ## Component Dependencies
 
 ```
-main.ts (~5900 lines)
+main.ts (~7000 lines)
   ├─ depends on → types.ts
   ├─ depends on → settings.ts
   ├─ depends on → ui/StructuredItemModal.ts

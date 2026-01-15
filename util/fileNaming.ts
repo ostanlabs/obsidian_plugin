@@ -62,12 +62,13 @@ export function generateUniqueFilename(
  * Check if a note was created by our plugin
  */
 export function isPluginCreatedNote(frontmatter: Partial<ItemFrontmatter> | undefined): boolean {
+	const validEntityTypes = ['milestone', 'story', 'task', 'decision', 'document'];
 	return !!(
 		frontmatter &&
 		frontmatter.type &&
 		frontmatter.id &&
 		frontmatter.canvas_source &&
-		(frontmatter.type === "accomplishment")
+		validEntityTypes.includes(frontmatter.type)
 	);
 }
 

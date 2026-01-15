@@ -48,19 +48,6 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName("Templates").setHeading();
 
 		new Setting(containerEl)
-			.setName("Accomplishment template path")
-			.setDesc("Path to the accomplishment template file")
-			.addText((text) =>
-				text
-					.setPlaceholder("Templates/canvas-accomplishment-template.md")
-					.setValue(this.plugin.settings.accomplishmentTemplatePath)
-					.onChange((value) => {
-						this.plugin.settings.accomplishmentTemplatePath = value;
-						void this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
 			.setName("Use template folder")
 			.setDesc(
 				"Enable to scan a folder for templates and choose from multiple options"
@@ -102,19 +89,6 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 
 		// IDs Section
 		new Setting(containerEl).setName("ID generation").setHeading();
-
-		new Setting(containerEl)
-			.setName("Accomplishment ID prefix")
-			.setDesc("Prefix for accomplishment ids (e.g., 'a' for a001)")
-			.addText((text) =>
-				text
-					.setPlaceholder("A")
-					.setValue(this.plugin.settings.idPrefixAccomplishment)
-					.onChange((value) => {
-						this.plugin.settings.idPrefixAccomplishment = value;
-						void this.plugin.saveSettings();
-					})
-			);
 
 		new Setting(containerEl)
 			.setName("ID zero-padding length")
@@ -176,19 +150,6 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.showIdInCanvas)
 					.onChange((value) => {
 						this.plugin.settings.showIdInCanvas = value;
-						void this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Shape label")
-			.setDesc("Shape name to write into canvas metadata for accomplishments")
-			.addText((text) =>
-				text
-					.setPlaceholder("Accomplishment")
-					.setValue(this.plugin.settings.shapeAccomplishment)
-					.onChange((value) => {
-						this.plugin.settings.shapeAccomplishment = value || "accomplishment";
 						void this.plugin.saveSettings();
 					})
 			);
@@ -440,6 +401,19 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.entityNavigator.documentsFolder)
 					.onChange((value) => {
 						this.plugin.settings.entityNavigator.documentsFolder = value;
+						void this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Features folder")
+			.setDesc("Folder path for feature entities")
+			.addText((text) =>
+				text
+					.setPlaceholder("features")
+					.setValue(this.plugin.settings.entityNavigator.featuresFolder)
+					.onChange((value) => {
+						this.plugin.settings.entityNavigator.featuresFolder = value;
 						void this.plugin.saveSettings();
 					})
 			);

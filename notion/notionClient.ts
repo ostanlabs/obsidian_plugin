@@ -580,7 +580,7 @@ export class NotionClient {
 
 	/**
 	 * Query all pages in the database
-	 * Used for bi-directional sync and finding pages by accomplishment ID
+	 * Used for one-way sync and finding pages by entity ID
 	 */
 	async queryAllPages(): Promise<NotionPageResult[]> {
 		if (!this.client) {
@@ -617,9 +617,9 @@ export class NotionClient {
 	}
 
 	/**
-	 * Find a page by accomplishment ID
+	 * Find a page by entity ID
 	 */
-	async findPageByAccomplishmentId(accomplishmentId: string): Promise<NotionPageResult | null> {
+	async findPageByEntityId(entityId: string): Promise<NotionPageResult | null> {
 		if (!this.client) {
 			throw new Error("Notion client not initialized");
 		}
@@ -634,7 +634,7 @@ export class NotionClient {
 				filter: {
 					property: "ID",
 					rich_text: {
-						equals: accomplishmentId,
+						equals: entityId,
 					},
 				},
 			});

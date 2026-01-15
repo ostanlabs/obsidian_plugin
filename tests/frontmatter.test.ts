@@ -5,10 +5,10 @@ describe("Frontmatter", () => {
 	describe("parseFrontmatter", () => {
 		it("should parse valid frontmatter", () => {
 			const content = `---
-type: accomplishment
-title: Test Accomplishment
+type: task
+title: Test Task
 effort: Engineering
-id: A001
+id: T-001
 status: Not Started
 priority: Medium
 inProgress: false
@@ -19,24 +19,24 @@ canvas_source: test.canvas
 vault_path: test.md
 ---
 
-# Test Accomplishment
+# Test Task
 
 Content here`;
 
 			const result = parseFrontmatter(content);
 			expect(result).not.toBeNull();
-			expect(result?.type).toBe("accomplishment");
-			expect(result?.title).toBe("Test Accomplishment");
-			expect(result?.id).toBe("A001");
+			expect(result?.type).toBe("task");
+			expect(result?.title).toBe("Test Task");
+			expect(result?.id).toBe("T-001");
 			expect(result?.inProgress).toBe(false);
 		});
 
 		it("should parse inProgress as boolean true", () => {
 			const content = `---
-type: accomplishment
+type: task
 title: Test
 effort: Engineering
-id: A001
+id: T-001
 inProgress: true
 ---`;
 
@@ -53,7 +53,7 @@ inProgress: true
 
 		it("should return null for incomplete frontmatter", () => {
 			const content = `---
-type: accomplishment
+type: task
 ---`;
 			const result = parseFrontmatter(content);
 			expect(result).toBeNull();
@@ -63,7 +63,7 @@ type: accomplishment
 	describe("updateFrontmatter", () => {
 		it("should update specific fields", () => {
 			const content = `---
-type: accomplishment
+type: task
 title: Old Title
 status: Not Started
 ---
@@ -77,12 +77,12 @@ status: Not Started
 
 			expect(result).toContain("title: New Title");
 			expect(result).toContain("status: Completed");
-			expect(result).toContain("type: accomplishment");
+			expect(result).toContain("type: task");
 		});
 
 		it("should not modify content outside frontmatter", () => {
 			const content = `---
-type: accomplishment
+type: task
 title: Test
 ---
 
@@ -98,10 +98,10 @@ Some text`;
 	describe("serializeFrontmatter", () => {
 		it("should serialize frontmatter to YAML", () => {
 			const frontmatter: ItemFrontmatter = {
-				type: "accomplishment",
-				title: "Test Accomplishment",
+				type: "task",
+				title: "Test Task",
 				effort: "Engineering",
-				id: "A001",
+				id: "T-001",
 				status: "Not Started",
 				priority: "Medium",
 				inProgress: false,
@@ -115,9 +115,9 @@ Some text`;
 			const result = serializeFrontmatter(frontmatter);
 
 			expect(result).toContain("---");
-			expect(result).toContain("type: accomplishment");
-			expect(result).toContain("title: Test Accomplishment");
-			expect(result).toContain("id: A001");
+			expect(result).toContain("type: task");
+			expect(result).toContain("title: Test Task");
+			expect(result).toContain("id: T-001");
 			expect(result).toContain("inProgress: false");
 		});
 	});

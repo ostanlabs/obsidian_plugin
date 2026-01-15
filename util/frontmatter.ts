@@ -1,9 +1,14 @@
-import { ItemFrontmatter, ItemStatus, ItemPriority } from "../types";
+import { ItemFrontmatter, FeatureFrontmatter, ItemStatus, ItemPriority, FeatureTier, FeaturePhase, FeatureStatus } from "../types";
 
 /**
  * Parsed frontmatter with string index signature for dynamic access
  */
 type ParsedFrontmatter = Record<string, string | string[] | boolean | number | undefined>;
+
+/**
+ * Generic frontmatter type that can be either ItemFrontmatter or FeatureFrontmatter
+ */
+export type GenericFrontmatter = ItemFrontmatter | FeatureFrontmatter;
 
 /**
  * Parse a YAML value that might be a JSON array
@@ -39,9 +44,9 @@ function serializeYamlValue(value: unknown): string {
 }
 
 /**
- * Parse frontmatter from a markdown file
+ * Parse raw frontmatter from a markdown file (returns ParsedFrontmatter)
  */
-export function parseFrontmatter(content: string): ItemFrontmatter | null {
+export function parseRawFrontmatter(content: string): ParsedFrontmatter | null {
 	const frontmatterRegex = /^---\n([\s\S]*?)\n---/;
 	const match = content.match(frontmatterRegex);
 
@@ -61,7 +66,38 @@ export function parseFrontmatter(content: string): ItemFrontmatter | null {
 		frontmatter[key] = parseYamlValue(value);
 	}
 
-	// Validate required fields
+	// Convert boolean strings to actual booleans
+	if (frontmatter.inProgress !== undefined && typeof frontmatter.inProgress === 'string') {
+		frontmatter.inProgress = frontmatter.inProgress === "true";
+	}
+	if (frontmatter.created_by_plugin !== undefined && typeof frontmatter.created_by_plugin === 'string') {
+		frontmatter.created_by_plugin = frontmatter.created_by_plugin === "true";
+	}
+
+	// Ensure array fields are always arrays if present
+	const arrayFields = ['depends_on', 'blocks', 'implemented_by', 'documented_by', 'decided_by', 'personas', 'acceptance_criteria', 'test_refs'];
+	for (const field of arrayFields) {
+		if (frontmatter[field] !== undefined) {
+			if (typeof frontmatter[field] === 'string') {
+				const strVal = frontmatter[field] as string;
+				frontmatter[field] = strVal ? [strVal] : [];
+			} else if (!Array.isArray(frontmatter[field])) {
+				frontmatter[field] = [];
+			}
+		}
+	}
+
+	return frontmatter;
+}
+
+/**
+ * Parse frontmatter from a markdown file (for standard entities)
+ */
+export function parseFrontmatter(content: string): ItemFrontmatter | null {
+	const frontmatter = parseRawFrontmatter(content);
+	if (!frontmatter) return null;
+
+	// Validate required fields for standard entities
 	if (
 		!frontmatter.type ||
 		!frontmatter.title ||
@@ -71,25 +107,23 @@ export function parseFrontmatter(content: string): ItemFrontmatter | null {
 		return null;
 	}
 
-	// Convert boolean strings to actual booleans
-	if (frontmatter.inProgress !== undefined && typeof frontmatter.inProgress === 'string') {
-		frontmatter.inProgress = frontmatter.inProgress === "true";
-	}
-	if (frontmatter.created_by_plugin !== undefined && typeof frontmatter.created_by_plugin === 'string') {
-		frontmatter.created_by_plugin = frontmatter.created_by_plugin === "true";
-	}
-
-	// Ensure depends_on is always an array if present
-	if (frontmatter.depends_on !== undefined) {
-		if (typeof frontmatter.depends_on === 'string') {
-			// Single value or empty string
-			frontmatter.depends_on = frontmatter.depends_on ? [frontmatter.depends_on] : [];
-		} else if (!Array.isArray(frontmatter.depends_on)) {
-			frontmatter.depends_on = [];
-		}
-	}
-
 	return frontmatter as unknown as ItemFrontmatter;
+}
+
+/**
+ * Parse frontmatter for any entity type (feature or standard)
+ * Returns the raw parsed frontmatter with type field
+ */
+export function parseAnyFrontmatter(content: string): ParsedFrontmatter | null {
+	const frontmatter = parseRawFrontmatter(content);
+	if (!frontmatter) return null;
+
+	// Validate minimal required fields
+	if (!frontmatter.type || !frontmatter.title || !frontmatter.id) {
+		return null;
+	}
+
+	return frontmatter;
 }
 
 /**
@@ -136,12 +170,12 @@ export function parseFrontmatterAndBody(content: string): {
 /**
  * Update frontmatter in a markdown file
  * @param content Full markdown content including frontmatter
- * @param updates Partial frontmatter updates
+ * @param updates Partial frontmatter updates (supports both ItemFrontmatter and FeatureFrontmatter fields)
  * @returns Updated markdown content
  */
 export function updateFrontmatter(
 	content: string,
-	updates: Partial<ItemFrontmatter>
+	updates: Partial<ItemFrontmatter> | Partial<FeatureFrontmatter> | ParsedFrontmatter
 ): string {
 	const frontmatterRegex = /^---\n([\s\S]*?)\n---\n?/;
 	const match = content.match(frontmatterRegex);

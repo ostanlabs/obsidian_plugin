@@ -1,9 +1,27 @@
 # Entity Schemas - Shared Type Definitions
 
-> **Version:** 2.0
-> **Date:** December 2024
+> **Version:** 1.8
+> **Date:** January 2026
 > **Scope:** Shared between Obsidian Plugin and MCP Server
 > **Status:** Implementation Spec
+
+---
+
+## Implementation Status
+
+> ⚠️ **Note:** Not all features in this spec are fully implemented. See status markers:
+> - ✅ **Implemented** - Feature is working in the plugin
+> - 🚧 **Partial** - Feature is partially implemented
+> - ❌ **Not Implemented** - Feature is planned but not yet implemented
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| 6 Entity Types | ✅ | Milestone, Story, Task, Decision, Document, Feature |
+| Feature Entity | ✅ | F-XXX IDs, tier/phase classification, relationship fields |
+| Reverse Relationship Sync | ✅ | blocks, children, implemented_by, superseded_by, next_version |
+| CSS Classes in Frontmatter | ❌ | Visual styling done via DOM manipulation instead |
+| Type Guards (isMilestone, etc.) | ❌ | Not exported as utility functions |
+| Validation Functions | ❌ | validateEntity, validateFrontmatter not implemented |
 
 ---
 
@@ -34,7 +52,7 @@ This document defines the TypeScript interfaces for all entity types in the V2 s
 
 ```typescript
 // === ENTITY TYPES ===
-type EntityType = 'milestone' | 'story' | 'task' | 'decision' | 'document';
+type EntityType = 'milestone' | 'story' | 'task' | 'decision' | 'document' | 'feature';
 
 // === STATUS BY ENTITY TYPE ===
 type MilestoneStatus = 'Not Started' | 'In Progress' | 'Completed' | 'Blocked';
@@ -87,7 +105,7 @@ type ISODateTime = string;  // e.g., "2024-12-17T10:30:00Z"
 type UserRef = `@${string}`;  // e.g., "@john", "@tech-lead"
 
 // File path relative to vault
-type VaultPath = string;  // e.g., "accomplishments/stories/S-015_Auth.md"
+type VaultPath = string;  // e.g., "stories/S-015_Auth.md"
 
 // Canvas file path
 type CanvasPath = string;  // e.g., "projects/main.canvas"
@@ -128,18 +146,20 @@ interface EntityBase {
 
 ### CSS Classes Convention
 
+> ❌ **Not Implemented**: CSS classes are NOT stored in frontmatter. Visual styling is applied via DOM manipulation using `data-canvas-pm-type` attributes and CSS selectors in `styles.css`.
+
 ```typescript
-// CSS class patterns for entities
+// CSS class patterns for entities (PLANNED - NOT IMPLEMENTED)
 interface CSSClassPatterns {
   // Type classes
   type: `canvas-${EntityType}`;                    // canvas-milestone, canvas-story, etc.
-  
+
   // Effort classes (for stories/tasks)
   effort: `canvas-effort-${string}`;              // canvas-effort-engineering
-  
+
   // Status classes
   status: `canvas-status-${string}`;              // canvas-status-completed
-  
+
   // Priority classes (optional)
   priority: `canvas-priority-${string}`;          // canvas-priority-critical
 }
@@ -914,8 +934,10 @@ function serializeEntity<T extends EntityBase>(entity: T, bodyContent: string): 
 
 ### Type Guards
 
+> ❌ **Not Implemented**: These type guard functions are not exported from the plugin. Type checking is done inline where needed.
+
 ```typescript
-// Type guards for entity types
+// Type guards for entity types (PLANNED - NOT IMPLEMENTED)
 function isMilestone(entity: EntityBase): entity is Milestone {
   return entity.type === 'milestone';
 }
@@ -960,8 +982,10 @@ function isDocumentId(id: string): id is DocumentId {
 
 ### Validation
 
+> ❌ **Not Implemented**: Validation functions are not implemented. Basic field checking is done in `parseFrontmatter()` but no comprehensive validation.
+
 ```typescript
-// Validation result
+// Validation result (PLANNED - NOT IMPLEMENTED)
 interface ValidationResult {
   valid: boolean;
   errors: ValidationError[];
@@ -1066,4 +1090,5 @@ export type {
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.7 | 2025-01-13 | Added implementation status markers, removed accomplishment type |
 | 2.0 | 2024-12-17 | Initial V2 schema definition |
