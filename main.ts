@@ -69,6 +69,8 @@ import {
 import { generateUniqueFilename, isPluginCreatedNote } from "./util/fileNaming";
 import { addNodesToCanvasView, getCanvasView, hasInternalCanvasAPI, inspectCanvasAPI, addEdgesToCanvasView } from "./util/canvasView";
 import { EntityIndex, EntityIndexEntry, getEntityTypeFromId } from "./util/entityNavigator";
+import { PositioningEngineV3, EntityData, PositioningResult, EntityType as PositioningEntityType } from "./util/positioningV3";
+import { reconcileRelationships } from "./util/relationshipReconciler";
 
 const DEFAULT_NODE_HEIGHT = 220;
 const DEFAULT_NODE_WIDTH = 400;
@@ -383,10 +385,19 @@ private registerCommands(): void {
 		},
 	});
 
-	// Command 8: Reposition canvas nodes
+	// Command 8: Reposition canvas nodes (V3 algorithm)
 	this.addCommand({
 		id: "reposition-canvas-nodes",
-		name: "Project Canvas: Reposition nodes (graph layout)",
+		name: "Project Canvas: Reposition nodes (V3 algorithm)",
+		callback: async () => {
+			await this.repositionCanvasNodesV3();
+		},
+	});
+
+	// Command 8b: Reposition canvas nodes (legacy V2 algorithm)
+	this.addCommand({
+		id: "reposition-canvas-nodes-v2",
+		name: "Project Canvas: Reposition nodes (legacy V2)",
 		callback: async () => {
 			await this.repositionCanvasNodes();
 		},
@@ -1462,10 +1473,16 @@ private registerCommands(): void {
 		}
 
 		// Check if our controls already exist
-		if (viewHeader.querySelector(".canvas-pm-visibility-controls")) {
-			// Already exists, just apply visibility state
-			this.applyVisibilityState(canvasEl);
-			return;
+		const existingControls = viewHeader.querySelector(".canvas-pm-visibility-controls");
+		if (existingControls) {
+			// Check if Find button exists - if not, recreate controls
+			if (existingControls.querySelector(".canvas-pm-find-btn")) {
+				// Already exists with Find button, just apply visibility state
+				this.applyVisibilityState(canvasEl);
+				return;
+			}
+			// Remove old controls to recreate with Find button
+			existingControls.remove();
 		}
 
 		console.debug("[Canvas Plugin] Creating visibility controls in view header");
@@ -1498,10 +1515,61 @@ private registerCommands(): void {
 				this.visibilityState[key] = !this.visibilityState[key];
 				btn.classList.toggle("is-active", this.visibilityState[key]);
 				this.applyVisibilityState(canvasEl);
+				// Update "Hide All" button state
+				this.updateHideAllButtonState(controlsContainer);
 			});
 
 			controlsContainer.appendChild(btn);
 		}
+
+		// Add "Hide All" toggle button
+		const hideAllBtn = document.createElement("button");
+		hideAllBtn.className = "canvas-pm-visibility-btn canvas-pm-hide-all-btn clickable-icon";
+		hideAllBtn.setAttribute("aria-label", "Hide All Entity Types");
+		hideAllBtn.setAttribute("data-type", "hide-all");
+		hideAllBtn.textContent = "⊘";
+		hideAllBtn.title = "Hide All Entity Types";
+		hideAllBtn.style.marginLeft = "4px";
+
+		hideAllBtn.addEventListener("click", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			// Check if all are currently hidden
+			const allHidden = Object.values(this.visibilityState).every(v => !v);
+			// Toggle: if all hidden, show all; otherwise hide all
+			const newState = allHidden;
+			for (const key of Object.keys(this.visibilityState) as Array<keyof typeof this.visibilityState>) {
+				this.visibilityState[key] = newState;
+			}
+			// Update all visibility buttons
+			controlsContainer.querySelectorAll(".canvas-pm-visibility-btn[data-type]").forEach(btn => {
+				const type = btn.getAttribute("data-type");
+				if (type && type !== "hide-all" && type in this.visibilityState) {
+					btn.classList.toggle("is-active", this.visibilityState[type as keyof typeof this.visibilityState]);
+				}
+			});
+			this.applyVisibilityState(canvasEl);
+			this.updateHideAllButtonState(controlsContainer);
+		});
+
+		controlsContainer.appendChild(hideAllBtn);
+		this.updateHideAllButtonState(controlsContainer);
+
+		// Add "Find" button for entity search
+		const findBtn = document.createElement("button");
+		findBtn.className = "canvas-pm-find-btn clickable-icon";
+		findBtn.setAttribute("aria-label", "Find Entity on Canvas");
+		findBtn.textContent = "🔍";
+		findBtn.title = "Find Entity on Canvas";
+		findBtn.style.marginLeft = "4px";
+
+		findBtn.addEventListener("click", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.showEntitySearchPopup(findBtn);
+		});
+
+		controlsContainer.appendChild(findBtn);
 
 		// Insert at the beginning of view-header-right-actions
 		viewHeader.insertBefore(controlsContainer, viewHeader.firstChild);
@@ -1521,11 +1589,14 @@ private registerCommands(): void {
 			return;
 		}
 
+		const allHidden = Object.values(this.visibilityState).every(v => !v);
+
 		const panel = document.createElement("div");
 		panel.className = "canvas-pm-control-panel";
 		panel.innerHTML = `
 			<div class="canvas-pm-control-header">
 				<span>Visibility</span>
+				<button class="canvas-pm-hide-all-btn-floating" title="${allHidden ? 'Show All' : 'Hide All'}">${allHidden ? '⊕' : '⊘'}</button>
 			</div>
 			<div class="canvas-pm-control-toggles">
 				<label class="canvas-pm-toggle">
@@ -1563,13 +1634,47 @@ private registerCommands(): void {
 				if (type) {
 					this.visibilityState[type] = target.checked;
 					this.applyVisibilityState(canvasEl);
+					this.updateFloatingHideAllButton(panel);
 				}
 			});
 		});
 
+		// Add "Hide All" button listener
+		const hideAllBtn = panel.querySelector(".canvas-pm-hide-all-btn-floating");
+		if (hideAllBtn) {
+			hideAllBtn.addEventListener("click", (e) => {
+				e.preventDefault();
+				const allHidden = Object.values(this.visibilityState).every(v => !v);
+				const newState = allHidden;
+				for (const key of Object.keys(this.visibilityState) as Array<keyof typeof this.visibilityState>) {
+					this.visibilityState[key] = newState;
+				}
+				// Update checkboxes
+				panel.querySelectorAll("input[type='checkbox']").forEach((checkbox) => {
+					const type = checkbox.getAttribute("data-type") as keyof typeof this.visibilityState;
+					if (type && type in this.visibilityState) {
+						(checkbox as HTMLInputElement).checked = this.visibilityState[type];
+					}
+				});
+				this.applyVisibilityState(canvasEl);
+				this.updateFloatingHideAllButton(panel);
+			});
+		}
+
 		containerEl.appendChild(panel);
 		this.controlPanelEl = panel;
 		this.applyVisibilityState(canvasEl);
+	}
+
+	/**
+	 * Update the floating panel's "Hide All" button state
+	 */
+	private updateFloatingHideAllButton(panel: HTMLElement): void {
+		const hideAllBtn = panel.querySelector(".canvas-pm-hide-all-btn-floating");
+		if (!hideAllBtn) return;
+		const allHidden = Object.values(this.visibilityState).every(v => !v);
+		hideAllBtn.textContent = allHidden ? "⊕" : "⊘";
+		hideAllBtn.setAttribute("title", allHidden ? "Show All" : "Hide All");
 	}
 
 	/**
@@ -1617,6 +1722,284 @@ private registerCommands(): void {
 		if (this.controlPanelEl) {
 			this.controlPanelEl.remove();
 			this.controlPanelEl = null;
+		}
+	}
+
+	/**
+	 * Update the "Hide All" button state based on current visibility
+	 */
+	private updateHideAllButtonState(container: HTMLElement): void {
+		const hideAllBtn = container.querySelector(".canvas-pm-hide-all-btn");
+		if (!hideAllBtn) return;
+		const allHidden = Object.values(this.visibilityState).every(v => !v);
+		hideAllBtn.classList.toggle("is-active", allHidden);
+		hideAllBtn.textContent = allHidden ? "⊕" : "⊘";
+		hideAllBtn.setAttribute("title", allHidden ? "Show All Entity Types" : "Hide All Entity Types");
+	}
+
+	/**
+	 * Show entity search popup for finding and zooming to entities on canvas
+	 */
+	private showEntitySearchPopup(anchorEl: HTMLElement): void {
+		// Remove any existing popup
+		const existingPopup = document.querySelector(".canvas-pm-search-popup");
+		if (existingPopup) {
+			existingPopup.remove();
+		}
+
+		// Create popup container - centered on screen
+		const popup = document.createElement("div");
+		popup.className = "canvas-pm-search-popup";
+		popup.style.cssText = `
+			position: fixed;
+			z-index: 1000;
+			background: var(--background-primary);
+			border: 1px solid var(--background-modifier-border);
+			border-radius: 8px;
+			padding: 12px;
+			box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+			width: 320px;
+			top: 50%;
+			left: 50%;
+			transform: translate(-50%, -50%);
+		`;
+
+		// Create search input
+		const input = document.createElement("input");
+		input.type = "text";
+		input.placeholder = "Search by ID or name...";
+		input.className = "canvas-pm-search-input";
+		input.style.cssText = `
+			width: 100%;
+			padding: 10px 12px;
+			border: 1px solid var(--background-modifier-border);
+			border-radius: 4px;
+			background: var(--background-secondary);
+			color: var(--text-normal);
+			font-size: 14px;
+			outline: none;
+			box-sizing: border-box;
+		`;
+
+		// Create results container
+		const results = document.createElement("div");
+		results.className = "canvas-pm-search-results";
+		results.style.cssText = `
+			max-height: 300px;
+			overflow-y: auto;
+			margin-top: 8px;
+		`;
+
+		popup.appendChild(input);
+		popup.appendChild(results);
+
+		document.body.appendChild(popup);
+
+		// Focus input
+		input.focus();
+
+		// Get canvas entities for search
+		const canvasEntities = this.getCanvasEntitiesForSearch();
+
+		// Handle input changes
+		const updateResults = () => {
+			const query = input.value.toLowerCase().trim();
+			results.innerHTML = "";
+
+			if (!query) {
+				results.innerHTML = '<div style="padding: 8px; color: var(--text-muted); font-size: 12px;">Type to search...</div>';
+				return;
+			}
+
+			const matches = canvasEntities.filter(e =>
+				e.entityId.toLowerCase().includes(query) ||
+				e.title.toLowerCase().includes(query)
+			).slice(0, 10); // Limit to 10 results
+
+			if (matches.length === 0) {
+				results.innerHTML = '<div style="padding: 8px; color: var(--text-muted); font-size: 12px;">No matches found</div>';
+				return;
+			}
+
+			for (const match of matches) {
+				const item = document.createElement("div");
+				item.className = "canvas-pm-search-result-item";
+				item.style.cssText = `
+					padding: 8px 12px;
+					cursor: pointer;
+					border-radius: 4px;
+					display: flex;
+					align-items: center;
+					gap: 8px;
+				`;
+				item.innerHTML = `
+					<span style="font-weight: 600; color: var(--text-accent); min-width: 60px;">${match.entityId}</span>
+					<span style="color: var(--text-normal); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${match.title}</span>
+				`;
+
+				item.addEventListener("mouseenter", () => {
+					item.style.background = "var(--background-modifier-hover)";
+				});
+				item.addEventListener("mouseleave", () => {
+					item.style.background = "";
+				});
+				item.addEventListener("click", () => {
+					this.zoomToCanvasNode(match.nodeId);
+					popup.remove();
+				});
+
+				results.appendChild(item);
+			}
+		};
+
+		input.addEventListener("input", updateResults);
+		updateResults();
+
+		// Handle keyboard navigation
+		input.addEventListener("keydown", (e) => {
+			if (e.key === "Escape") {
+				popup.remove();
+			} else if (e.key === "Enter") {
+				const firstResult = results.querySelector(".canvas-pm-search-result-item") as HTMLElement;
+				if (firstResult) {
+					firstResult.click();
+				}
+			} else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+				e.preventDefault();
+				const items = Array.from(results.querySelectorAll(".canvas-pm-search-result-item")) as HTMLElement[];
+				if (items.length === 0) return;
+
+				const currentFocused = results.querySelector(".canvas-pm-search-result-focused") as HTMLElement;
+				let nextIndex = 0;
+
+				if (currentFocused) {
+					currentFocused.classList.remove("canvas-pm-search-result-focused");
+					currentFocused.style.background = "";
+					const currentIndex = items.indexOf(currentFocused);
+					nextIndex = e.key === "ArrowDown"
+						? (currentIndex + 1) % items.length
+						: (currentIndex - 1 + items.length) % items.length;
+				}
+
+				items[nextIndex].classList.add("canvas-pm-search-result-focused");
+				items[nextIndex].style.background = "var(--background-modifier-hover)";
+				items[nextIndex].scrollIntoView({ block: "nearest" });
+			}
+		});
+
+		// Close popup when clicking outside
+		const closeOnClickOutside = (e: MouseEvent) => {
+			if (!popup.contains(e.target as Node) && e.target !== anchorEl) {
+				popup.remove();
+				document.removeEventListener("click", closeOnClickOutside);
+			}
+		};
+		setTimeout(() => document.addEventListener("click", closeOnClickOutside), 0);
+	}
+
+	/**
+	 * Get all entities on the current canvas for search
+	 */
+	private getCanvasEntitiesForSearch(): Array<{ nodeId: string; entityId: string; title: string }> {
+		const results: Array<{ nodeId: string; entityId: string; title: string }> = [];
+
+		const activeLeaf = this.app.workspace.activeLeaf;
+		if (!activeLeaf) return results;
+
+		// @ts-ignore - canvas view internals
+		const canvas = activeLeaf.view?.canvas;
+		if (!canvas) return results;
+
+		// @ts-ignore - canvas.nodes is a Map<string, CanvasNode>
+		const canvasNodes = canvas.nodes as Map<string, unknown> | undefined;
+		if (!canvasNodes) return results;
+
+		for (const [nodeId, canvasNode] of canvasNodes) {
+			// @ts-ignore - get node's DOM element
+			const nodeEl = (canvasNode as { nodeEl?: HTMLElement }).nodeEl;
+			if (!nodeEl) continue;
+
+			const entityId = nodeEl.getAttribute("data-canvas-pm-entity-id");
+			if (!entityId) continue;
+
+			// Get title from entity index or use entity ID
+			const entity = this.entityIndex?.get(entityId);
+			const title = entity?.title || entityId;
+
+			results.push({ nodeId, entityId, title });
+		}
+
+		return results;
+	}
+
+	/**
+	 * Zoom to a specific canvas node by its ID
+	 */
+	private zoomToCanvasNode(nodeId: string): void {
+		const activeLeaf = this.app.workspace.activeLeaf;
+		if (!activeLeaf) return;
+
+		// @ts-ignore - canvas view internals
+		const canvas = activeLeaf.view?.canvas;
+		if (!canvas) return;
+
+		// @ts-ignore - canvas.nodes is a Map<string, CanvasNode>
+		const canvasNodes = canvas.nodes as Map<string, unknown> | undefined;
+		if (!canvasNodes) return;
+
+		const canvasNode = canvasNodes.get(nodeId);
+		if (!canvasNode) {
+			new Notice("Node not found on canvas");
+			return;
+		}
+
+		// Get node position and size
+		// @ts-ignore
+		const x = (canvasNode as any).x ?? 0;
+		// @ts-ignore
+		const y = (canvasNode as any).y ?? 0;
+		// @ts-ignore
+		const width = (canvasNode as any).width ?? 350;
+		// @ts-ignore
+		const height = (canvasNode as any).height ?? 250;
+
+		// Calculate bounding box with padding
+		const padding = 150;
+		const bbox = {
+			minX: x - padding,
+			minY: y - padding,
+			maxX: x + width + padding,
+			maxY: y + height + padding,
+		};
+
+		// Clear selection and select this node
+		// @ts-ignore
+		if (typeof canvas.deselectAll === 'function') {
+			canvas.deselectAll();
+		}
+		// @ts-ignore
+		if (typeof canvas.addToSelection === 'function') {
+			canvas.addToSelection(canvasNode);
+		} else if (canvas.selection && typeof canvas.selection.add === 'function') {
+			canvas.selection.clear();
+			canvas.selection.add(canvasNode);
+		}
+
+		// Zoom to the node
+		// @ts-ignore
+		if (typeof canvas.zoomToBbox === 'function') {
+			canvas.zoomToBbox(bbox);
+		}
+		// @ts-ignore
+		else if (typeof canvas.setViewport === 'function') {
+			const centerX = (bbox.minX + bbox.maxX) / 2;
+			const centerY = (bbox.minY + bbox.maxY) / 2;
+			const bboxWidth = bbox.maxX - bbox.minX;
+			const bboxHeight = bbox.maxY - bbox.minY;
+			const viewWidth = canvas.wrapperEl?.clientWidth ?? 1000;
+			const viewHeight = canvas.wrapperEl?.clientHeight ?? 800;
+			const zoom = Math.min(viewWidth / bboxWidth, viewHeight / bboxHeight) * 0.9;
+			canvas.setViewport(centerX, centerY, zoom);
 		}
 	}
 
@@ -4605,6 +4988,32 @@ private registerCommands(): void {
 			const batchEntityIds = new Set<string>();
 			let skippedDuplicates = 0;
 
+			// Collect ALL entity files for relationship reconciliation
+			console.log('\n=== STAGE 3.5: RECONCILE RELATIONSHIPS ===');
+			const allEntityFiles: TFile[] = [];
+			for (const file of allFiles) {
+				try {
+					const content = await this.app.vault.read(file);
+					const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+					if (fmMatch) {
+						const typeMatch = fmMatch[1].match(/^type:\s*(.+)$/m);
+						if (typeMatch && entityTypes.includes(typeMatch[1].trim().toLowerCase())) {
+							allEntityFiles.push(file);
+						}
+					}
+				} catch (e) {
+					// Skip files that can't be read
+				}
+			}
+			console.log(`Found ${allEntityFiles.length} entity files for reconciliation`);
+
+			// Reconcile bidirectional relationships
+			const reconcileResult = await reconcileRelationships(this.app, allEntityFiles);
+			if (reconcileResult.totalReconciled > 0) {
+				console.log(`Reconciled ${reconcileResult.totalReconciled} relationships:`, reconcileResult.details);
+				new Notice(`🔗 Reconciled ${reconcileResult.totalReconciled} bidirectional relationships`);
+			}
+
 			for (const file of allFiles) {
 				// Skip if already on canvas (by file path)
 				if (existingFilePaths.has(file.path)) {
@@ -5409,19 +5818,23 @@ private registerCommands(): void {
 			console.groupEnd();
 
 			const edgeInfo = newEdges.length > 0 ? `, ${newEdges.length} edges` : '';
-			new Notice(`✅ Added ${newNodes.length} entities${edgeInfo} to canvas. Repositioning...`);
+			new Notice(`✅ Added ${newNodes.length} entities${edgeInfo} to canvas. Reconciling relationships...`);
 			this.logger?.info("Populated canvas from vault", {
 				nodesAdded: newNodes.length,
 				edgesCreated: newEdges.length,
 				byType: Object.fromEntries(Object.entries(entitiesByType).map(([k, v]) => [k, v.length]))
 			});
 
-			// Apply the same positioning algorithm used by the reposition command
-			console.log('\n=== STAGE 7: REPOSITION NODES ===');
-			await this.repositionCanvasNodes();
+			// Reconcile relationships (clean malformed entries, sync bidirectional relationships)
+			console.log('\n=== STAGE 7: RECONCILE RELATIONSHIPS ===');
+			await this.reconcileAllRelationships();
+
+			// Apply the V3 positioning algorithm
+			console.log('\n=== STAGE 8: REPOSITION NODES (V3) ===');
+			await this.repositionCanvasNodesV3();
 
 			// Archive cleanup: move archived files and remove archived nodes
-			console.log('\n=== STAGE 8: ARCHIVE CLEANUP ===');
+			console.log('\n=== STAGE 9: ARCHIVE CLEANUP ===');
 			// Get base folder from canvas file path - handle root case
 			let baseFolder = canvasFile.parent?.path || '';
 			// If baseFolder is "/" or empty, use empty string to match all files
@@ -7189,6 +7602,206 @@ private registerCommands(): void {
 	}
 
 	/**
+	 * Reposition canvas nodes using V3 algorithm:
+	 * - Hierarchical container model with children LEFT and ABOVE parent
+	 * - Workstream-based lanes with milestones ordered by dependencies
+	 * - Grid-based child layout minimizing diagonal
+	 * - Multi-parent entity handling (same workstream vs cross-workstream)
+	 * - Orphan positioning in grid below workstreams
+	 */
+	private async repositionCanvasNodesV3(): Promise<void> {
+		console.group('[Canvas Plugin] repositionCanvasNodesV3');
+
+		const canvasFile = this.getActiveCanvasFile();
+		if (!canvasFile) {
+			console.warn('No active canvas file found');
+			console.groupEnd();
+			new Notice("Please open a canvas file first");
+			return;
+		}
+
+		try {
+			const canvasData = await loadCanvasData(this.app, canvasFile);
+			console.log('Canvas has', canvasData.nodes.length, 'nodes,', canvasData.edges.length, 'edges');
+
+			const fileNodes = canvasData.nodes.filter(n => n.type === 'file');
+			if (fileNodes.length === 0) {
+				new Notice("No file nodes on canvas to reposition");
+				console.groupEnd();
+				return;
+			}
+
+			// ============================================================
+			// STEP 1: Parse node metadata from frontmatter
+			// ============================================================
+			const entities: EntityData[] = [];
+
+			// Helper to parse YAML array
+			const parseYamlArray = (text: string, key: string): string[] => {
+				const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+				if (multilineMatch) {
+					const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+					if (items) {
+						return items.map(item => item.replace(/^\s*-\s*/, '').trim());
+					}
+				}
+				const inlineMatch = text.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+				if (inlineMatch) {
+					return inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+				}
+				const singleMatch = text.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+				if (singleMatch && singleMatch[1].trim()) {
+					return [singleMatch[1].trim()];
+				}
+				return [];
+			};
+
+			for (const node of fileNodes) {
+				if (!node.file) continue;
+				const file = this.app.vault.getAbstractFileByPath(node.file);
+				if (!(file instanceof TFile)) continue;
+
+				try {
+					const content = await this.app.vault.read(file);
+					const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+					if (!fmMatch) continue;
+
+					const fmText = fmMatch[1];
+					const typeMatch = fmText.match(/^type:\s*(.+)$/m);
+					const workstreamMatch = fmText.match(/^workstream:\s*(.+)$/m);
+					const idMatch = fmText.match(/^id:\s*(.+)$/m);
+					const parentMatch = fmText.match(/^parent:\s*(.+)$/m);
+					const enables = parseYamlArray(fmText, 'enables');
+					const blocksArr = parseYamlArray(fmText, 'blocks');
+					const dependsOnArr = parseYamlArray(fmText, 'depends_on');
+					const implementedByArr = parseYamlArray(fmText, 'implemented_by');
+					const implementsArr = parseYamlArray(fmText, 'implements');
+
+					const entityId = idMatch?.[1]?.trim();
+					const typeStr = typeMatch?.[1]?.trim().toLowerCase() || 'unknown';
+
+					// Map type string to PositioningEntityType
+					const validTypes: PositioningEntityType[] = ['milestone', 'story', 'task', 'decision', 'document', 'feature'];
+					const entityType: PositioningEntityType = validTypes.includes(typeStr as PositioningEntityType)
+						? typeStr as PositioningEntityType
+						: 'task'; // Default unknown types to task
+
+					if (entityId) {
+						entities.push({
+							entityId,
+							nodeId: node.id,
+							type: entityType,
+							workstream: workstreamMatch?.[1]?.trim().toLowerCase() || 'unassigned',
+							parent: parentMatch?.[1]?.trim(),
+							dependsOn: dependsOnArr,
+							blocks: blocksArr,
+							enables,
+							implementedBy: implementedByArr,
+							implements: implementsArr,
+							filePath: node.file || '',
+						});
+					}
+				} catch (e) {
+					console.warn('Failed to read frontmatter for node:', node.id, e);
+				}
+			}
+
+			console.log(`Parsed ${entities.length} entities from canvas nodes`);
+
+			// ============================================================
+			// STEP 2: Run V3 positioning engine
+			// ============================================================
+			const engine = new PositioningEngineV3();
+			const result = engine.calculatePositions(entities);
+
+			// Log errors and warnings
+			if (result.errors.length > 0) {
+				console.error('Positioning errors:', result.errors);
+				for (const error of result.errors) {
+					new Notice(`⚠️ ${error}`);
+				}
+			}
+			if (result.warnings.length > 0) {
+				console.warn('Positioning warnings:', result.warnings);
+			}
+
+			// ============================================================
+			// STEP 3: Apply positions to canvas nodes
+			// ============================================================
+			let repositionedCount = 0;
+			for (const node of canvasData.nodes) {
+				const position = result.positions.get(node.id);
+				if (position) {
+					node.x = Math.round(position.x);
+					node.y = Math.round(position.y);
+					node.width = Math.round(position.width);
+					node.height = Math.round(position.height);
+					repositionedCount++;
+				}
+			}
+
+			console.log(`Applied positions to ${repositionedCount} nodes`);
+
+			// ============================================================
+			// STEP 4: Update edge sides based on new positions
+			// ============================================================
+			for (const edge of canvasData.edges) {
+				const fromNode = canvasData.nodes.find(n => n.id === edge.fromNode);
+				const toNode = canvasData.nodes.find(n => n.id === edge.toNode);
+
+				if (fromNode && toNode) {
+					// Determine edge sides based on relative positions
+					if (fromNode.x + fromNode.width < toNode.x) {
+						// From is left of To
+						edge.fromSide = 'right';
+						edge.toSide = 'left';
+					} else if (toNode.x + toNode.width < fromNode.x) {
+						// To is left of From
+						edge.fromSide = 'left';
+						edge.toSide = 'right';
+					} else if (fromNode.y + fromNode.height < toNode.y) {
+						// From is above To
+						edge.fromSide = 'bottom';
+						edge.toSide = 'top';
+					} else {
+						// From is below To
+						edge.fromSide = 'top';
+						edge.toSide = 'bottom';
+					}
+				}
+			}
+
+			// Remove existing group nodes
+			canvasData.nodes = canvasData.nodes.filter(n => n.type !== 'group');
+
+			// ============================================================
+			// STEP 5: Save and reopen canvas
+			// ============================================================
+			this.isUpdatingCanvas = true;
+			const closedLeaves = await closeCanvasViews(this.app, canvasFile);
+			console.log('Closed', closedLeaves.length, 'canvas views');
+
+			await new Promise(resolve => setTimeout(resolve, 100));
+			await saveCanvasData(this.app, canvasFile, canvasData);
+			console.log('Saved canvas with new positions');
+
+			await new Promise(resolve => setTimeout(resolve, 200));
+			await this.app.workspace.openLinkText(canvasFile.path, '', false);
+
+			this.isUpdatingCanvas = false;
+			console.groupEnd();
+
+			new Notice(`✅ Repositioned ${repositionedCount} nodes (V3 algorithm)`);
+
+		} catch (error) {
+			console.error('ERROR in repositionCanvasNodesV3:', error);
+			console.groupEnd();
+			this.isUpdatingCanvas = false;
+			new Notice("❌ Failed to reposition nodes: " + (error as Error).message);
+		}
+	}
+
+	/**
 	 * Focus on entities that are currently "In Progress" or equivalent active status.
 	 * Selects all in-progress nodes and zooms the canvas to fit them.
 	 *
@@ -8745,7 +9358,55 @@ private registerCommands(): void {
 			return reverseRels.get(entityId)!;
 		};
 
+		// Helper to clean entity ID: remove brackets, quotes, and extract valid ID
+		const cleanEntityId = (raw: string): string | null => {
+			// Remove surrounding quotes and brackets
+			let cleaned = raw.trim()
+				.replace(/^["'\[\]]+|["'\[\]]+$/g, '')  // Remove leading/trailing quotes and brackets
+				.replace(/^\[|\]$/g, '')  // Remove any remaining brackets
+				.trim();
+
+			// Check if it looks like a valid entity ID (e.g., T-096, S-001, M-024, F-012, D-001)
+			if (/^[A-Z]+-\d+$/.test(cleaned)) {
+				return cleaned;
+			}
+			return null;
+		};
+
 		const parseYamlArray = (text: string, key: string): string[] => {
+			let rawItems: string[] = [];
+
+			const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+			if (multilineMatch) {
+				const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+				if (items) {
+					rawItems = items.map(item => item.replace(/^\s*-\s*/, '').trim());
+				}
+			} else {
+				const inlineMatch = text.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+				if (inlineMatch) {
+					rawItems = inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+				} else {
+					const singleMatch = text.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+					if (singleMatch && singleMatch[1].trim()) {
+						rawItems = [singleMatch[1].trim()];
+					}
+				}
+			}
+
+			// Clean and deduplicate
+			const cleaned: string[] = [];
+			for (const raw of rawItems) {
+				const id = cleanEntityId(raw);
+				if (id && !cleaned.includes(id)) {
+					cleaned.push(id);
+				}
+			}
+			return cleaned;
+		};
+
+		// Helper to get raw array values (before cleaning) to detect if cleanup is needed
+		const parseYamlArrayRaw = (text: string, key: string): string[] => {
 			const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
 			if (multilineMatch) {
 				const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
@@ -8763,6 +9424,14 @@ private registerCommands(): void {
 			}
 			return [];
 		};
+
+		// Track forward relationships that need cleaning
+		const forwardRelCleanup = new Map<string, {
+			depends_on?: string[];
+			implements?: string[];
+			documents?: string[];
+			affects?: string[];
+		}>();
 
 		// Scan all markdown files
 		const allFiles = this.app.vault.getMarkdownFiles();
@@ -8783,8 +9452,21 @@ private registerCommands(): void {
 				entityIdToFile.set(entityId, file);
 				scannedCount++;
 
+				// Check if forward relationships need cleaning
+				const forwardCleanup: {
+					depends_on?: string[];
+					implements?: string[];
+					documents?: string[];
+					affects?: string[];
+				} = {};
+
 				// depends_on -> blocks
+				const dependsOnRaw = parseYamlArrayRaw(fm, 'depends_on');
 				const dependsOn = parseYamlArray(fm, 'depends_on');
+				if (dependsOnRaw.length !== dependsOn.length ||
+					JSON.stringify(dependsOnRaw.sort()) !== JSON.stringify(dependsOn.sort())) {
+					forwardCleanup.depends_on = dependsOn;
+				}
 				for (const depId of dependsOn) {
 					const depRels = ensureEntity(depId);
 					if (!depRels.blocks.includes(entityId)) {
@@ -8803,7 +9485,12 @@ private registerCommands(): void {
 				}
 
 				// implements -> implemented_by
+				const implementsRaw = parseYamlArrayRaw(fm, 'implements');
 				const implementsArr = parseYamlArray(fm, 'implements');
+				if (implementsRaw.length !== implementsArr.length ||
+					JSON.stringify(implementsRaw.sort()) !== JSON.stringify(implementsArr.sort())) {
+					forwardCleanup.implements = implementsArr;
+				}
 				for (const featureId of implementsArr) {
 					const featureRels = ensureEntity(featureId);
 					if (!featureRels.implementedBy.includes(entityId)) {
@@ -8812,7 +9499,12 @@ private registerCommands(): void {
 				}
 
 				// documents -> documented_by
+				const documentsRaw = parseYamlArrayRaw(fm, 'documents');
 				const documentsArr = parseYamlArray(fm, 'documents');
+				if (documentsRaw.length !== documentsArr.length ||
+					JSON.stringify(documentsRaw.sort()) !== JSON.stringify(documentsArr.sort())) {
+					forwardCleanup.documents = documentsArr;
+				}
 				for (const featureId of documentsArr) {
 					const featureRels = ensureEntity(featureId);
 					if (!featureRels.documentedBy.includes(entityId)) {
@@ -8821,7 +9513,12 @@ private registerCommands(): void {
 				}
 
 				// affects -> decided_by
+				const affectsRaw = parseYamlArrayRaw(fm, 'affects');
 				const affectsArr = parseYamlArray(fm, 'affects');
+				if (affectsRaw.length !== affectsArr.length ||
+					JSON.stringify(affectsRaw.sort()) !== JSON.stringify(affectsArr.sort())) {
+					forwardCleanup.affects = affectsArr;
+				}
 				for (const featureId of affectsArr) {
 					const featureRels = ensureEntity(featureId);
 					if (!featureRels.decidedBy.includes(entityId)) {
@@ -8844,12 +9541,17 @@ private registerCommands(): void {
 					const prevRels = ensureEntity(prevId);
 					prevRels.nextVersion = entityId;
 				}
+
+				// Store cleanup needed for this entity
+				if (Object.keys(forwardCleanup).length > 0) {
+					forwardRelCleanup.set(entityId, forwardCleanup);
+				}
 			} catch (e) {
 				console.warn('[Canvas Plugin] Failed to read file for reconcile:', file.path, e);
 			}
 		}
 
-		// Now update each entity's file with computed reverse relationships
+		// Now update each entity's file with computed reverse relationships AND forward cleanup
 		let updatedCount = 0;
 
 		for (const [entityId, rels] of reverseRels.entries()) {
@@ -8863,7 +9565,7 @@ private registerCommands(): void {
 
 				const fm = frontmatterMatch[1];
 
-				// Check current values
+				// Check current values for reverse relationships
 				const currentBlocks = parseYamlArray(fm, 'blocks');
 				const currentChildren = parseYamlArray(fm, 'children');
 				const currentImplementedBy = parseYamlArray(fm, 'implemented_by');
@@ -8874,7 +9576,7 @@ private registerCommands(): void {
 				const nextVersionMatch = fm.match(/^next_version:\s*(.+)$/m);
 				const currentNextVersion = nextVersionMatch?.[1]?.trim();
 
-				// Compare
+				// Compare reverse relationships
 				const blocksChanged = JSON.stringify([...currentBlocks].sort()) !== JSON.stringify([...rels.blocks].sort());
 				const childrenChanged = JSON.stringify([...currentChildren].sort()) !== JSON.stringify([...rels.children].sort());
 				const implementedByChanged = JSON.stringify([...currentImplementedBy].sort()) !== JSON.stringify([...rels.implementedBy].sort());
@@ -8883,11 +9585,16 @@ private registerCommands(): void {
 				const supersededByChanged = currentSupersededBy !== rels.supersededBy;
 				const nextVersionChanged = currentNextVersion !== rels.nextVersion;
 
-				if (blocksChanged || childrenChanged || implementedByChanged || documentedByChanged || decidedByChanged || supersededByChanged || nextVersionChanged) {
+				// Check if forward relationships need cleanup
+				const forwardCleanup = forwardRelCleanup.get(entityId);
+				const hasForwardCleanup = forwardCleanup && Object.keys(forwardCleanup).length > 0;
+
+				if (blocksChanged || childrenChanged || implementedByChanged || documentedByChanged || decidedByChanged || supersededByChanged || nextVersionChanged || hasForwardCleanup) {
 					const updates: Record<string, unknown> = {
 						updated: new Date().toISOString(),
 					};
 
+					// Reverse relationship updates
 					if (blocksChanged && rels.blocks.length > 0) {
 						updates.blocks = rels.blocks;
 					}
@@ -8908,6 +9615,22 @@ private registerCommands(): void {
 					}
 					if (nextVersionChanged && rels.nextVersion) {
 						updates.next_version = rels.nextVersion;
+					}
+
+					// Forward relationship cleanup (remove malformed entries and duplicates)
+					if (forwardCleanup) {
+						if (forwardCleanup.depends_on) {
+							updates.depends_on = forwardCleanup.depends_on;
+						}
+						if (forwardCleanup.implements) {
+							updates.implements = forwardCleanup.implements;
+						}
+						if (forwardCleanup.documents) {
+							updates.documents = forwardCleanup.documents;
+						}
+						if (forwardCleanup.affects) {
+							updates.affects = forwardCleanup.affects;
+						}
 					}
 
 					const updatedContent = updateFrontmatter(content, updates);
@@ -8978,15 +9701,21 @@ private registerCommands(): void {
 
 						case 'reposition':
 						case 'reposition-nodes':
+							await this.repositionCanvasNodesV3();
+							result = { success: true, message: 'Reposition nodes (V3) completed' };
+							break;
+
+						case 'reposition-v2':
+						case 'reposition-nodes-v2':
 							await this.repositionCanvasNodes();
-							result = { success: true, message: 'Reposition nodes completed' };
+							result = { success: true, message: 'Reposition nodes (V2 legacy) completed' };
 							break;
 
 						default:
 							result = {
 								success: false,
 								message: 'Unknown action',
-								error: `Unknown action: ${action}. Valid actions: populate, reposition`
+								error: `Unknown action: ${action}. Valid actions: populate, reposition, reposition-v2`
 							};
 					}
 
