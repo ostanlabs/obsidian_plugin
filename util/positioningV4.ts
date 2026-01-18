@@ -1623,20 +1623,70 @@ export class PositioningEngineV4 {
 		}
 		totalHeight += Math.max(0, sortedWorkstreams.length - 1) * this.config.workstreamGap;
 
-		// Sort milestones within each workstream by dependencies
-		const sortedMilestonesByWs = new Map<string, ProcessedNode[]>();
-		for (const ws of sortedWorkstreams) {
-			sortedMilestonesByWs.set(ws.name, this.sortBySequencing(ws.milestones));
-		}
-
-		// Collect cross-workstream dependencies
-		const crossWsDeps: { source: string; target: string }[] = [];
+		// Collect ALL milestone dependencies (both same-WS and cross-WS)
 		const allMilestoneIds = new Set<string>();
 		for (const ws of sortedWorkstreams) {
 			for (const m of ws.milestones) {
 				allMilestoneIds.add(m.entityId);
 			}
 		}
+
+		// Build global dependency graph: source -> targets (source must be LEFT of targets)
+		const globalDepGraph = new Map<string, Set<string>>();
+		for (const id of allMilestoneIds) {
+			globalDepGraph.set(id, new Set());
+		}
+		for (const ws of sortedWorkstreams) {
+			for (const m of ws.milestones) {
+				// sequencingAfter: this comes AFTER target (target -> this)
+				for (const depId of m.sequencingAfter) {
+					if (allMilestoneIds.has(depId)) {
+						globalDepGraph.get(depId)!.add(m.entityId);
+					}
+				}
+			}
+		}
+
+		// Compute transitive closure of the global dependency graph
+		// This finds all pairs (A, B) where A must be LEFT of B (directly or transitively)
+		const transitiveDeps = this.computeTransitiveClosure(globalDepGraph, allMilestoneIds);
+		console.log(`[PositioningV4] Computed transitive closure with ${transitiveDeps.size} reachable pairs`);
+
+		// For each workstream, find implicit same-WS dependencies from transitive cross-WS paths
+		// If M-039 (eng) -> M-001 (infra) -> M-026 (eng), then M-039 -> M-026 is an implicit eng dependency
+		const implicitSameWsDeps = new Map<string, Set<string>>();
+		for (const ws of sortedWorkstreams) {
+			const wsIds = new Set(ws.milestones.map(m => m.entityId));
+			for (const m1 of ws.milestones) {
+				for (const m2 of ws.milestones) {
+					if (m1.entityId === m2.entityId) continue;
+					// Check if m1 -> m2 transitively (m1 must be LEFT of m2)
+					const key = `${m1.entityId}->${m2.entityId}`;
+					if (transitiveDeps.has(key)) {
+						// Check if this is NOT a direct same-WS dependency
+						const directDeps = globalDepGraph.get(m1.entityId) || new Set();
+						if (!directDeps.has(m2.entityId)) {
+							// This is an implicit dependency through cross-WS path
+							if (!implicitSameWsDeps.has(m1.entityId)) {
+								implicitSameWsDeps.set(m1.entityId, new Set());
+							}
+							implicitSameWsDeps.get(m1.entityId)!.add(m2.entityId);
+							console.log(`[PositioningV4] Implicit same-WS dep: ${m1.entityId} -> ${m2.entityId} (via cross-WS path)`);
+						}
+					}
+				}
+			}
+		}
+
+		// Sort milestones within each workstream by dependencies (including implicit ones)
+		const sortedMilestonesByWs = new Map<string, ProcessedNode[]>();
+		for (const ws of sortedWorkstreams) {
+			sortedMilestonesByWs.set(ws.name, this.sortBySequencingWithImplicit(ws.milestones, implicitSameWsDeps));
+		}
+
+		// Collect cross-workstream dependencies
+		const crossWsDeps: { source: string; target: string }[] = [];
+		// Note: allMilestoneIds already computed above for transitive closure
 
 		for (const ws of sortedWorkstreams) {
 			for (const m of ws.milestones) {
@@ -1689,23 +1739,38 @@ export class PositioningEngineV4 {
 			}
 		}
 
-		// Multiple passes to resolve all constraints
+		// Build predecessor map for same-workstream constraints (based on within-WS sorted order)
+		const wsPredecessor = new Map<string, ProcessedNode | null>();
+		for (const ws of sortedWorkstreams) {
+			const sortedMilestones = sortedMilestonesByWs.get(ws.name)!;
+			for (let i = 0; i < sortedMilestones.length; i++) {
+				wsPredecessor.set(sortedMilestones[i].entityId, i > 0 ? sortedMilestones[i - 1] : null);
+			}
+		}
+
+		// Sort workstreams by cross-WS dependency order
+		// If workstream A has milestones that depend on workstream B's milestones, process B first
+		const wsProcessingOrder = this.sortWorkstreamsByDependencyOrder(sortedWorkstreams, crossWsDeps);
+		console.log(`[PositioningV4] Workstream processing order: ${wsProcessingOrder.map(ws => ws.name).join(' → ')}`);
+
+		// Iterative constraint propagation
+		// Process workstreams in dependency order, iterate until stable
 		const maxIterations = 20;
 		for (let iteration = 0; iteration < maxIterations; iteration++) {
 			let changed = false;
 
-			for (const ws of sortedWorkstreams) {
+			// Process workstreams in dependency order
+			for (const ws of wsProcessingOrder) {
 				const sortedMilestones = sortedMilestonesByWs.get(ws.name)!;
 
-				for (let i = 0; i < sortedMilestones.length; i++) {
-					const milestone = sortedMilestones[i];
+				for (const milestone of sortedMilestones) {
 					const containerWidth = milestone.containerSize?.width || this.config.nodeSizes.milestone.width;
 
 					// Constraint 1: Must be after previous milestone in same workstream
 					let minX = 0;
-					if (i > 0) {
-						const prevMilestone = sortedMilestones[i - 1];
-						const prevEndX = milestoneEndX.get(prevMilestone.entityId) || 0;
+					const predecessor = wsPredecessor.get(milestone.entityId);
+					if (predecessor) {
+						const prevEndX = milestoneEndX.get(predecessor.entityId) || 0;
 						minX = prevEndX + this.config.containerGap;
 					}
 
@@ -1720,8 +1785,8 @@ export class PositioningEngineV4 {
 						}
 					}
 
-					const oldX = milestoneX.get(milestone.entityId) || 0;
-					if (minX > oldX) {
+					const currentX = milestoneX.get(milestone.entityId) || 0;
+					if (minX > currentX) {
 						milestoneX.set(milestone.entityId, minX);
 						milestoneEndX.set(milestone.entityId, minX + containerWidth);
 						milestoneNodeEndX.set(milestone.entityId, minX + containerWidth);
@@ -1878,6 +1943,178 @@ export class PositioningEngineV4 {
 	}
 
 	/**
+	 * Sort workstreams by cross-workstream dependency order.
+	 * If workstream A has milestones that depend on workstream B's milestones, B should be processed first.
+	 * This ensures that when we position milestones in A, the milestones in B have already been positioned.
+	 */
+	private sortWorkstreamsByDependencyOrder(
+		workstreams: WorkstreamData[],
+		crossWsDeps: { source: string; target: string }[]
+	): WorkstreamData[] {
+		if (workstreams.length <= 1) {
+			return workstreams;
+		}
+
+		// Build workstream dependency graph
+		// If milestone in WS-A depends on milestone in WS-B, then WS-A depends on WS-B
+		const wsGraph = new Map<string, Set<string>>(); // ws -> set of workstreams it depends on
+		const wsInDegree = new Map<string, number>();
+
+		for (const ws of workstreams) {
+			wsGraph.set(ws.name, new Set());
+			wsInDegree.set(ws.name, 0);
+		}
+
+		// Build the graph from cross-WS deps
+		// dep.source must be LEFT of dep.target
+		// So the workstream containing dep.target depends on the workstream containing dep.source
+		for (const dep of crossWsDeps) {
+			const sourceNode = this.processedNodes.get(dep.source);
+			const targetNode = this.processedNodes.get(dep.target);
+			if (sourceNode && targetNode && sourceNode.workstream !== targetNode.workstream) {
+				const sourceWs = sourceNode.workstream;
+				const targetWs = targetNode.workstream;
+				// targetWs depends on sourceWs (sourceWs should be processed first)
+				if (!wsGraph.get(targetWs)!.has(sourceWs)) {
+					wsGraph.get(targetWs)!.add(sourceWs);
+					wsInDegree.set(targetWs, (wsInDegree.get(targetWs) || 0) + 1);
+				}
+			}
+		}
+
+		console.log(`[PositioningV4] Workstream dependency graph:`);
+		for (const ws of workstreams) {
+			const deps = Array.from(wsGraph.get(ws.name) || []);
+			console.log(`[PositioningV4]   ${ws.name} depends on: [${deps.join(', ')}]`);
+		}
+
+		// Topological sort using Kahn's algorithm
+		const queue: string[] = [];
+		for (const ws of workstreams) {
+			if ((wsInDegree.get(ws.name) || 0) === 0) {
+				queue.push(ws.name);
+			}
+		}
+		queue.sort(); // Alphabetical tiebreaker
+
+		const sorted: WorkstreamData[] = [];
+		const wsMap = new Map(workstreams.map(ws => [ws.name, ws]));
+
+		while (queue.length > 0) {
+			const wsName = queue.shift()!;
+			sorted.push(wsMap.get(wsName)!);
+
+			// Find workstreams that depend on this one and decrement their in-degree
+			for (const [otherWs, deps] of wsGraph.entries()) {
+				if (deps.has(wsName)) {
+					deps.delete(wsName);
+					const newInDegree = (wsInDegree.get(otherWs) || 1) - 1;
+					wsInDegree.set(otherWs, newInDegree);
+					if (newInDegree === 0) {
+						queue.push(otherWs);
+						queue.sort(); // Maintain alphabetical order
+					}
+				}
+			}
+		}
+
+		// If there's a cycle, fall back to alphabetical order
+		if (sorted.length !== workstreams.length) {
+			console.log(`[PositioningV4] Cycle detected in workstream dependencies, falling back to alphabetical order`);
+			return workstreams.sort((a, b) => a.name.localeCompare(b.name));
+		}
+
+		return sorted;
+	}
+
+	/**
+	 * Global topological sort of ALL milestones across ALL workstreams.
+	 * This considers both same-workstream dependencies AND cross-workstream dependencies.
+	 * The result is a single ordered list where every milestone comes after all its dependencies.
+	 */
+	private globalTopologicalSortMilestones(
+		allMilestones: ProcessedNode[],
+		crossWsDeps: { source: string; target: string }[],
+		sortedMilestonesByWs: Map<string, ProcessedNode[]>
+	): ProcessedNode[] {
+		const milestoneMap = new Map<string, ProcessedNode>();
+		const milestoneIds = new Set<string>();
+		for (const m of allMilestones) {
+			milestoneMap.set(m.entityId, m);
+			milestoneIds.add(m.entityId);
+		}
+
+		// Build global dependency graph
+		// Edge from A to B means A must come BEFORE B (A -> B)
+		const graph = new Map<string, Set<string>>();
+		const inDegree = new Map<string, number>();
+
+		for (const m of allMilestones) {
+			graph.set(m.entityId, new Set());
+			inDegree.set(m.entityId, 0);
+		}
+
+		// Add edges from ACTUAL dependencies (sequencingAfter), not from sorted order
+		// This includes both same-workstream and cross-workstream dependencies
+		for (const m of allMilestones) {
+			// m.sequencingAfter contains IDs that this milestone comes AFTER
+			// So if m.sequencingAfter = [X], then X -> m (X must be before m)
+			for (const depId of m.sequencingAfter) {
+				if (milestoneIds.has(depId)) {
+					if (!graph.get(depId)!.has(m.entityId)) {
+						graph.get(depId)!.add(m.entityId);
+						inDegree.set(m.entityId, (inDegree.get(m.entityId) || 0) + 1);
+					}
+				}
+			}
+		}
+
+		console.log(`[PositioningV4] Global topo sort graph edges:`);
+		for (const [from, tos] of graph) {
+			if (tos.size > 0) {
+				console.log(`[PositioningV4]   ${from} -> [${[...tos].join(', ')}]`);
+			}
+		}
+
+		// Kahn's algorithm
+		const queue: string[] = [];
+		for (const [id, degree] of inDegree) {
+			if (degree === 0) {
+				queue.push(id);
+			}
+		}
+		queue.sort(); // Alphabetical for determinism
+
+		const sorted: ProcessedNode[] = [];
+		while (queue.length > 0) {
+			const current = queue.shift()!;
+			sorted.push(milestoneMap.get(current)!);
+
+			for (const neighbor of graph.get(current)!) {
+				const newDegree = (inDegree.get(neighbor) || 0) - 1;
+				inDegree.set(neighbor, newDegree);
+				if (newDegree === 0) {
+					queue.push(neighbor);
+					queue.sort(); // Keep sorted for determinism
+				}
+			}
+		}
+
+		// Check for cycles
+		if (sorted.length !== allMilestones.length) {
+			console.warn(`[PositioningV4] Global topological sort: cycle detected! Sorted ${sorted.length} of ${allMilestones.length} milestones`);
+			// Add remaining milestones in original order
+			for (const m of allMilestones) {
+				if (!sorted.includes(m)) {
+					sorted.push(m);
+				}
+			}
+		}
+
+		return sorted;
+	}
+
+	/**
 	 * Sort nodes by sequencing relationships (topological sort)
 	 */
 	private sortBySequencing(nodes: ProcessedNode[]): ProcessedNode[] {
@@ -1958,6 +2195,143 @@ export class PositioningEngineV4 {
 		// Debug: Log final order for milestone sorts
 		if (isMilestoneSort) {
 			console.log(`[PositioningV4]   Sorted order: ${sorted.map(n => n.entityId).join(' → ')}`);
+		}
+
+		return sorted;
+	}
+
+	/**
+	 * Compute transitive closure of a dependency graph.
+	 * Returns a Set of "A->B" strings where A can reach B (directly or transitively).
+	 */
+	private computeTransitiveClosure(
+		graph: Map<string, Set<string>>,
+		allIds: Set<string>
+	): Set<string> {
+		const reachable = new Set<string>();
+
+		// For each node, do a BFS/DFS to find all reachable nodes
+		for (const startId of allIds) {
+			const visited = new Set<string>();
+			const queue = [startId];
+			visited.add(startId);
+
+			while (queue.length > 0) {
+				const current = queue.shift()!;
+				const neighbors = graph.get(current) || new Set();
+
+				for (const neighbor of neighbors) {
+					if (!visited.has(neighbor)) {
+						visited.add(neighbor);
+						queue.push(neighbor);
+						// startId can reach neighbor
+						reachable.add(`${startId}->${neighbor}`);
+					}
+				}
+			}
+		}
+
+		return reachable;
+	}
+
+	/**
+	 * Sort nodes by sequencing relationships, including implicit dependencies from cross-WS paths.
+	 */
+	private sortBySequencingWithImplicit(
+		nodes: ProcessedNode[],
+		implicitDeps: Map<string, Set<string>>
+	): ProcessedNode[] {
+		if (nodes.length <= 1) return nodes;
+
+		const nodeIds = new Set(nodes.map(n => n.entityId));
+
+		// Check if this is a milestone sort (for debugging)
+		const isMilestoneSort = nodes.length > 0 && nodes[0].type === 'milestone';
+		const wsName = isMilestoneSort ? nodes[0].workstream : '';
+
+		// Build adjacency list
+		const graph = new Map<string, Set<string>>();
+		const inDegree = new Map<string, number>();
+
+		for (const n of nodes) {
+			graph.set(n.entityId, new Set());
+			inDegree.set(n.entityId, 0);
+		}
+
+		// Build edges from direct dependencies (sequencingAfter)
+		for (const n of nodes) {
+			for (const depId of n.sequencingAfter) {
+				if (nodeIds.has(depId)) {
+					if (!graph.get(depId)!.has(n.entityId)) {
+						graph.get(depId)!.add(n.entityId);
+						inDegree.set(n.entityId, (inDegree.get(n.entityId) || 0) + 1);
+					}
+				}
+			}
+		}
+
+		// Add implicit dependencies from cross-WS paths
+		for (const n of nodes) {
+			const implicit = implicitDeps.get(n.entityId);
+			if (implicit) {
+				for (const targetId of implicit) {
+					if (nodeIds.has(targetId) && !graph.get(n.entityId)!.has(targetId)) {
+						graph.get(n.entityId)!.add(targetId);
+						inDegree.set(targetId, (inDegree.get(targetId) || 0) + 1);
+						if (isMilestoneSort) {
+							console.log(`[PositioningV4]   Added implicit edge: ${n.entityId} -> ${targetId}`);
+						}
+					}
+				}
+			}
+		}
+
+		// Debug logging for milestone sorts
+		if (isMilestoneSort) {
+			console.log(`[PositioningV4] sortBySequencingWithImplicit for workstream "${wsName}" (${nodes.length} milestones):`);
+			for (const n of nodes) {
+				const sameWsAfter = n.sequencingAfter.filter(id => nodeIds.has(id));
+				const implicitTargets = implicitDeps.get(n.entityId);
+				const implicitInWs = implicitTargets ? [...implicitTargets].filter(id => nodeIds.has(id)) : [];
+				if (sameWsAfter.length > 0 || implicitInWs.length > 0) {
+					console.log(`[PositioningV4]   ${n.entityId}: inDegree=${inDegree.get(n.entityId)}, directAfter=[${sameWsAfter.join(',')}], implicit=[${implicitInWs.join(',')}]`);
+				}
+			}
+		}
+
+		// Topological sort using Kahn's algorithm
+		const queue: string[] = [];
+		for (const [id, degree] of inDegree) {
+			if (degree === 0) queue.push(id);
+		}
+
+		const sorted: ProcessedNode[] = [];
+		const nodeMap = new Map(nodes.map(n => [n.entityId, n]));
+
+		while (queue.length > 0) {
+			queue.sort();
+			const id = queue.shift()!;
+			sorted.push(nodeMap.get(id)!);
+
+			for (const neighbor of graph.get(id) || []) {
+				const newDegree = (inDegree.get(neighbor) || 0) - 1;
+				inDegree.set(neighbor, newDegree);
+				if (newDegree === 0) queue.push(neighbor);
+			}
+		}
+
+		// Add remaining (cycle members)
+		if (sorted.length < nodes.length) {
+			for (const n of nodes) {
+				if (!sorted.includes(n)) {
+					sorted.push(n);
+				}
+			}
+		}
+
+		// Debug: Log final order for milestone sorts
+		if (isMilestoneSort) {
+			console.log(`[PositioningV4]   Sorted order (with implicit): ${sorted.map(n => n.entityId).join(' → ')}`);
 		}
 
 		return sorted;
