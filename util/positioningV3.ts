@@ -35,7 +35,7 @@ export const DEFAULT_POSITIONING_CONFIG: PositioningConfig = {
 	},
 	childGap: 90,
 	containerGap: 130,
-	workstreamGap: 170,
+	workstreamGap: 340,
 	orphanGap: 150,
 	crossWorkstreamBandMinHeight: 110,
 };
@@ -306,6 +306,8 @@ export class PositioningEngineV3 {
 		const tasks = Array.from(this.processedNodes.values())
 			.filter(n => n.type === 'task');
 
+		// First pass: attach tasks with explicit parent
+		const tasksWithoutParent: ProcessedNode[] = [];
 		for (const task of tasks) {
 			if (task.data.parent) {
 				const parent = this.processedNodes.get(task.data.parent);
@@ -313,11 +315,79 @@ export class PositioningEngineV3 {
 					parent.children.push(task);
 				} else {
 					this.warnings.push(`Task ${task.entityId} has unknown parent ${task.data.parent}`);
-					this.orphanedEntities.push(task);
+					tasksWithoutParent.push(task);
 				}
 			} else {
+				tasksWithoutParent.push(task);
+			}
+		}
+
+		// Second pass: for tasks without parent, check if they have blocks relationships
+		// If a task blocks other tasks, treat the blocked tasks as "children" for positioning
+		// This creates a dependency chain: blocker -> blocked (left to right)
+		const taskEntityIds = new Set(tasksWithoutParent.map(t => t.entityId));
+		const attachedViaBlocks = new Set<string>();
+
+		// Build reverse mapping: who blocks whom
+		const blockedBy = new Map<string, string[]>(); // entityId -> [entityIds that block it]
+		for (const task of tasksWithoutParent) {
+			// From blocks field: this task blocks others
+			for (const blockedId of task.data.blocks || []) {
+				if (taskEntityIds.has(blockedId)) {
+					if (!blockedBy.has(blockedId)) blockedBy.set(blockedId, []);
+					blockedBy.get(blockedId)!.push(task.entityId);
+				}
+			}
+			// From depends_on field: this task is blocked by others
+			for (const blockerId of task.data.dependsOn || []) {
+				if (taskEntityIds.has(blockerId)) {
+					if (!blockedBy.has(task.entityId)) blockedBy.set(task.entityId, []);
+					blockedBy.get(task.entityId)!.push(blockerId);
+				}
+			}
+		}
+
+		// Find root tasks (tasks that block others but are not blocked by any task in this set)
+		const rootTasks: ProcessedNode[] = [];
+		for (const task of tasksWithoutParent) {
+			const blockers = blockedBy.get(task.entityId) || [];
+			if (blockers.length === 0 && (task.data.blocks?.some(id => taskEntityIds.has(id)))) {
+				rootTasks.push(task);
+			}
+		}
+
+		// For each root task, attach blocked tasks as children recursively
+		const attachBlockedAsChildren = (blocker: ProcessedNode, visited: Set<string>) => {
+			if (visited.has(blocker.entityId)) return;
+			visited.add(blocker.entityId);
+			attachedViaBlocks.add(blocker.entityId);
+
+			for (const blockedId of blocker.data.blocks || []) {
+				if (!taskEntityIds.has(blockedId)) continue;
+				const blocked = this.processedNodes.get(blockedId);
+				if (blocked && !visited.has(blockedId)) {
+					blocker.children.push(blocked);
+					attachedViaBlocks.add(blockedId);
+					attachBlockedAsChildren(blocked, visited);
+				}
+			}
+		};
+
+		for (const root of rootTasks) {
+			attachBlockedAsChildren(root, new Set());
+		}
+
+		// Root tasks and any remaining unattached tasks go to orphans
+		// But root tasks should be positioned together, not scattered
+		for (const task of tasksWithoutParent) {
+			if (!attachedViaBlocks.has(task.entityId)) {
+				// Task has no blocks relationships with other orphan tasks
+				this.orphanedEntities.push(task);
+			} else if (rootTasks.includes(task)) {
+				// Root of a dependency chain - goes to orphans but will have children
 				this.orphanedEntities.push(task);
 			}
+			// Tasks attached as children via blocks are NOT added to orphans
 		}
 	}
 
@@ -506,31 +576,57 @@ export class PositioningEngineV3 {
 			this.calculateContainerSize(child);
 		}
 
-		// Check if siblings have dependencies - use chain layout if so
+		// Check if siblings have dependencies - use dependency-aware grid layout if so
 		const hasDeps = this.hasSiblingDependencies(node.children);
 
 		if (hasDeps) {
-			// Chain layout: sort by dependency, place horizontally in sequence
-			const sortedChildren = this.sortSiblingsByDependency(node.children);
-			// Update children order for positioning phase
-			node.children = sortedChildren;
+			// Dependency-aware grid layout: group by dependency level (topological depth)
+			// Items at the same level are stacked vertically, levels progress left-to-right
+			const levelAssignments = this.assignDependencyLevels(node.children);
 
-			// Calculate chain dimensions (all children in a row)
-			let chainWidth = 0;
-			let chainHeight = 0;
-
-			for (const child of sortedChildren) {
-				const childSize = child.containerSize!;
-				chainWidth += childSize.width;
-				chainHeight = Math.max(chainHeight, childSize.height);
+			// Group children by level
+			const levelGroups = new Map<number, ProcessedNode[]>();
+			let maxLevel = 0;
+			for (const { child, level } of levelAssignments) {
+				if (!levelGroups.has(level)) {
+					levelGroups.set(level, []);
+				}
+				levelGroups.get(level)!.push(child);
+				maxLevel = Math.max(maxLevel, level);
 			}
-			chainWidth += (sortedChildren.length - 1) * this.config.childGap;
+
+			// Calculate dimensions for each level (column)
+			const colWidths: number[] = [];
+			const colHeights: number[] = [];
+			for (let level = 0; level <= maxLevel; level++) {
+				const children = levelGroups.get(level) || [];
+				let colWidth = 0;
+				let colHeight = 0;
+				for (const child of children) {
+					const childSize = child.containerSize!;
+					colWidth = Math.max(colWidth, childSize.width);
+					colHeight += childSize.height;
+				}
+				if (children.length > 1) {
+					colHeight += (children.length - 1) * this.config.childGap;
+				}
+				colWidths.push(colWidth);
+				colHeights.push(colHeight);
+			}
+
+			const gridWidth = colWidths.reduce((sum, w) => sum + w, 0) + Math.max(0, colWidths.length - 1) * this.config.childGap;
+			const gridHeight = Math.max(...colHeights, 0);
+
+			// Store level assignments for positioning phase
+			(node as any)._levelAssignments = levelAssignments;
+			(node as any)._colWidths = colWidths;
+			(node as any)._gridHeight = gridHeight;
 
 			node.containerSize = {
-				width: chainWidth + this.config.childGap + nodeSize.width,
-				height: Math.max(chainHeight, nodeSize.height),
-				gridColumns: sortedChildren.length,  // All in one row
-				gridRows: 1,
+				width: gridWidth + this.config.childGap + nodeSize.width,
+				height: gridHeight + this.config.childGap + nodeSize.height,
+				gridColumns: maxLevel + 1,
+				gridRows: Math.max(...Array.from(levelGroups.values()).map(g => g.length), 1),
 			};
 		} else {
 			// Grid layout: optimal arrangement preferring taller layouts
@@ -561,7 +657,8 @@ export class PositioningEngineV3 {
 
 			node.containerSize = {
 				width: gridWidth + this.config.childGap + nodeSize.width,
-				height: Math.max(gridHeight, nodeSize.height),
+				// Children are ABOVE parent with a gap, so total height = children + gap + parent
+				height: gridHeight + this.config.childGap + nodeSize.height,
 				gridColumns: grid.columns,
 				gridRows: grid.rows,
 			};
@@ -660,6 +757,105 @@ export class PositioningEngineV3 {
 	}
 
 	/**
+	 * Assign dependency levels to siblings for grid layout.
+	 * Level 0 = no dependencies (leftmost), higher levels depend on lower levels.
+	 * Items at the same level can be stacked vertically.
+	 */
+	private assignDependencyLevels(siblings: ProcessedNode[]): { child: ProcessedNode; level: number }[] {
+		if (siblings.length === 0) return [];
+		if (siblings.length === 1) return [{ child: siblings[0], level: 0 }];
+
+		const siblingIds = new Set(siblings.map(s => s.entityId));
+
+		// Build adjacency list: edge from A to B means A must be LEFT of B (lower level)
+		const graph = new Map<string, Set<string>>();
+		const reverseGraph = new Map<string, Set<string>>(); // For finding predecessors
+
+		for (const s of siblings) {
+			graph.set(s.entityId, new Set());
+			reverseGraph.set(s.entityId, new Set());
+		}
+
+		for (const s of siblings) {
+			// If A blocks B, A is LEFT of B (A → B)
+			for (const blockedId of s.data.blocks) {
+				if (siblingIds.has(blockedId) && !graph.get(s.entityId)!.has(blockedId)) {
+					graph.get(s.entityId)!.add(blockedId);
+					reverseGraph.get(blockedId)!.add(s.entityId);
+				}
+			}
+
+			// If A depends_on B, B is LEFT of A (B → A)
+			for (const depId of s.data.dependsOn) {
+				if (siblingIds.has(depId) && !graph.get(depId)!.has(s.entityId)) {
+					graph.get(depId)!.add(s.entityId);
+					reverseGraph.get(s.entityId)!.add(depId);
+				}
+			}
+		}
+
+		// Calculate levels using longest path from roots
+		const levels = new Map<string, number>();
+
+		// Initialize: nodes with no predecessors are level 0
+		const queue: string[] = [];
+		for (const s of siblings) {
+			if (reverseGraph.get(s.entityId)!.size === 0) {
+				levels.set(s.entityId, 0);
+				queue.push(s.entityId);
+			}
+		}
+
+		// BFS to propagate levels
+		while (queue.length > 0) {
+			const id = queue.shift()!;
+			const currentLevel = levels.get(id)!;
+
+			for (const successor of graph.get(id)!) {
+				const newLevel = currentLevel + 1;
+				const existingLevel = levels.get(successor);
+
+				if (existingLevel === undefined || newLevel > existingLevel) {
+					levels.set(successor, newLevel);
+				}
+
+				// Check if all predecessors have been processed
+				let allPredecessorsProcessed = true;
+				for (const pred of reverseGraph.get(successor)!) {
+					if (!levels.has(pred)) {
+						allPredecessorsProcessed = false;
+						break;
+					}
+				}
+
+				if (allPredecessorsProcessed && !queue.includes(successor)) {
+					queue.push(successor);
+				}
+			}
+		}
+
+		// Handle any nodes not reached (cycles or disconnected) - assign level 0
+		for (const s of siblings) {
+			if (!levels.has(s.entityId)) {
+				levels.set(s.entityId, 0);
+			}
+		}
+
+		// Build result sorted by level, then by entityId for consistency
+		const result = siblings.map(child => ({
+			child,
+			level: levels.get(child.entityId)!
+		}));
+
+		result.sort((a, b) => {
+			if (a.level !== b.level) return a.level - b.level;
+			return a.child.entityId.localeCompare(b.child.entityId);
+		});
+
+		return result;
+	}
+
+	/**
 	 * Sort siblings by dependency order (same logic as milestones)
 	 * Returns sorted array where blockers come before blocked, dependencies before dependents
 	 */
@@ -733,11 +929,13 @@ export class PositioningEngineV3 {
 	// ========================================================================
 
 	private positionWorkstreams(): void {
-		// Sort workstreams alphabetically for consistent ordering
 		// Filter out empty workstreams
-		const sortedWorkstreams = Array.from(this.workstreams.values())
-			.filter(ws => ws.milestones.length > 0)
-			.sort((a, b) => a.name.localeCompare(b.name));
+		const nonEmptyWorkstreams = Array.from(this.workstreams.values())
+			.filter(ws => ws.milestones.length > 0);
+
+		// Order workstreams to minimize cross-workstream edge lengths
+		// by placing workstreams with more dependencies on each other adjacent
+		const sortedWorkstreams = this.orderWorkstreamsByDependencyDensity(nonEmptyWorkstreams);
 
 		if (sortedWorkstreams.length === 0) {
 			console.log('[PositioningV3] No workstreams with milestones to position');
@@ -749,9 +947,12 @@ export class PositioningEngineV3 {
 		for (const ws of sortedWorkstreams) {
 			let maxHeight = 0;
 			for (const m of ws.milestones) {
-				maxHeight = Math.max(maxHeight, m.containerSize?.height || 0);
+				const containerHeight = m.containerSize?.height || 0;
+				console.log(`[PositioningV3] ${ws.name}/${m.entityId} containerSize: ${m.containerSize?.width}x${containerHeight}, children: ${m.children.length}`);
+				maxHeight = Math.max(maxHeight, containerHeight);
 			}
 			ws.height = Math.max(maxHeight, this.config.nodeSizes.milestone.height);
+			console.log(`[PositioningV3] Workstream ${ws.name} height: ${ws.height} (max container: ${maxHeight})`);
 			totalHeight += ws.height;
 		}
 		totalHeight += Math.max(0, sortedWorkstreams.length - 1) * this.config.workstreamGap;
@@ -780,6 +981,7 @@ export class PositioningEngineV3 {
 						const depNode = this.processedNodes.get(depId);
 						if (depNode && depNode.workstream !== m.workstream) {
 							crossWsDeps.push({ source: depId, target: m.entityId });
+							console.log(`[PositioningV3] Cross-WS dep: ${depId} (${depNode.workstream}) -> ${m.entityId} (${m.workstream}) [depends_on]`);
 						}
 					}
 				}
@@ -789,22 +991,29 @@ export class PositioningEngineV3 {
 						const blockedNode = this.processedNodes.get(blockedId);
 						if (blockedNode && blockedNode.workstream !== m.workstream) {
 							crossWsDeps.push({ source: m.entityId, target: blockedId });
+							console.log(`[PositioningV3] Cross-WS dep: ${m.entityId} (${m.workstream}) -> ${blockedId} (${blockedNode.workstream}) [blocks]`);
 						}
 					}
 				}
 			}
 		}
+		console.log(`[PositioningV3] Total cross-workstream deps: ${crossWsDeps.length}`);
 
 		// Position milestones with constraint propagation
 		// Each milestone's X is: max(previous in workstream, all cross-ws dependencies)
 		const milestoneX = new Map<string, number>(); // entityId -> container start X
-		const milestoneEndX = new Map<string, number>(); // entityId -> container end X
+		const milestoneEndX = new Map<string, number>(); // entityId -> container end X (for intra-ws)
+		const milestoneNodeEndX = new Map<string, number>(); // entityId -> node end X (for cross-ws)
 
 		// Initialize all milestones with X=0
 		for (const ws of sortedWorkstreams) {
 			for (const m of ws.milestones) {
+				const containerWidth = m.containerSize?.width || this.config.nodeSizes.milestone.width;
+				const nodeWidth = this.config.nodeSizes.milestone.width;
 				milestoneX.set(m.entityId, 0);
-				milestoneEndX.set(m.entityId, m.containerSize?.width || this.config.nodeSizes.milestone.width);
+				milestoneEndX.set(m.entityId, containerWidth);
+				// Node is at the RIGHT of container, so node end = container end
+				milestoneNodeEndX.set(m.entityId, containerWidth);
 			}
 		}
 
@@ -819,8 +1028,9 @@ export class PositioningEngineV3 {
 				for (let i = 0; i < sortedMilestones.length; i++) {
 					const milestone = sortedMilestones[i];
 					const containerWidth = milestone.containerSize?.width || this.config.nodeSizes.milestone.width;
+					const nodeWidth = this.config.nodeSizes.milestone.width;
 
-					// Constraint 1: Must be after previous milestone in same workstream
+					// Constraint 1: Must be after previous milestone in same workstream (use container end)
 					let minX = 0;
 					if (i > 0) {
 						const prevMilestone = sortedMilestones[i - 1];
@@ -828,11 +1038,15 @@ export class PositioningEngineV3 {
 						minX = prevEndX + this.config.containerGap;
 					}
 
-					// Constraint 2: Must be after all cross-workstream dependencies
+					// Constraint 2: Must be after all cross-workstream dependencies (use NODE end, not container)
 					for (const dep of crossWsDeps) {
 						if (dep.target === milestone.entityId) {
-							const sourceEndX = milestoneEndX.get(dep.source) || 0;
-							minX = Math.max(minX, sourceEndX + this.config.containerGap);
+							const sourceNodeEndX = milestoneNodeEndX.get(dep.source) || 0;
+							const newMinX = sourceNodeEndX + this.config.containerGap;
+							if (newMinX > minX) {
+								console.log(`[PositioningV3] ${milestone.entityId} constrained by cross-ws dep ${dep.source}: minX ${minX} -> ${newMinX}`);
+								minX = newMinX;
+							}
 						}
 					}
 
@@ -840,7 +1054,10 @@ export class PositioningEngineV3 {
 					if (minX > oldX) {
 						milestoneX.set(milestone.entityId, minX);
 						milestoneEndX.set(milestone.entityId, minX + containerWidth);
+						// Node is at RIGHT of container: nodeEndX = containerStartX + containerWidth
+						milestoneNodeEndX.set(milestone.entityId, minX + containerWidth);
 						changed = true;
+						console.log(`[PositioningV3] ${milestone.entityId} X updated: ${oldX} -> ${minX} (nodeEndX: ${minX + containerWidth})`);
 					}
 				}
 			}
@@ -862,10 +1079,11 @@ export class PositioningEngineV3 {
 				const nodeSize = this.config.nodeSizes.milestone;
 				const containerX = milestoneX.get(milestone.entityId) || 0;
 
-				// Milestone node is at the RIGHT of its container
+				// Milestone node is at the RIGHT of its container and BOTTOM of the workstream band
+				// (children are positioned ABOVE the milestone)
 				milestone.position = {
 					x: containerX + containerSize.width - nodeSize.width,
-					y: currentY + (ws.height - nodeSize.height) / 2,
+					y: currentY + ws.height - nodeSize.height,
 					width: nodeSize.width,
 					height: nodeSize.height,
 				};
@@ -878,14 +1096,145 @@ export class PositioningEngineV3 {
 	}
 
 	/**
-	 * Sort milestones by intra-workstream dependencies only
+	 * Order workstreams to minimize cross-workstream edge lengths.
+	 * Workstreams with more dependencies between them should be placed adjacent.
+	 *
+	 * Algorithm:
+	 * 1. Build a weighted graph where edge weight = number of cross-ws dependencies
+	 * 2. Use greedy approach: start with workstream that has most total dependencies
+	 * 3. Repeatedly add the workstream with most dependencies to already-placed workstreams
+	 */
+	private orderWorkstreamsByDependencyDensity(workstreams: WorkstreamData[]): WorkstreamData[] {
+		if (workstreams.length <= 2) {
+			// With 2 or fewer workstreams, order doesn't matter much
+			return workstreams.sort((a, b) => a.name.localeCompare(b.name));
+		}
+
+		// Build cross-workstream dependency count matrix
+		const depCount = new Map<string, Map<string, number>>();
+		for (const ws of workstreams) {
+			depCount.set(ws.name, new Map());
+			for (const other of workstreams) {
+				if (ws.name !== other.name) {
+					depCount.get(ws.name)!.set(other.name, 0);
+				}
+			}
+		}
+
+		// Count dependencies between workstreams
+		for (const ws of workstreams) {
+			for (const m of ws.milestones) {
+				// Count depends_on relationships
+				for (const depId of m.data.dependsOn) {
+					const depNode = this.processedNodes.get(depId);
+					if (depNode && depNode.workstream !== ws.name) {
+						const otherWs = depNode.workstream;
+						if (depCount.get(ws.name)?.has(otherWs)) {
+							depCount.get(ws.name)!.set(otherWs, depCount.get(ws.name)!.get(otherWs)! + 1);
+							depCount.get(otherWs)!.set(ws.name, depCount.get(otherWs)!.get(ws.name)! + 1);
+						}
+					}
+				}
+				// Count blocks relationships
+				for (const blockedId of m.data.blocks) {
+					const blockedNode = this.processedNodes.get(blockedId);
+					if (blockedNode && blockedNode.workstream !== ws.name) {
+						const otherWs = blockedNode.workstream;
+						if (depCount.get(ws.name)?.has(otherWs)) {
+							depCount.get(ws.name)!.set(otherWs, depCount.get(ws.name)!.get(otherWs)! + 1);
+							depCount.get(otherWs)!.set(ws.name, depCount.get(otherWs)!.get(ws.name)! + 1);
+						}
+					}
+				}
+			}
+		}
+
+		// Log dependency counts
+		console.log(`[PositioningV3] Cross-workstream dependency counts:`);
+		for (const [ws1, counts] of depCount) {
+			for (const [ws2, count] of counts) {
+				if (count > 0 && ws1 < ws2) {
+					console.log(`[PositioningV3]   ${ws1} <-> ${ws2}: ${count}`);
+				}
+			}
+		}
+
+		// Calculate total dependencies for each workstream
+		const totalDeps = new Map<string, number>();
+		for (const ws of workstreams) {
+			let total = 0;
+			for (const count of depCount.get(ws.name)!.values()) {
+				total += count;
+			}
+			totalDeps.set(ws.name, total);
+		}
+
+		// Greedy ordering: start with workstream that has most dependencies
+		const ordered: WorkstreamData[] = [];
+		const remaining = new Set(workstreams.map(ws => ws.name));
+
+		// Find workstream with most total dependencies
+		let maxDeps = -1;
+		let startWs = '';
+		for (const ws of workstreams) {
+			const deps = totalDeps.get(ws.name)!;
+			if (deps > maxDeps) {
+				maxDeps = deps;
+				startWs = ws.name;
+			}
+		}
+
+		// If no dependencies, fall back to alphabetical
+		if (maxDeps === 0) {
+			console.log(`[PositioningV3] No cross-workstream dependencies, using alphabetical order`);
+			return workstreams.sort((a, b) => a.name.localeCompare(b.name));
+		}
+
+		// Add first workstream
+		ordered.push(workstreams.find(ws => ws.name === startWs)!);
+		remaining.delete(startWs);
+
+		// Greedily add remaining workstreams
+		while (remaining.size > 0) {
+			// Find workstream with most dependencies to already-placed workstreams
+			let bestWs = '';
+			let bestScore = -1;
+
+			for (const wsName of remaining) {
+				let score = 0;
+				for (const placedWs of ordered) {
+					score += depCount.get(wsName)!.get(placedWs.name) || 0;
+				}
+				if (score > bestScore) {
+					bestScore = score;
+					bestWs = wsName;
+				}
+			}
+
+			// If tie or no dependencies, use alphabetical
+			if (bestWs === '') {
+				bestWs = Array.from(remaining).sort()[0];
+			}
+
+			ordered.push(workstreams.find(ws => ws.name === bestWs)!);
+			remaining.delete(bestWs);
+		}
+
+		console.log(`[PositioningV3] Workstream order by dependency density: ${ordered.map(ws => ws.name).join(' -> ')}`);
+		return ordered;
+	}
+
+	/**
+	 * Sort milestones considering both intra-workstream and transitive cross-workstream dependencies.
+	 * If A depends on B (cross-ws), and B depends on C (same ws as A), then A must come after C.
 	 */
 	private sortMilestonesByIntraWorkstreamDeps(milestones: ProcessedNode[]): ProcessedNode[] {
 		if (milestones.length <= 1) return milestones;
 
 		const milestoneIds = new Set(milestones.map(m => m.entityId));
+		const workstream = milestones[0]?.workstream;
 
-		// Build adjacency list for intra-workstream dependencies only
+		// Build adjacency list
 		const graph = new Map<string, Set<string>>();
 		const inDegree = new Map<string, number>();
 
@@ -894,22 +1243,57 @@ export class PositioningEngineV3 {
 			inDegree.set(m.entityId, 0);
 		}
 
+		// Direct intra-workstream dependencies
+		// Note: blocks and depends_on can create the same edge (bidirectional relationships)
+		// We must check if edge exists before incrementing in-degree to avoid double-counting
 		for (const m of milestones) {
 			// If A blocks B (same workstream), A is LEFT of B
 			for (const blockedId of m.data.blocks) {
 				if (milestoneIds.has(blockedId)) {
-					graph.get(m.entityId)!.add(blockedId);
-					inDegree.set(blockedId, (inDegree.get(blockedId) || 0) + 1);
+					if (!graph.get(m.entityId)!.has(blockedId)) {
+						graph.get(m.entityId)!.add(blockedId);
+						inDegree.set(blockedId, (inDegree.get(blockedId) || 0) + 1);
+					}
 				}
 			}
 
 			// If A depends_on B (same workstream), B is LEFT of A
 			for (const depId of m.data.dependsOn) {
 				if (milestoneIds.has(depId)) {
-					graph.get(depId)!.add(m.entityId);
-					inDegree.set(m.entityId, (inDegree.get(m.entityId) || 0) + 1);
+					if (!graph.get(depId)!.has(m.entityId)) {
+						graph.get(depId)!.add(m.entityId);
+						inDegree.set(m.entityId, (inDegree.get(m.entityId) || 0) + 1);
+					}
 				}
 			}
+		}
+
+		// Add transitive cross-workstream dependencies
+		// If A (this ws) depends on X (other ws), and X depends on B (this ws), then A must come after B
+		for (const m of milestones) {
+			const transitiveDeps = this.getTransitiveDepsInWorkstream(m.entityId, workstream, milestoneIds);
+			if (transitiveDeps.size > 0) {
+				console.log(`[PositioningV3] ${m.entityId} transitive deps in ${workstream}: ${Array.from(transitiveDeps).join(', ')}`);
+			}
+			for (const depId of transitiveDeps) {
+				if (depId !== m.entityId && !graph.get(depId)?.has(m.entityId)) {
+					graph.get(depId)!.add(m.entityId);
+					inDegree.set(m.entityId, (inDegree.get(m.entityId) || 0) + 1);
+					console.log(`[PositioningV3] Added edge: ${depId} -> ${m.entityId} (transitive)`);
+				}
+			}
+		}
+
+		// Debug: log all edges and in-degrees
+		console.log(`[PositioningV3] ${workstream} graph edges:`);
+		for (const [from, tos] of graph) {
+			if (tos.size > 0) {
+				console.log(`[PositioningV3]   ${from} -> ${Array.from(tos).join(', ')}`);
+			}
+		}
+		console.log(`[PositioningV3] ${workstream} in-degrees:`);
+		for (const [id, degree] of inDegree) {
+			console.log(`[PositioningV3]   ${id}: ${degree}`);
 		}
 
 		// Topological sort
@@ -918,6 +1302,7 @@ export class PositioningEngineV3 {
 			if (degree === 0) queue.push(id);
 		}
 		queue.sort();
+		console.log(`[PositioningV3] ${workstream} initial queue (in-degree 0): ${queue.join(', ')}`);
 
 		const sorted: ProcessedNode[] = [];
 		while (queue.length > 0) {
@@ -942,9 +1327,82 @@ export class PositioningEngineV3 {
 				.filter(m => !sortedIds.has(m.entityId))
 				.sort((a, b) => a.entityId.localeCompare(b.entityId));
 			sorted.push(...remaining);
+			console.log(`[PositioningV3] WARNING: ${remaining.length} milestones in cycle, added alphabetically: ${remaining.map(m => m.entityId).join(', ')}`);
+			// Debug: show remaining in-degrees
+			for (const m of remaining) {
+				console.log(`[PositioningV3]   ${m.entityId} final in-degree: ${inDegree.get(m.entityId)}`);
+			}
 		}
 
+		console.log(`[PositioningV3] Sorted ${workstream} milestones: ${sorted.map(m => m.entityId).join(' -> ')}`);
 		return sorted;
+	}
+
+	/**
+	 * Find all milestones in the target workstream that this milestone transitively depends on
+	 * via cross-workstream dependencies.
+	 *
+	 * Example: If M-026 (eng) depends on M-001 (infra), and M-001 depends on M-039 (eng),
+	 * then M-026 transitively depends on M-039 within the engineering workstream.
+	 *
+	 * This function only returns dependencies reached via cross-workstream paths.
+	 * Direct same-workstream dependencies are handled separately.
+	 */
+	private getTransitiveDepsInWorkstream(
+		entityId: string,
+		targetWorkstream: string,
+		targetMilestoneIds: Set<string>,
+		visited: Set<string> = new Set(),
+		crossedWorkstream: boolean = false  // Track if we've crossed into another workstream
+	): Set<string> {
+		const result = new Set<string>();
+
+		if (visited.has(entityId)) return result;
+		visited.add(entityId);
+
+		const node = this.processedNodes.get(entityId);
+		if (!node) return result;
+
+		// Check all dependencies
+		for (const depId of node.data.dependsOn) {
+			const depNode = this.processedNodes.get(depId);
+			if (!depNode) continue;
+
+			if (depNode.workstream === targetWorkstream && targetMilestoneIds.has(depId)) {
+				// Dependency in target workstream - only add if we've crossed workstreams
+				if (crossedWorkstream) {
+					result.add(depId);
+				}
+				// Don't recurse into same-workstream deps - they're handled by direct processing
+			} else if (depNode.workstream !== targetWorkstream) {
+				// Cross-workstream dependency - recurse with crossedWorkstream=true
+				const transitive = this.getTransitiveDepsInWorkstream(
+					depId, targetWorkstream, targetMilestoneIds, visited, true
+				);
+				for (const id of transitive) {
+					result.add(id);
+				}
+			}
+		}
+
+		// Also check blocks (reverse direction)
+		for (const blockedId of node.data.blocks) {
+			const blockedNode = this.processedNodes.get(blockedId);
+			if (!blockedNode) continue;
+
+			// If this node blocks something in another workstream, that blocked thing's deps
+			// in our workstream should come before us
+			if (blockedNode.workstream !== targetWorkstream) {
+				const transitive = this.getTransitiveDepsInWorkstream(
+					blockedId, targetWorkstream, targetMilestoneIds, visited, true
+				);
+				for (const id of transitive) {
+					result.add(id);
+				}
+			}
+		}
+
+		return result;
 	}
 
 	// ========================================================================
@@ -967,38 +1425,66 @@ export class PositioningEngineV3 {
 
 		const parentPos = parent.position!;
 
-		// Check if siblings have dependencies - already sorted in calculateContainerSize
+		// Check if siblings have dependencies - use dependency-aware grid if so
 		const hasDeps = this.hasSiblingDependencies(parent.children);
 
 		if (hasDeps) {
-			// Chain layout: children are already sorted by dependency
-			// Position them in a horizontal chain, each child's container to the left of the next
-			let chainHeight = 0;
-			for (const child of parent.children) {
-				chainHeight = Math.max(chainHeight, child.containerSize!.height);
+			// Dependency-aware grid layout: use level assignments from calculateContainerSize
+			const levelAssignments = (parent as any)._levelAssignments as { child: ProcessedNode; level: number }[];
+			const colWidths = (parent as any)._colWidths as number[];
+			const gridHeight = (parent as any)._gridHeight as number;
+
+			if (!levelAssignments || !colWidths) {
+				// Fallback: recalculate
+				console.warn(`[PositioningV3] Missing level assignments for ${parent.entityId}, recalculating`);
+				return;
 			}
 
-			// Start from the right (closest to parent) and work left
-			// Chain is positioned ABOVE parent (bottom of chain aligns with top of parent)
-			let currentX = parentPos.x - this.config.childGap;
-			const chainY = parentPos.y - this.config.childGap - chainHeight;
+			// Group by level
+			const levelGroups = new Map<number, ProcessedNode[]>();
+			for (const { child, level } of levelAssignments) {
+				if (!levelGroups.has(level)) {
+					levelGroups.set(level, []);
+				}
+				levelGroups.get(level)!.push(child);
+			}
 
-			// Position children from right to left (reverse order since leftmost should be first in dependency)
-			for (let i = parent.children.length - 1; i >= 0; i--) {
-				const child = parent.children[i];
+			// Calculate grid dimensions
+			const gridWidth = colWidths.reduce((sum, w) => sum + w, 0) + Math.max(0, colWidths.length - 1) * this.config.childGap;
+
+			// Grid starts LEFT of parent, ABOVE parent
+			const gridStartX = parentPos.x - this.config.childGap - gridWidth;
+			const gridStartY = parentPos.y - this.config.childGap - gridHeight;
+
+			// Position each child by level (column) and row within level
+			for (const { child, level } of levelAssignments) {
 				const childNodeSize = this.config.nodeSizes[child.type];
 				const childContainerSize = child.containerSize!;
 
-				// Child's node is at the RIGHT of its container
+				// Calculate X position (sum of previous column widths + gaps)
+				// Right-align within column: add offset for smaller containers
+				let colStartX = gridStartX;
+				for (let c = 0; c < level; c++) {
+					colStartX += colWidths[c] + this.config.childGap;
+				}
+				// Right-align: shift by difference between column width and container width
+				const childX = colStartX + (colWidths[level] - childContainerSize.width);
+
+				// Calculate Y position within the column
+				const siblings = levelGroups.get(level)!;
+				const indexInColumn = siblings.indexOf(child);
+				let childY = gridStartY;
+				for (let i = 0; i < indexInColumn; i++) {
+					childY += siblings[i].containerSize!.height + this.config.childGap;
+				}
+
+				// Child's node is at the RIGHT of its container and BOTTOM of its row
 				child.position = {
-					x: currentX - childNodeSize.width,
-					y: chainY + (chainHeight - childNodeSize.height) / 2,
+					x: childX + childContainerSize.width - childNodeSize.width,
+					y: childY + childContainerSize.height - childNodeSize.height,
 					width: childNodeSize.width,
 					height: childNodeSize.height,
 				};
-
-				// Move left for next child
-				currentX -= childContainerSize.width + this.config.childGap;
 
 				// Recursively position grandchildren
 				this.positionChildrenRecursive(child);
@@ -1059,11 +1545,17 @@ export class PositioningEngineV3 {
 
 			// Position each child
 			for (const { child, row, col } of childPositions) {
+				const childNodeSize = this.config.nodeSizes[child.type];
+				const childContainerSize = child.containerSize!;
+
 				// Calculate X position (sum of previous column widths + gaps)
-				let childX = gridStartX;
+				// Right-align within column: add offset for smaller containers
+				let colStartX = gridStartX;
 				for (let c = 0; c < col; c++) {
-					childX += colWidths[c] + this.config.childGap;
+					colStartX += colWidths[c] + this.config.childGap;
 				}
+				// Right-align: shift by difference between column width and container width
+				const childX = colStartX + (colWidths[col] - childContainerSize.width);
 
 				// Calculate Y position (sum of previous row heights + gaps)
 				let childY = gridStartY;
@@ -1071,13 +1563,11 @@ export class PositioningEngineV3 {
 					childY += rowHeights[r] + this.config.childGap;
 				}
 
-				// Child's node is at the RIGHT of its container
-				const childNodeSize = this.config.nodeSizes[child.type];
-				const childContainerSize = child.containerSize!;
-
+				// Child's node is at the RIGHT of its container and BOTTOM of the row
+				// (grandchildren are positioned ABOVE the child node)
 				child.position = {
 					x: childX + childContainerSize.width - childNodeSize.width,
-					y: childY + (rowHeights[row] - childNodeSize.height) / 2,  // Center in row
+					y: childY + rowHeights[row] - childNodeSize.height,  // Bottom of row
 					width: childNodeSize.width,
 					height: childNodeSize.height,
 				};
@@ -1115,28 +1605,42 @@ export class PositioningEngineV3 {
 	}
 
 	private positionMultiParentSameWorkstream(mpe: MultiParentEntity): void {
-		const parentPositions: NodePosition[] = [];
+		// Get container bounds for each parent (not just node position)
+		const containerBounds: { minX: number; maxX: number; minY: number }[] = [];
 
 		for (const parentId of mpe.parentEntityIds) {
 			const parent = this.processedNodes.get(parentId);
-			if (parent?.position) {
-				parentPositions.push(parent.position);
+			if (parent?.position && parent.containerSize) {
+				// Container extends LEFT and ABOVE the node
+				// Node is at bottom-right of container
+				const containerMinX = parent.position.x + parent.position.width - parent.containerSize.width;
+				const containerMaxX = parent.position.x + parent.position.width;
+				const containerMinY = parent.position.y + parent.position.height - parent.containerSize.height;
+				containerBounds.push({ minX: containerMinX, maxX: containerMaxX, minY: containerMinY });
+			} else if (parent?.position) {
+				// No container size, use node position
+				containerBounds.push({
+					minX: parent.position.x,
+					maxX: parent.position.x + parent.position.width,
+					minY: parent.position.y
+				});
 			}
 		}
 
-		if (parentPositions.length === 0) {
+		if (containerBounds.length === 0) {
 			// No positioned parents, treat as orphan
 			this.orphanedEntities.push(mpe.node);
 			return;
 		}
 
-		// Calculate center position
-		const minX = Math.min(...parentPositions.map(p => p.x));
-		const maxX = Math.max(...parentPositions.map(p => p.x + p.width));
-		const minY = Math.min(...parentPositions.map(p => p.y));
+		// Calculate bounding box of all parent containers
+		const minX = Math.min(...containerBounds.map(b => b.minX));
+		const maxX = Math.max(...containerBounds.map(b => b.maxX));
+		const minY = Math.min(...containerBounds.map(b => b.minY));
 
 		const nodeSize = this.config.nodeSizes[mpe.node.type];
 
+		// Position centered horizontally above the combined container bounds
 		mpe.node.position = {
 			x: (minX + maxX) / 2 - nodeSize.width / 2,
 			y: minY - this.config.childGap - nodeSize.height,
@@ -1178,17 +1682,27 @@ export class PositioningEngineV3 {
 			for (const mpe of mpes) {
 				const nodeSize = this.config.nodeSizes[mpe.node.type];
 
-				// Center horizontally between parents
-				const parentPositions: NodePosition[] = [];
+				// Center horizontally between parent containers (not just nodes)
+				const containerBounds: { minX: number; maxX: number }[] = [];
 				for (const parentId of mpe.parentEntityIds) {
 					const parent = this.processedNodes.get(parentId);
-					if (parent?.position) parentPositions.push(parent.position);
+					if (parent?.position && parent.containerSize) {
+						// Container extends LEFT of the node
+						const containerMinX = parent.position.x + parent.position.width - parent.containerSize.width;
+						const containerMaxX = parent.position.x + parent.position.width;
+						containerBounds.push({ minX: containerMinX, maxX: containerMaxX });
+					} else if (parent?.position) {
+						containerBounds.push({
+							minX: parent.position.x,
+							maxX: parent.position.x + parent.position.width
+						});
+					}
 				}
 
 				let x = currentX;
-				if (parentPositions.length > 0) {
-					const minX = Math.min(...parentPositions.map(p => p.x));
-					const maxX = Math.max(...parentPositions.map(p => p.x + p.width));
+				if (containerBounds.length > 0) {
+					const minX = Math.min(...containerBounds.map(b => b.minX));
+					const maxX = Math.max(...containerBounds.map(b => b.maxX));
 					x = (minX + maxX) / 2 - nodeSize.width / 2;
 				}
 
@@ -1219,32 +1733,63 @@ export class PositioningEngineV3 {
 			}
 		}
 
-		// Position orphans in a grid below all workstreams
-		const grid = this.calculateOptimalGrid(this.orphanedEntities);
-		const startX = 0;
+		// Separate orphans with children (dependency chains) from simple orphans
+		const orphansWithChildren = this.orphanedEntities.filter(o => o.children.length > 0);
+		const simpleOrphans = this.orphanedEntities.filter(o => o.children.length === 0);
+
+		console.log(`[PositioningV3] Orphans with children (dependency chains): ${orphansWithChildren.map(o => o.entityId).join(', ') || 'none'}`);
+		console.log(`[PositioningV3] Simple orphans: ${simpleOrphans.length}`);
+
+		// Position orphans with children first - they need more space
+		let currentX = 0;
 		const startY = maxY + this.config.orphanGap;
 
-		// Calculate max dimensions for uniform grid cells
-		let maxWidth = 0;
-		let maxHeight = 0;
-		for (const orphan of this.orphanedEntities) {
-			const size = this.config.nodeSizes[orphan.type];
-			maxWidth = Math.max(maxWidth, size.width);
-			maxHeight = Math.max(maxHeight, size.height);
-		}
-
-		for (let i = 0; i < this.orphanedEntities.length; i++) {
-			const orphan = this.orphanedEntities[i];
-			const col = i % grid.columns;
-			const row = Math.floor(i / grid.columns);
-			const nodeSize = this.config.nodeSizes[orphan.type];
+		for (const orphan of orphansWithChildren) {
+			// Use container size which includes children
+			const containerSize = orphan.containerSize || this.config.nodeSizes[orphan.type];
 
 			orphan.position = {
-				x: startX + col * (maxWidth + this.config.childGap),
-				y: startY + row * (maxHeight + this.config.childGap),
-				width: nodeSize.width,
-				height: nodeSize.height,
+				x: currentX,
+				y: startY,
+				width: this.config.nodeSizes[orphan.type].width,
+				height: this.config.nodeSizes[orphan.type].height,
 			};
+
+			// Position children recursively
+			this.positionChildrenRecursive(orphan);
+
+			// Move X for next orphan chain, using full container width
+			currentX += containerSize.width + this.config.containerGap;
+		}
+
+		// Position simple orphans in a grid after the dependency chains
+		if (simpleOrphans.length > 0) {
+			const grid = this.calculateOptimalGrid(simpleOrphans);
+			const simpleStartX = currentX > 0 ? currentX : 0;
+			const simpleStartY = startY;
+
+			// Calculate max dimensions for uniform grid cells
+			let maxWidth = 0;
+			let maxHeight = 0;
+			for (const orphan of simpleOrphans) {
+				const size = this.config.nodeSizes[orphan.type];
+				maxWidth = Math.max(maxWidth, size.width);
+				maxHeight = Math.max(maxHeight, size.height);
+			}
+
+			for (let i = 0; i < simpleOrphans.length; i++) {
+				const orphan = simpleOrphans[i];
+				const col = i % grid.columns;
+				const row = Math.floor(i / grid.columns);
+				const nodeSize = this.config.nodeSizes[orphan.type];
+
+				orphan.position = {
+					x: simpleStartX + col * (maxWidth + this.config.childGap),
+					y: simpleStartY + row * (maxHeight + this.config.childGap),
+					width: nodeSize.width,
+					height: nodeSize.height,
+				};
+			}
 		}
 
 		console.log(`[PositioningV3] Positioned ${this.orphanedEntities.length} orphaned entities`);
