@@ -70,7 +70,9 @@ import { generateUniqueFilename, isPluginCreatedNote } from "./util/fileNaming";
 import { addNodesToCanvasView, getCanvasView, hasInternalCanvasAPI, inspectCanvasAPI, addEdgesToCanvasView } from "./util/canvasView";
 import { EntityIndex, EntityIndexEntry, getEntityTypeFromId } from "./util/entityNavigator";
 import { PositioningEngineV3, EntityData, PositioningResult, EntityType as PositioningEntityType } from "./util/positioningV3";
-import { reconcileRelationships } from "./util/relationshipReconciler";
+import { PositioningEngineV4, EntityData as EntityDataV4 } from "./util/positioningV4";
+import { parseEntityFromFrontmatter, generateNodeIdFromEntityId } from "./util/entityParser";
+import { reconcileRelationships, cleanTransitiveDependencies, detectAndBreakCycles } from "./util/relationshipReconciler";
 
 const DEFAULT_NODE_HEIGHT = 220;
 const DEFAULT_NODE_WIDTH = 400;
@@ -385,16 +387,25 @@ private registerCommands(): void {
 		},
 	});
 
-	// Command 8: Reposition canvas nodes (V3 algorithm)
+	// Command 8: Reposition canvas nodes (V4 algorithm - default)
 	this.addCommand({
 		id: "reposition-canvas-nodes",
+		name: "Project Canvas: Reposition nodes (V4 algorithm)",
+		callback: async () => {
+			await this.repositionCanvasNodesV4();
+		},
+	});
+
+	// Command 8b: Reposition canvas nodes (V3 algorithm - legacy)
+	this.addCommand({
+		id: "reposition-canvas-nodes-v3",
 		name: "Project Canvas: Reposition nodes (V3 algorithm)",
 		callback: async () => {
 			await this.repositionCanvasNodesV3();
 		},
 	});
 
-	// Command 8b: Reposition canvas nodes (legacy V2 algorithm)
+	// Command 8c: Reposition canvas nodes (legacy V2 algorithm)
 	this.addCommand({
 		id: "reposition-canvas-nodes-v2",
 		name: "Project Canvas: Reposition nodes (legacy V2)",
@@ -418,6 +429,15 @@ private registerCommands(): void {
 		name: "Project Canvas: Remove duplicate nodes",
 		callback: async () => {
 			await this.removeDuplicateNodes();
+		},
+	});
+
+	// Command 11: Migrate decision fields (enables/blocks -> affects)
+	this.addCommand({
+		id: "migrate-decision-fields",
+		name: "Project Canvas: Migrate decision fields (enables → affects)",
+		callback: async () => {
+			await this.migrateDecisionFieldsInVault();
 		},
 	});
 
@@ -469,6 +489,18 @@ private registerCommands(): void {
 				await this.entityIndex.buildIndex();
 				new Notice("Entity index rebuilt");
 			}
+		},
+	});
+
+	// Command: Search for entity on canvas
+	this.addCommand({
+		id: "search-entity-on-canvas",
+		name: "Project Canvas: Search Entity on Canvas",
+		hotkeys: [{ modifiers: ["Mod", "Shift"], key: "f" }],
+		callback: () => {
+			// Create a dummy anchor element for the popup
+			const dummyAnchor = document.createElement("div");
+			this.showEntitySearchPopup(dummyAnchor);
 		},
 	});
 
@@ -1376,6 +1408,14 @@ private registerCommands(): void {
 			const frontmatterText = frontmatterMatch[1];
 			let applied = false;
 
+			// Extract entity ID
+			const idMatch = frontmatterText.match(/^id:\s*(.+)$/m);
+			if (idMatch) {
+				const entityId = idMatch[1].trim();
+				el.setAttribute("data-canvas-pm-entity-id", entityId);
+				applied = true;
+			}
+
 			// Extract type
 			const typeMatch = frontmatterText.match(/^type:\s*(.+)$/m);
 			if (typeMatch) {
@@ -1659,6 +1699,24 @@ private registerCommands(): void {
 				this.applyVisibilityState(canvasEl);
 				this.updateFloatingHideAllButton(panel);
 			});
+		}
+
+		// Add "Find" button to the floating panel header
+		const headerEl = panel.querySelector(".canvas-pm-control-header");
+		if (headerEl) {
+			const findBtn = document.createElement("button");
+			findBtn.className = "canvas-pm-find-btn-floating";
+			findBtn.textContent = "🔍";
+			findBtn.title = "Find Entity on Canvas";
+			findBtn.style.cssText = "margin-left: 4px; background: none; border: none; cursor: pointer; font-size: 14px;";
+
+			findBtn.addEventListener("click", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				this.showEntitySearchPopup(findBtn);
+			});
+
+			headerEl.appendChild(findBtn);
 		}
 
 		containerEl.appendChild(panel);
@@ -3943,22 +4001,32 @@ private registerCommands(): void {
 				return reverseRels.get(entityId)!;
 			};
 
-			// Helper to parse YAML array
+			// Helper to strip quotes from a value
+			const stripQuotesLocal = (value: string): string => {
+				const trimmed = value.trim();
+				if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+					(trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+					return trimmed.slice(1, -1);
+				}
+				return trimmed;
+			};
+
+			// Helper to parse YAML array - use [ \t]* instead of \s* to avoid matching newlines
 			const parseYamlArray = (text: string, key: string): string[] => {
-				const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+				const multilineMatch = text.match(new RegExp(`^${key}:[ \\t]*\\n((?:[ \\t]*-[ \\t]*.+\\n?)+)`, 'm'));
 				if (multilineMatch) {
-					const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+					const items = multilineMatch[1].match(/^[ \t]*-[ \t]*(.+)$/gm);
 					if (items) {
-						return items.map(item => item.replace(/^\s*-\s*/, '').trim());
+						return items.map(item => stripQuotesLocal(item.replace(/^[ \t]*-[ \t]*/, '')));
 					}
 				}
-				const inlineMatch = text.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+				const inlineMatch = text.match(new RegExp(`^${key}:[ \\t]*\\[([^\\]]+)\\]`, 'm'));
 				if (inlineMatch) {
-					return inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+					return inlineMatch[1].split(',').map(s => stripQuotesLocal(s));
 				}
-				const singleMatch = text.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+				const singleMatch = text.match(new RegExp(`^${key}:[ \\t]*([^\\n\\[]+)$`, 'm'));
 				if (singleMatch && singleMatch[1].trim()) {
-					return [singleMatch[1].trim()];
+					return [stripQuotesLocal(singleMatch[1])];
 				}
 				return [];
 			};
@@ -3976,7 +4044,8 @@ private registerCommands(): void {
 					if (!frontmatterMatch) continue;
 
 					const fm = frontmatterMatch[1];
-					const idMatch = fm.match(/^id:\s*(.+)$/m);
+					// Use [ \t]* instead of \s* to avoid matching newlines
+					const idMatch = fm.match(/^id:[ \t]*(.+)$/m);
 					if (!idMatch) continue;
 
 					const entityId = idMatch[1].trim();
@@ -3992,7 +4061,8 @@ private registerCommands(): void {
 					}
 
 					// parent -> children (reverse)
-					const parentMatch = fm.match(/^parent:\s*(.+)$/m);
+					// Use [ \t]* instead of \s* to avoid matching newlines
+					const parentMatch = fm.match(/^parent:[ \t]*(.+)$/m);
 					if (parentMatch) {
 						const parentId = parentMatch[1].trim();
 						const parentRels = ensureEntity(parentId);
@@ -4032,7 +4102,8 @@ private registerCommands(): void {
 					}
 
 					// supersedes -> superseded_by (reverse)
-					const supersedesMatch = fm.match(/^supersedes:\s*(.+)$/m);
+					// Use [ \t]* instead of \s* to avoid matching newlines
+					const supersedesMatch = fm.match(/^supersedes:[ \t]*(.+)$/m);
 					if (supersedesMatch) {
 						const supersededId = supersedesMatch[1].trim();
 						const supersededRels = ensureEntity(supersededId);
@@ -4040,7 +4111,8 @@ private registerCommands(): void {
 					}
 
 					// previous_version -> next_version (reverse)
-					const prevVersionMatch = fm.match(/^previous_version:\s*(.+)$/m);
+					// Use [ \t]* instead of \s* to avoid matching newlines
+					const prevVersionMatch = fm.match(/^previous_version:[ \t]*(.+)$/m);
 					if (prevVersionMatch) {
 						const prevId = prevVersionMatch[1].trim();
 						const prevRels = ensureEntity(prevId);
@@ -4065,7 +4137,8 @@ private registerCommands(): void {
 					if (!frontmatterMatch) continue;
 
 					const fm = frontmatterMatch[1];
-					const idMatch = fm.match(/^id:\s*(.+)$/m);
+					// Use [ \t]* instead of \s* to avoid matching newlines
+					const idMatch = fm.match(/^id:[ \t]*(.+)$/m);
 					if (!idMatch) continue;
 
 					const entityId = idMatch[1].trim();
@@ -4078,9 +4151,10 @@ private registerCommands(): void {
 					const currentImplementedBy = parseYamlArray(fm, 'implemented_by');
 					const currentDocumentedBy = parseYamlArray(fm, 'documented_by');
 					const currentDecidedBy = parseYamlArray(fm, 'decided_by');
-					const supersededByMatch = fm.match(/^superseded_by:\s*(.+)$/m);
+					// Use [ \t]* instead of \s* to avoid matching newlines
+					const supersededByMatch = fm.match(/^superseded_by:[ \t]*(.+)$/m);
 					const currentSupersededBy = supersededByMatch?.[1]?.trim();
-					const nextVersionMatch = fm.match(/^next_version:\s*(.+)$/m);
+					const nextVersionMatch = fm.match(/^next_version:[ \t]*(.+)$/m);
 					const currentNextVersion = nextVersionMatch?.[1]?.trim();
 
 					// Compare and update if different
@@ -4944,7 +5018,8 @@ private registerCommands(): void {
 				title?: string;
 				parent?: string;           // Parent entity ID (for hierarchy)
 				dependsOn: string[];       // Entity IDs this depends on
-				enables: string[];         // Entity IDs this decision enables/unblocks
+				enables: string[];         // Entity IDs this decision enables/unblocks (legacy)
+				affects: string[];         // Entity IDs this decision affects (new, replaces enables)
 				// New fields from ENTITY_SCHEMAS.md
 				implements: string[];      // DocumentIds this milestone/story implements
 				implementedBy: string[];   // StoryIds/MilestoneIds that implement this document
@@ -4955,30 +5030,44 @@ private registerCommands(): void {
 
 			const entitiesToAdd: EntityInfo[] = [];
 
+			// Helper to strip quotes from a value
+			const stripQuotes = (value: string): string => {
+				const trimmed = value.trim();
+				// Remove surrounding quotes (single or double)
+				if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+					(trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+					return trimmed.slice(1, -1);
+				}
+				return trimmed;
+			};
+
 			// Helper to parse YAML array (handles both inline and multiline)
 			const parseYamlArray = (frontmatterText: string, key: string): string[] => {
 				// Try multiline format first:
 				// depends_on:
 				//   - S-001
 				//   - S-002
-				const multilineMatch = frontmatterText.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+				// Use [ \t]* instead of \s* to avoid matching newlines
+				const multilineMatch = frontmatterText.match(new RegExp(`^${key}:[ \\t]*\\n((?:[ \\t]*-[ \\t]*.+\\n?)+)`, 'm'));
 				if (multilineMatch) {
-					const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+					const items = multilineMatch[1].match(/^[ \t]*-[ \t]*(.+)$/gm);
 					if (items) {
-						return items.map(item => item.replace(/^\s*-\s*/, '').trim());
+						return items.map(item => stripQuotes(item.replace(/^[ \t]*-[ \t]*/, '')));
 					}
 				}
 
-				// Try inline format: depends_on: [S-001, S-002]
-				const inlineMatch = frontmatterText.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+				// Try inline format: depends_on: [S-001, S-002] or depends_on: ["S-001", "S-002"]
+				// Use [ \t]* instead of \s* to avoid matching newlines
+				const inlineMatch = frontmatterText.match(new RegExp(`^${key}:[ \\t]*\\[([^\\]]+)\\]`, 'm'));
 				if (inlineMatch) {
-					return inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+					return inlineMatch[1].split(',').map(s => stripQuotes(s));
 				}
 
-				// Try single value: depends_on: S-001
-				const singleMatch = frontmatterText.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+				// Try single value: depends_on: S-001 or depends_on: "S-001"
+				// Use [^\n] to explicitly not match newlines
+				const singleMatch = frontmatterText.match(new RegExp(`^${key}:[ \\t]*([^\\n\\[]+)$`, 'm'));
 				if (singleMatch && singleMatch[1].trim()) {
-					return [singleMatch[1].trim()];
+					return [stripQuotes(singleMatch[1])];
 				}
 
 				return [];
@@ -5014,6 +5103,19 @@ private registerCommands(): void {
 				new Notice(`🔗 Reconciled ${reconcileResult.totalReconciled} bidirectional relationships`);
 			}
 
+			// Clean up transitively implied dependencies
+			const cleanupResult = await cleanTransitiveDependencies(this.app, allEntityFiles);
+			if (cleanupResult.totalCleaned > 0) {
+				console.log(`Cleaned ${cleanupResult.totalCleaned} transitive dependencies:`, cleanupResult.details);
+				new Notice(`🧹 Cleaned ${cleanupResult.totalCleaned} transitive dependencies`);
+			}
+
+			// Detect and break cycles in milestone dependencies
+			const cycleResult = await detectAndBreakCycles(this.app, allEntityFiles, "milestone");
+			if (cycleResult.cyclesFound > 0) {
+				console.log(`Broke ${cycleResult.cyclesFound} cycles:`, cycleResult.edgesRemoved);
+			}
+
 			for (const file of allFiles) {
 				// Skip if already on canvas (by file path)
 				if (existingFilePaths.has(file.path)) {
@@ -5029,17 +5131,18 @@ private registerCommands(): void {
 				if (!frontmatterMatch) continue;
 
 				const frontmatterText = frontmatterMatch[1];
-				const typeMatch = frontmatterText.match(/^type:\s*(.+)$/m);
+				// Use [ \t]* instead of \s* to avoid matching newlines (which would capture the next line's value)
+				const typeMatch = frontmatterText.match(/^type:[ \t]*(.+)$/m);
 				if (!typeMatch) continue;
 
 				const entityType = typeMatch[1].trim().toLowerCase();
 				if (!entityTypes.includes(entityType)) continue;
 
-	
+
 
 				// Skip archived items (status: archived or archived: true)
-				const statusMatch = frontmatterText.match(/^status:\s*(.+)$/m);
-				const archivedMatch = frontmatterText.match(/^archived:\s*(.+)$/m);
+				const statusMatch = frontmatterText.match(/^status:[ \t]*(.+)$/m);
+				const archivedMatch = frontmatterText.match(/^archived:[ \t]*(.+)$/m);
 				const isArchived =
 					statusMatch?.[1]?.trim().toLowerCase() === 'archived' ||
 					archivedMatch?.[1]?.trim().toLowerCase() === 'true';
@@ -5049,10 +5152,12 @@ private registerCommands(): void {
 				}
 
 				// Extract effort and other metadata
-				const effortMatch = frontmatterText.match(/^effort:\s*(.+)$/m);
-				const idMatch = frontmatterText.match(/^id:\s*(.+)$/m);
-				const titleMatch = frontmatterText.match(/^title:\s*["']?(.+?)["']?\s*$/m);
-				const parentMatch = frontmatterText.match(/^parent:\s*(.+)$/m);
+				// Use [ \t]* instead of \s* to avoid matching newlines
+				const effortMatch = frontmatterText.match(/^effort:[ \t]*(.+)$/m);
+				const idMatch = frontmatterText.match(/^id:[ \t]*(.+)$/m);
+				const titleMatch = frontmatterText.match(/^title:[ \t]*["']?(.+?)["']?[ \t]*$/m);
+				// For parent, use (.*)$ to allow empty values (just whitespace after colon)
+				const parentMatch = frontmatterText.match(/^parent:[ \t]*(.+)$/m);
 
 				const entityId = idMatch?.[1]?.trim();
 
@@ -5078,8 +5183,11 @@ private registerCommands(): void {
 				// Parse depends_on array
 				const dependsOn = parseYamlArray(frontmatterText, 'depends_on');
 
-				// Parse enables array (for decisions)
+				// Parse enables array (for decisions - legacy, migrating to affects)
 				const enables = parseYamlArray(frontmatterText, 'enables');
+
+				// Parse affects array (for decisions - new field, replaces enables)
+				const affects = parseYamlArray(frontmatterText, 'affects');
 
 				// Parse implements array (for milestones/stories -> documents)
 				const implementsArr = parseYamlArray(frontmatterText, 'implements');
@@ -5087,17 +5195,17 @@ private registerCommands(): void {
 				// Parse implemented_by array (for documents -> stories/milestones)
 				const implementedBy = parseYamlArray(frontmatterText, 'implemented_by');
 
-				// Parse supersedes (for decisions)
-				const supersedesMatch = frontmatterText.match(/^supersedes:\s*(.+)$/m);
-				const supersedes = supersedesMatch?.[1]?.trim();
+				// Parse supersedes (for decisions) - use [ \t]* to avoid matching newlines
+				const supersedesMatch = frontmatterText.match(/^supersedes:[ \t]*(.+)$/m);
+				const supersedes = supersedesMatch ? stripQuotes(supersedesMatch[1]) : undefined;
 
-				// Parse previous_version (for documents)
-				const previousVersionMatch = frontmatterText.match(/^previous_version:\s*(.+)$/m);
-				const previousVersion = previousVersionMatch?.[1]?.trim();
+				// Parse previous_version (for documents) - use [ \t]* to avoid matching newlines
+				const previousVersionMatch = frontmatterText.match(/^previous_version:[ \t]*(.+)$/m);
+				const previousVersion = previousVersionMatch ? stripQuotes(previousVersionMatch[1]) : undefined;
 
-				// Parse doc_type (for documents)
-				const docTypeMatch = frontmatterText.match(/^doc_type:\s*(.+)$/m);
-				const docType = docTypeMatch?.[1]?.trim();
+				// Parse doc_type (for documents) - use [ \t]* to avoid matching newlines
+				const docTypeMatch = frontmatterText.match(/^doc_type:[ \t]*(.+)$/m);
+				const docType = docTypeMatch ? stripQuotes(docTypeMatch[1]) : undefined;
 
 				entitiesToAdd.push({
 					file,
@@ -5105,9 +5213,10 @@ private registerCommands(): void {
 					effort: effortMatch?.[1]?.trim(),
 					id: entityId,
 					title: titleMatch?.[1]?.trim() || file.basename,
-					parent: parentMatch?.[1]?.trim(),
+					parent: parentMatch ? stripQuotes(parentMatch[1]) : undefined,
 					dependsOn,
 					enables,
+					affects,
 					implements: implementsArr,
 					implementedBy,
 					supersedes,
@@ -5166,7 +5275,8 @@ private registerCommands(): void {
 				filePath: string;
 				parent?: string;
 				dependsOn: string[];
-				enables: string[];
+				enables: string[];  // legacy
+				affects: string[];  // new, replaces enables
 				implements: string[];
 				implementedBy: string[];
 				supersedes?: string;
@@ -5336,6 +5446,7 @@ private registerCommands(): void {
 						parent: milestone.parent,
 						dependsOn: milestone.dependsOn,
 						enables: milestone.enables,
+						affects: milestone.affects,
 						implements: milestone.implements,
 						implementedBy: milestone.implementedBy,
 						supersedes: milestone.supersedes,
@@ -5405,6 +5516,7 @@ private registerCommands(): void {
 							parent: child.parent,
 							dependsOn: child.dependsOn,
 							enables: child.enables,
+							affects: child.affects,
 							implements: child.implements,
 							implementedBy: child.implementedBy,
 							supersedes: child.supersedes,
@@ -5489,6 +5601,7 @@ private registerCommands(): void {
 							parent: orphan.parent,
 							dependsOn: orphan.dependsOn,
 							enables: orphan.enables,
+							affects: orphan.affects,
 							implements: orphan.implements,
 							implementedBy: orphan.implementedBy,
 							supersedes: orphan.supersedes,
@@ -5538,7 +5651,8 @@ private registerCommands(): void {
 				filePath: string;
 				parent?: string;
 				dependsOn: string[];
-				enables: string[];
+				enables: string[];  // legacy
+				affects: string[];  // new, replaces enables
 				implements: string[];
 				implementedBy: string[];
 				supersedes?: string;
@@ -5558,22 +5672,32 @@ private registerCommands(): void {
 			// Then, scan existing nodes for entity IDs AND their dependencies
 			console.log('Scanning existing nodes for dependencies...');
 
-			// Helper to parse YAML array
+			// Helper to strip quotes from a value
+			const stripQuotesLocal2 = (value: string): string => {
+				const trimmed = value.trim();
+				if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+					(trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+					return trimmed.slice(1, -1);
+				}
+				return trimmed;
+			};
+
+			// Helper to parse YAML array - use [ \t]* instead of \s* to avoid matching newlines
 			const parseYamlArrayLocal = (text: string, key: string): string[] => {
-				const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+				const multilineMatch = text.match(new RegExp(`^${key}:[ \\t]*\\n((?:[ \\t]*-[ \\t]*.+\\n?)+)`, 'm'));
 				if (multilineMatch) {
-					const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+					const items = multilineMatch[1].match(/^[ \t]*-[ \t]*(.+)$/gm);
 					if (items) {
-						return items.map(item => item.replace(/^\s*-\s*/, '').trim());
+						return items.map(item => stripQuotesLocal2(item.replace(/^[ \t]*-[ \t]*/, '')));
 					}
 				}
-				const inlineMatch = text.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+				const inlineMatch = text.match(new RegExp(`^${key}:[ \\t]*\\[([^\\]]+)\\]`, 'm'));
 				if (inlineMatch) {
-					return inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+					return inlineMatch[1].split(',').map(s => stripQuotesLocal2(s));
 				}
-				const singleMatch = text.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+				const singleMatch = text.match(new RegExp(`^${key}:[ \\t]*([^\\n\\[]+)$`, 'm'));
 				if (singleMatch && singleMatch[1].trim()) {
-					return [singleMatch[1].trim()];
+					return [stripQuotesLocal2(singleMatch[1])];
 				}
 				return [];
 			};
@@ -5602,13 +5726,15 @@ private registerCommands(): void {
 
 								// If we found an entity ID, also read dependencies
 								if (entityId && !entityNodeMap.has(entityId)) {
-									const parentMatch = frontmatterText.match(/^parent:\s*(.+)$/m);
+									// Use [ \t]* instead of \s* to avoid matching newlines
+									const parentMatch = frontmatterText.match(/^parent:[ \t]*(.+)$/m);
 									const dependsOn = parseYamlArrayLocal(frontmatterText, 'depends_on');
 									const enables = parseYamlArrayLocal(frontmatterText, 'enables');
+									const affects = parseYamlArrayLocal(frontmatterText, 'affects');
 									const implementsArr = parseYamlArrayLocal(frontmatterText, 'implements');
 									const implementedBy = parseYamlArrayLocal(frontmatterText, 'implemented_by');
-									const supersedesMatch = frontmatterText.match(/^supersedes:\s*(.+)$/m);
-									const previousVersionMatch = frontmatterText.match(/^previous_version:\s*(.+)$/m);
+									const supersedesMatch = frontmatterText.match(/^supersedes:[ \t]*(.+)$/m);
+									const previousVersionMatch = frontmatterText.match(/^previous_version:[ \t]*(.+)$/m);
 
 									allEntityDependencies.set(entityId, {
 										nodeId: node.id,
@@ -5616,6 +5742,7 @@ private registerCommands(): void {
 										parent: parentMatch?.[1]?.trim(),
 										dependsOn,
 										enables,
+										affects,
 										implements: implementsArr,
 										implementedBy,
 										supersedes: supersedesMatch?.[1]?.trim(),
@@ -5637,17 +5764,91 @@ private registerCommands(): void {
 			console.log('Entity to node mapping:', allEntityToNodeMap.size, 'entries');
 			console.log('Entities with dependencies:', allEntityDependencies.size, '(new:', entityNodeMap.size, ', existing:', allEntityDependencies.size - entityNodeMap.size, ')');
 
+			// ========================================================================
+			// Transitive Reduction: Remove redundant dependencies
+			// If A → B → C exists, remove direct A → C edge
+			// ========================================================================
+			const performTransitiveReduction = (
+				entities: Map<string, { dependsOn: string[]; [key: string]: unknown }>
+			): Map<string, string[]> => {
+				// Build adjacency list for depends_on
+				const graph = new Map<string, Set<string>>();
+				for (const [entityId, info] of entities) {
+					graph.set(entityId, new Set(info.dependsOn));
+				}
+
+				// For each entity, check if any dependency is reachable through another dependency
+				const reducedDeps = new Map<string, string[]>();
+
+				for (const [entityId, deps] of graph) {
+					const directDeps = [...deps];
+					const redundant = new Set<string>();
+
+					// For each direct dependency, check if it's reachable through another direct dependency
+					for (const dep of directDeps) {
+						// BFS/DFS from other direct dependencies to see if we can reach 'dep'
+						for (const otherDep of directDeps) {
+							if (otherDep === dep) continue;
+
+							// Check if 'dep' is reachable from 'otherDep' (transitively)
+							const visited = new Set<string>();
+							const queue = [otherDep];
+
+							while (queue.length > 0) {
+								const current = queue.shift()!;
+								if (visited.has(current)) continue;
+								visited.add(current);
+
+								const currentDeps = graph.get(current);
+								if (currentDeps) {
+									if (currentDeps.has(dep)) {
+										// 'dep' is reachable from 'otherDep', so direct edge to 'dep' is redundant
+										redundant.add(dep);
+										break;
+									}
+									for (const next of currentDeps) {
+										if (!visited.has(next)) {
+											queue.push(next);
+										}
+									}
+								}
+							}
+
+							if (redundant.has(dep)) break;
+						}
+					}
+
+					// Keep only non-redundant dependencies
+					const kept = directDeps.filter(d => !redundant.has(d));
+					reducedDeps.set(entityId, kept);
+
+					if (redundant.size > 0) {
+						console.log(`[Transitive Reduction] ${entityId}: removed redundant deps [${[...redundant].join(', ')}], kept [${kept.join(', ')}]`);
+					}
+				}
+
+				return reducedDeps;
+			};
+
+			// Apply transitive reduction to depends_on
+			const reducedDependsOn = performTransitiveReduction(allEntityDependencies);
+
 			// Create edges for ALL entities (new and existing)
 			const newEdges: CanvasEdge[] = [];
 			let edgesSkipped = 0;
 			let edgesFromNewNodes = 0;
 			let edgesFromExistingNodes = 0;
+			let edgesRemovedByReduction = 0;
 
 			for (const [entityId, info] of allEntityDependencies.entries()) {
 				const sourceNodeId = info.nodeId;
 
-				// Create edges for depends_on relationships
-				for (const depId of info.dependsOn) {
+				// Use reduced dependencies instead of original
+				const reducedDeps = reducedDependsOn.get(entityId) || [];
+				edgesRemovedByReduction += info.dependsOn.length - reducedDeps.length;
+
+				// Create edges for depends_on relationships (after transitive reduction)
+				for (const depId of reducedDeps) {
 					const targetNodeId = allEntityToNodeMap.get(depId);
 					if (targetNodeId) {
 						// Check if edge already exists
@@ -5684,15 +5885,22 @@ private registerCommands(): void {
 					}
 				}
 
-				// Create edges for enables relationships (decision -> enabled entity)
-				for (const enabledId of info.enables) {
-					const enabledNodeId = allEntityToNodeMap.get(enabledId);
-					if (enabledNodeId) {
+				// Create edges for affects relationships (decision -> affected entity)
+				// Also handle legacy 'enables' field for backwards compatibility
+				const affectedIds = [...(info.affects || []), ...(info.enables || [])];
+				const seenAffectedIds = new Set<string>();
+				for (const affectedId of affectedIds) {
+					// Skip duplicates (in case same ID is in both enables and affects)
+					if (seenAffectedIds.has(affectedId)) continue;
+					seenAffectedIds.add(affectedId);
+
+					const affectedNodeId = allEntityToNodeMap.get(affectedId);
+					if (affectedNodeId) {
 						// Check if edge already exists
-						if (!edgeExists(canvasDataForEdges, sourceNodeId, enabledNodeId)) {
-							// Edge goes FROM decision TO enabled entity (decision enables/unblocks the entity)
-							// Visual: decision --> enabled entity
-							const edge = createEdge(sourceNodeId, enabledNodeId, undefined, 'right', 'left');
+						if (!edgeExists(canvasDataForEdges, sourceNodeId, affectedNodeId)) {
+							// Edge goes FROM decision TO affected entity (decision affects the entity)
+							// Visual: decision --> affected entity
+							const edge = createEdge(sourceNodeId, affectedNodeId, undefined, 'right', 'left');
 							newEdges.push(edge);
 							if (info.isNew) edgesFromNewNodes++; else edgesFromExistingNodes++;
 						} else {
@@ -5770,6 +5978,7 @@ private registerCommands(): void {
 			console.log('    - From new nodes:', edgesFromNewNodes);
 			console.log('    - From existing nodes:', edgesFromExistingNodes);
 			console.log('  - Edges already existed:', edgesSkipped);
+			console.log('  - Edges removed by transitive reduction:', edgesRemovedByReduction);
 
 			// Add edges to canvas data
 			for (const edge of newEdges) {
@@ -5829,9 +6038,9 @@ private registerCommands(): void {
 			console.log('\n=== STAGE 7: RECONCILE RELATIONSHIPS ===');
 			await this.reconcileAllRelationships();
 
-			// Apply the V3 positioning algorithm
-			console.log('\n=== STAGE 8: REPOSITION NODES (V3) ===');
-			await this.repositionCanvasNodesV3();
+			// Apply the V4 positioning algorithm
+			console.log('\n=== STAGE 8: REPOSITION NODES (V4) ===');
+			await this.repositionCanvasNodesV4();
 
 			// Archive cleanup: move archived files and remove archived nodes
 			console.log('\n=== STAGE 9: ARCHIVE CLEANUP ===');
@@ -5932,22 +6141,32 @@ private registerCommands(): void {
 			const nodeMeta = new Map<string, NodeMeta>();
 			const entityIdToNodeId = new Map<string, string>(); // Map entity ID -> canvas node ID
 
-			// Helper to parse YAML array
+			// Helper to strip quotes from a value
+			const stripQuotesRepos = (value: string): string => {
+				const trimmed = value.trim();
+				if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+					(trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+					return trimmed.slice(1, -1);
+				}
+				return trimmed;
+			};
+
+			// Helper to parse YAML array - use [ \t]* instead of \s* to avoid matching newlines
 			const parseYamlArrayRepos = (text: string, key: string): string[] => {
-				const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+				const multilineMatch = text.match(new RegExp(`^${key}:[ \\t]*\\n((?:[ \\t]*-[ \\t]*.+\\n?)+)`, 'm'));
 				if (multilineMatch) {
-					const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+					const items = multilineMatch[1].match(/^[ \t]*-[ \t]*(.+)$/gm);
 					if (items) {
-						return items.map(item => item.replace(/^\s*-\s*/, '').trim());
+						return items.map(item => stripQuotesRepos(item.replace(/^[ \t]*-[ \t]*/, '')));
 					}
 				}
-				const inlineMatch = text.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+				const inlineMatch = text.match(new RegExp(`^${key}:[ \\t]*\\[([^\\]]+)\\]`, 'm'));
 				if (inlineMatch) {
-					return inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+					return inlineMatch[1].split(',').map(s => stripQuotesRepos(s));
 				}
-				const singleMatch = text.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+				const singleMatch = text.match(new RegExp(`^${key}:[ \\t]*([^\\n\\[]+)$`, 'm'));
 				if (singleMatch && singleMatch[1].trim()) {
-					return [singleMatch[1].trim()];
+					return [stripQuotesRepos(singleMatch[1])];
 				}
 				return [];
 			};
@@ -5963,10 +6182,11 @@ private registerCommands(): void {
 					if (!fmMatch) continue;
 
 					const fmText = fmMatch[1];
-					const typeMatch = fmText.match(/^type:\s*(.+)$/m);
-					const workstreamMatch = fmText.match(/^workstream:\s*(.+)$/m);
-					const idMatch = fmText.match(/^id:\s*(.+)$/m);
-					const parentMatch = fmText.match(/^parent:\s*(.+)$/m);
+					// Use [ \t]* instead of \s* to avoid matching newlines
+					const typeMatch = fmText.match(/^type:[ \t]*(.+)$/m);
+					const workstreamMatch = fmText.match(/^workstream:[ \t]*(.+)$/m);
+					const idMatch = fmText.match(/^id:[ \t]*(.+)$/m);
+					const parentMatch = fmText.match(/^parent:[ \t]*(.+)$/m);
 					const enables = parseYamlArrayRepos(fmText, 'enables');
 					const blocksArr = parseYamlArrayRepos(fmText, 'blocks');
 					const dependsOnArr = parseYamlArrayRepos(fmText, 'depends_on');
@@ -7151,6 +7371,137 @@ private registerCommands(): void {
 			}
 
 			// ============================================================
+			// STEP 9.6: Position orphan tasks/stories with blocks/depends_on relationships
+			// These form dependency chains that should be positioned together
+			// Blockers go LEFT, blocked entities go RIGHT
+			// ============================================================
+			const orphanTasksWithBlockRels = fileNodes.filter(n => {
+				const meta = nodeMeta.get(n.id);
+				if (!meta || finalPositions.has(n.id)) return false;
+				if (meta.type !== 'task' && meta.type !== 'story') return false;
+				// Has blocks or depends_on relationships
+				return (meta.blocks?.length > 0) || (meta.dependsOn?.length > 0);
+			});
+
+			if (orphanTasksWithBlockRels.length > 0) {
+				console.log(`Found ${orphanTasksWithBlockRels.length} orphan tasks/stories with block relationships`);
+
+				// Build a set of all orphan task entity IDs for filtering
+				const orphanTaskEntityIds = new Set<string>();
+				for (const node of orphanTasksWithBlockRels) {
+					const meta = nodeMeta.get(node.id);
+					if (meta?.entityId) orphanTaskEntityIds.add(meta.entityId);
+				}
+
+				// Build dependency graph among these orphan tasks
+				// blockedBy: entityId -> [entityIds that block it]
+				const blockedBy = new Map<string, string[]>();
+				for (const node of orphanTasksWithBlockRels) {
+					const meta = nodeMeta.get(node.id);
+					if (!meta?.entityId) continue;
+
+					// From depends_on field
+					for (const depId of meta.dependsOn || []) {
+						if (orphanTaskEntityIds.has(depId)) {
+							if (!blockedBy.has(meta.entityId)) blockedBy.set(meta.entityId, []);
+							if (!blockedBy.get(meta.entityId)!.includes(depId)) {
+								blockedBy.get(meta.entityId)!.push(depId);
+							}
+						}
+					}
+
+					// From blocks field (reverse direction)
+					for (const blockedId of meta.blocks || []) {
+						if (orphanTaskEntityIds.has(blockedId)) {
+							if (!blockedBy.has(blockedId)) blockedBy.set(blockedId, []);
+							if (!blockedBy.get(blockedId)!.includes(meta.entityId)) {
+								blockedBy.get(blockedId)!.push(meta.entityId);
+							}
+						}
+					}
+				}
+
+				// Topological sort to get positioning order (blockers first)
+				const sorted: string[] = [];
+				const visited = new Set<string>();
+				const visiting = new Set<string>();
+
+				const visit = (entityId: string) => {
+					if (visited.has(entityId)) return;
+					if (visiting.has(entityId)) return; // Cycle detected
+					visiting.add(entityId);
+
+					// Visit all blockers first
+					for (const blockerId of blockedBy.get(entityId) || []) {
+						visit(blockerId);
+					}
+
+					visiting.delete(entityId);
+					visited.add(entityId);
+					sorted.push(entityId);
+				};
+
+				for (const entityId of orphanTaskEntityIds) {
+					visit(entityId);
+				}
+
+				console.log(`  Topological order: ${sorted.join(' -> ')}`);
+
+				// Position in order: each entity goes to the RIGHT of its blockers
+				// Start position for orphan task chains
+				let chainStartX = config.startX;
+				let chainStartY = currentLaneY + config.streamSpacing;
+
+				// Track positions by entity ID
+				const taskPositions = new Map<string, { x: number; y: number }>();
+
+				for (const entityId of sorted) {
+					const nodeId = entityIdToNodeId.get(entityId);
+					if (!nodeId) continue;
+
+					const blockers = blockedBy.get(entityId) || [];
+					let x: number;
+					let y: number;
+
+					if (blockers.length === 0) {
+						// No blockers - this is a root of a chain
+						x = chainStartX;
+						y = chainStartY;
+						// Move start position down for next chain root
+						chainStartY += config.nodeHeight + config.verticalSpacing;
+					} else {
+						// Position to the RIGHT of the rightmost blocker
+						const blockerPositions = blockers
+							.map(bid => taskPositions.get(bid))
+							.filter((p): p is { x: number; y: number } => p !== undefined);
+
+						if (blockerPositions.length > 0) {
+							const rightmostX = Math.max(...blockerPositions.map(p => p.x));
+							const avgY = blockerPositions.reduce((sum, p) => sum + p.y, 0) / blockerPositions.length;
+							x = rightmostX + config.nodeWidth + config.storySpacing;
+							y = avgY;
+						} else {
+							// Fallback if blockers not positioned yet
+							x = chainStartX;
+							y = chainStartY;
+							chainStartY += config.nodeHeight + config.verticalSpacing;
+						}
+					}
+
+					taskPositions.set(entityId, { x, y });
+					finalPositions.set(nodeId, {
+						x,
+						y,
+						width: config.nodeWidth,
+						height: config.nodeHeight,
+					});
+
+					const meta = nodeMeta.get(nodeId);
+					console.log(`  Orphan task ${entityId} positioned at (${x}, ${y}) - blockers: ${blockers.join(', ') || 'none'}`);
+				}
+			}
+
+			// ============================================================
 			// STEP 10: Handle orphan nodes and nodes not assigned to milestones
 			// ============================================================
 			const orphans = fileNodes.filter(n => !finalPositions.has(n.id));
@@ -7636,22 +7987,32 @@ private registerCommands(): void {
 			// ============================================================
 			const entities: EntityData[] = [];
 
-			// Helper to parse YAML array
+			// Helper to strip quotes from a value
+			const stripQuotesLayout = (value: string): string => {
+				const trimmed = value.trim();
+				if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+					(trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+					return trimmed.slice(1, -1);
+				}
+				return trimmed;
+			};
+
+			// Helper to parse YAML array - use [ \t]* instead of \s* to avoid matching newlines
 			const parseYamlArray = (text: string, key: string): string[] => {
-				const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+				const multilineMatch = text.match(new RegExp(`^${key}:[ \\t]*\\n((?:[ \\t]*-[ \\t]*.+\\n?)+)`, 'm'));
 				if (multilineMatch) {
-					const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+					const items = multilineMatch[1].match(/^[ \t]*-[ \t]*(.+)$/gm);
 					if (items) {
-						return items.map(item => item.replace(/^\s*-\s*/, '').trim());
+						return items.map(item => stripQuotesLayout(item.replace(/^[ \t]*-[ \t]*/, '')));
 					}
 				}
-				const inlineMatch = text.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+				const inlineMatch = text.match(new RegExp(`^${key}:[ \\t]*\\[([^\\]]+)\\]`, 'm'));
 				if (inlineMatch) {
-					return inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+					return inlineMatch[1].split(',').map(s => stripQuotesLayout(s));
 				}
-				const singleMatch = text.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+				const singleMatch = text.match(new RegExp(`^${key}:[ \\t]*([^\\n\\[]+)$`, 'm'));
 				if (singleMatch && singleMatch[1].trim()) {
-					return [singleMatch[1].trim()];
+					return [stripQuotesLayout(singleMatch[1])];
 				}
 				return [];
 			};
@@ -7667,10 +8028,11 @@ private registerCommands(): void {
 					if (!fmMatch) continue;
 
 					const fmText = fmMatch[1];
-					const typeMatch = fmText.match(/^type:\s*(.+)$/m);
-					const workstreamMatch = fmText.match(/^workstream:\s*(.+)$/m);
-					const idMatch = fmText.match(/^id:\s*(.+)$/m);
-					const parentMatch = fmText.match(/^parent:\s*(.+)$/m);
+					// Use [ \t]* instead of \s* to avoid matching newlines
+					const typeMatch = fmText.match(/^type:[ \t]*(.+)$/m);
+					const workstreamMatch = fmText.match(/^workstream:[ \t]*(.+)$/m);
+					const idMatch = fmText.match(/^id:[ \t]*(.+)$/m);
+					const parentMatch = fmText.match(/^parent:[ \t]*(.+)$/m);
 					const enables = parseYamlArray(fmText, 'enables');
 					const blocksArr = parseYamlArray(fmText, 'blocks');
 					const dependsOnArr = parseYamlArray(fmText, 'depends_on');
@@ -7795,6 +8157,162 @@ private registerCommands(): void {
 
 		} catch (error) {
 			console.error('ERROR in repositionCanvasNodesV3:', error);
+			console.groupEnd();
+			this.isUpdatingCanvas = false;
+			new Notice("❌ Failed to reposition nodes: " + (error as Error).message);
+		}
+	}
+
+	/**
+	 * Reposition canvas nodes using V4 algorithm:
+	 * - Ruleset-based relationship processing
+	 * - Entity categories: Contained, Floating, Orphan
+	 * - Priority-based containment conflict resolution
+	 * - Cross-workstream positioning for Milestones and Stories
+	 * - Auto-migration of Decision enables/blocks to affects
+	 */
+	private async repositionCanvasNodesV4(): Promise<void> {
+		console.group('[Canvas Plugin] repositionCanvasNodesV4');
+
+		const canvasFile = this.getActiveCanvasFile();
+		if (!canvasFile) {
+			console.warn('No active canvas file found');
+			console.groupEnd();
+			new Notice("Please open a canvas file first");
+			return;
+		}
+
+		try {
+			const canvasData = await loadCanvasData(this.app, canvasFile);
+			console.log('Canvas has', canvasData.nodes.length, 'nodes,', canvasData.edges.length, 'edges');
+
+			const fileNodes = canvasData.nodes.filter(n => n.type === 'file');
+			if (fileNodes.length === 0) {
+				new Notice("No file nodes on canvas to reposition");
+				console.groupEnd();
+				return;
+			}
+
+			// ============================================================
+			// STEP 1: Parse node metadata using canonical entity parser
+			// ============================================================
+			const entities: EntityDataV4[] = [];
+
+			for (const node of fileNodes) {
+				if (!node.file) continue;
+				const file = this.app.vault.getAbstractFileByPath(node.file);
+				if (!(file instanceof TFile)) continue;
+
+				try {
+					const content = await this.app.vault.read(file);
+					const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+					if (!fmMatch) continue;
+
+					const entityData = parseEntityFromFrontmatter(fmMatch[1], node.id, node.file);
+					if (entityData) {
+						entities.push(entityData);
+					}
+				} catch (e) {
+					console.warn('Failed to read frontmatter for node:', node.id, e);
+				}
+			}
+
+			console.log(`Parsed ${entities.length} entities from canvas nodes`);
+
+			// ============================================================
+			// STEP 2: Run V4 positioning engine
+			// ============================================================
+			const engine = new PositioningEngineV4();
+			const result = engine.calculatePositions(entities);
+
+			// Log errors and warnings
+			if (result.errors.length > 0) {
+				console.error('Positioning errors:', result.errors);
+				for (const error of result.errors) {
+					new Notice(`⚠️ ${error}`);
+				}
+			}
+			if (result.warnings.length > 0) {
+				console.warn('Positioning warnings:', result.warnings);
+			}
+
+			// ============================================================
+			// STEP 3: Apply positions to canvas nodes
+			// ============================================================
+			let repositionedCount = 0;
+			for (const node of canvasData.nodes) {
+				const position = result.positions.get(node.id);
+				if (position) {
+					node.x = Math.round(position.x);
+					node.y = Math.round(position.y);
+					node.width = Math.round(position.width);
+					node.height = Math.round(position.height);
+					repositionedCount++;
+				}
+			}
+
+			console.log(`Applied positions to ${repositionedCount} nodes`);
+
+			// ============================================================
+			// STEP 4: Update edge sides based on new positions
+			// ============================================================
+			for (const edge of canvasData.edges) {
+				const fromPos = result.positions.get(edge.fromNode);
+				const toPos = result.positions.get(edge.toNode);
+
+				if (fromPos && toPos) {
+					// Determine edge sides based on relative positions
+					// Prioritize the axis with the larger difference
+					const dx = Math.abs(fromPos.x - toPos.x);
+					const dy = Math.abs(fromPos.y - toPos.y);
+
+					if (dx > dy) {
+						// Horizontal relationship dominates
+						if (fromPos.x < toPos.x) {
+							// From is left of To: right → left
+							edge.fromSide = 'right';
+							edge.toSide = 'left';
+						} else {
+							// From is right of To: left → right
+							edge.fromSide = 'left';
+							edge.toSide = 'right';
+						}
+					} else {
+						// Vertical relationship dominates
+						if (fromPos.y < toPos.y) {
+							// From is above To: bottom → top
+							edge.fromSide = 'bottom';
+							edge.toSide = 'top';
+						} else {
+							// From is below To: top → bottom
+							edge.fromSide = 'top';
+							edge.toSide = 'bottom';
+						}
+					}
+				}
+			}
+
+			console.log(`Updated edge sides for ${canvasData.edges.length} edges`);
+
+			// ============================================================
+			// STEP 5: Save canvas
+			// ============================================================
+			this.isUpdatingCanvas = true;
+			await closeCanvasViews(this.app, canvasFile);
+			await new Promise(resolve => setTimeout(resolve, 100));
+			await saveCanvasData(this.app, canvasFile, canvasData);
+			console.log('Saved canvas with new positions');
+
+			await new Promise(resolve => setTimeout(resolve, 200));
+			await this.app.workspace.openLinkText(canvasFile.path, '', false);
+
+			this.isUpdatingCanvas = false;
+			console.groupEnd();
+
+			new Notice(`✅ Repositioned ${repositionedCount} nodes (V4 algorithm)`);
+
+		} catch (error) {
+			console.error('ERROR in repositionCanvasNodesV4:', error);
 			console.groupEnd();
 			this.isUpdatingCanvas = false;
 			new Notice("❌ Failed to reposition nodes: " + (error as Error).message);
@@ -8127,6 +8645,183 @@ private registerCommands(): void {
 			console.groupEnd();
 			this.isUpdatingCanvas = false;
 			new Notice("❌ Failed to remove duplicates: " + (error as Error).message);
+		}
+	}
+
+	/**
+	 * Migrate decision fields in vault markdown files.
+	 * - Moves 'enables' values to 'affects'
+	 * - Moves 'blocks' values that point to non-decisions to 'affects'
+	 * - Removes the 'enables' field after migration
+	 */
+	async migrateDecisionFieldsInVault(): Promise<void> {
+		console.group('[Canvas Plugin] Migrate decision fields');
+
+		const decisionsFolder = this.settings.entityNavigator.decisionsFolder;
+		if (!decisionsFolder) {
+			new Notice("No decisions folder configured in settings");
+			console.groupEnd();
+			return;
+		}
+
+		// Get all markdown files in decisions folder (search recursively)
+		const allFiles = this.app.vault.getMarkdownFiles();
+		const decisionFiles = allFiles.filter(f => f.path.includes('/' + decisionsFolder + '/') || f.path.startsWith(decisionsFolder + '/'));
+
+		console.log(`Found ${decisionFiles.length} files in decisions folder`);
+
+		let migratedCount = 0;
+		let skippedCount = 0;
+		const migrations: { file: string; changes: string[] }[] = [];
+
+		for (const file of decisionFiles) {
+			try {
+				const content = await this.app.vault.read(file);
+				const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+				if (!frontmatterMatch) {
+					skippedCount++;
+					continue;
+				}
+
+				const frontmatterText = frontmatterMatch[1];
+
+				// Check if this is a decision
+				const typeMatch = frontmatterText.match(/^type:[ \t]*(.+)$/m);
+				if (!typeMatch || typeMatch[1].trim().toLowerCase() !== 'decision') {
+					skippedCount++;
+					continue;
+				}
+
+				// Parse enables array
+				const enablesMatch = frontmatterText.match(/^enables:[ \t]*(.*)$/m);
+				let enables: string[] = [];
+				if (enablesMatch && enablesMatch[1].trim()) {
+					const enablesValue = enablesMatch[1].trim();
+					if (enablesValue.startsWith('[') && enablesValue.endsWith(']')) {
+						try {
+							enables = JSON.parse(enablesValue);
+						} catch {
+							// Try YAML-style array
+							const inner = enablesValue.slice(1, -1).trim();
+							if (inner) {
+								enables = inner.split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(s => s);
+							}
+						}
+					}
+				}
+
+				// Parse blocks array
+				const blocksMatch = frontmatterText.match(/^blocks:[ \t]*(.*)$/m);
+				let blocks: string[] = [];
+				if (blocksMatch && blocksMatch[1].trim()) {
+					const blocksValue = blocksMatch[1].trim();
+					if (blocksValue.startsWith('[') && blocksValue.endsWith(']')) {
+						try {
+							blocks = JSON.parse(blocksValue);
+						} catch {
+							const inner = blocksValue.slice(1, -1).trim();
+							if (inner) {
+								blocks = inner.split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(s => s);
+							}
+						}
+					}
+				}
+
+				// Parse existing affects array
+				const affectsMatch = frontmatterText.match(/^affects:[ \t]*(.*)$/m);
+				let affects: string[] = [];
+				if (affectsMatch && affectsMatch[1].trim()) {
+					const affectsValue = affectsMatch[1].trim();
+					if (affectsValue.startsWith('[') && affectsValue.endsWith(']')) {
+						try {
+							affects = JSON.parse(affectsValue);
+						} catch {
+							const inner = affectsValue.slice(1, -1).trim();
+							if (inner) {
+								affects = inner.split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(s => s);
+							}
+						}
+					}
+				}
+
+				// Determine what needs to be migrated
+				const changes: string[] = [];
+				const toMigrateToAffects: string[] = [];
+
+				// Migrate all enables to affects
+				if (enables.length > 0) {
+					toMigrateToAffects.push(...enables);
+					changes.push(`enables [${enables.join(', ')}] → affects`);
+				}
+
+				// Migrate ALL blocks to affects (both decision and non-decision targets)
+				if (blocks.length > 0) {
+					toMigrateToAffects.push(...blocks);
+					changes.push(`blocks [${blocks.join(', ')}] → affects`);
+				}
+
+				// Skip if nothing to migrate
+				if (changes.length === 0) {
+					skippedCount++;
+					continue;
+				}
+
+				// Build new affects array (deduplicated)
+				const newAffects = [...new Set([...affects, ...toMigrateToAffects])];
+
+				// Build updated frontmatter
+				let newFrontmatter = frontmatterText;
+
+				// Update or add affects field
+				if (affectsMatch) {
+					newFrontmatter = newFrontmatter.replace(
+						/^affects:[ \t]*.*$/m,
+						`affects: ${JSON.stringify(newAffects)}`
+					);
+				} else {
+					// Add affects after type line
+					newFrontmatter = newFrontmatter.replace(
+						/^(type:[ \t]*.+)$/m,
+						`$1\naffects: ${JSON.stringify(newAffects)}`
+					);
+				}
+
+				// Remove enables field entirely
+				if (enablesMatch) {
+					newFrontmatter = newFrontmatter.replace(/^enables:[ \t]*.*\n?/m, '');
+				}
+
+				// Remove blocks field entirely
+				if (blocksMatch) {
+					newFrontmatter = newFrontmatter.replace(/^blocks:[ \t]*.*\n?/m, '');
+				}
+
+				// Rebuild content
+				const body = content.substring(frontmatterMatch[0].length);
+				const newContent = `---\n${newFrontmatter.trim()}\n---${body}`;
+
+				// Write updated content
+				await this.app.vault.modify(file, newContent);
+
+				migratedCount++;
+				migrations.push({ file: file.path, changes });
+				console.log(`Migrated ${file.path}:`, changes);
+
+			} catch (error) {
+				console.error(`Error processing ${file.path}:`, error);
+			}
+		}
+
+		console.log(`Migration complete: ${migratedCount} files migrated, ${skippedCount} skipped`);
+		if (migrations.length > 0) {
+			console.table(migrations);
+		}
+		console.groupEnd();
+
+		if (migratedCount > 0) {
+			new Notice(`✅ Migrated ${migratedCount} decision files (enables → affects)`);
+		} else {
+			new Notice("No decision files needed migration");
 		}
 	}
 
@@ -9373,21 +10068,22 @@ private registerCommands(): void {
 			return null;
 		};
 
+		// Use [ \t]* instead of \s* to avoid matching newlines
 		const parseYamlArray = (text: string, key: string): string[] => {
 			let rawItems: string[] = [];
 
-			const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+			const multilineMatch = text.match(new RegExp(`^${key}:[ \\t]*\\n((?:[ \\t]*-[ \\t]*.+\\n?)+)`, 'm'));
 			if (multilineMatch) {
-				const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+				const items = multilineMatch[1].match(/^[ \t]*-[ \t]*(.+)$/gm);
 				if (items) {
-					rawItems = items.map(item => item.replace(/^\s*-\s*/, '').trim());
+					rawItems = items.map(item => item.replace(/^[ \t]*-[ \t]*/, '').trim());
 				}
 			} else {
-				const inlineMatch = text.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+				const inlineMatch = text.match(new RegExp(`^${key}:[ \\t]*\\[([^\\]]+)\\]`, 'm'));
 				if (inlineMatch) {
 					rawItems = inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
 				} else {
-					const singleMatch = text.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+					const singleMatch = text.match(new RegExp(`^${key}:[ \\t]*([^\\n\\[]+)$`, 'm'));
 					if (singleMatch && singleMatch[1].trim()) {
 						rawItems = [singleMatch[1].trim()];
 					}
@@ -9406,19 +10102,20 @@ private registerCommands(): void {
 		};
 
 		// Helper to get raw array values (before cleaning) to detect if cleanup is needed
+		// Use [ \t]* instead of \s* to avoid matching newlines
 		const parseYamlArrayRaw = (text: string, key: string): string[] => {
-			const multilineMatch = text.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s*.+\\n?)+)`, 'm'));
+			const multilineMatch = text.match(new RegExp(`^${key}:[ \\t]*\\n((?:[ \\t]*-[ \\t]*.+\\n?)+)`, 'm'));
 			if (multilineMatch) {
-				const items = multilineMatch[1].match(/^\s*-\s*(.+)$/gm);
+				const items = multilineMatch[1].match(/^[ \t]*-[ \t]*(.+)$/gm);
 				if (items) {
-					return items.map(item => item.replace(/^\s*-\s*/, '').trim());
+					return items.map(item => item.replace(/^[ \t]*-[ \t]*/, '').trim());
 				}
 			}
-			const inlineMatch = text.match(new RegExp(`^${key}:\\s*\\[([^\\]]+)\\]`, 'm'));
+			const inlineMatch = text.match(new RegExp(`^${key}:[ \\t]*\\[([^\\]]+)\\]`, 'm'));
 			if (inlineMatch) {
 				return inlineMatch[1].split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
 			}
-			const singleMatch = text.match(new RegExp(`^${key}:\\s*([^\\n\\[]+)$`, 'm'));
+			const singleMatch = text.match(new RegExp(`^${key}:[ \\t]*([^\\n\\[]+)$`, 'm'));
 			if (singleMatch && singleMatch[1].trim()) {
 				return [singleMatch[1].trim()];
 			}
@@ -9444,7 +10141,8 @@ private registerCommands(): void {
 				if (!frontmatterMatch) continue;
 
 				const fm = frontmatterMatch[1];
-				const idMatch = fm.match(/^id:\s*(.+)$/m);
+				// Use [ \t]* instead of \s* to avoid matching newlines
+				const idMatch = fm.match(/^id:[ \t]*(.+)$/m);
 				if (!idMatch) continue;
 
 				const entityId = idMatch[1].trim();
@@ -9474,8 +10172,8 @@ private registerCommands(): void {
 					}
 				}
 
-				// parent -> children
-				const parentMatch = fm.match(/^parent:\s*(.+)$/m);
+				// parent -> children - use [ \t]* instead of \s* to avoid matching newlines
+				const parentMatch = fm.match(/^parent:[ \t]*(.+)$/m);
 				if (parentMatch) {
 					const parentId = parentMatch[1].trim();
 					const parentRels = ensureEntity(parentId);
@@ -9527,7 +10225,8 @@ private registerCommands(): void {
 				}
 
 				// supersedes -> superseded_by
-				const supersedesMatch = fm.match(/^supersedes:\s*(.+)$/m);
+				// Use [ \t]* instead of \s* to avoid matching newlines
+				const supersedesMatch = fm.match(/^supersedes:[ \t]*(.+)$/m);
 				if (supersedesMatch) {
 					const supersededId = supersedesMatch[1].trim();
 					const supersededRels = ensureEntity(supersededId);
@@ -9535,7 +10234,8 @@ private registerCommands(): void {
 				}
 
 				// previous_version -> next_version
-				const prevVersionMatch = fm.match(/^previous_version:\s*(.+)$/m);
+				// Use [ \t]* instead of \s* to avoid matching newlines
+				const prevVersionMatch = fm.match(/^previous_version:[ \t]*(.+)$/m);
 				if (prevVersionMatch) {
 					const prevId = prevVersionMatch[1].trim();
 					const prevRels = ensureEntity(prevId);
@@ -9571,9 +10271,10 @@ private registerCommands(): void {
 				const currentImplementedBy = parseYamlArray(fm, 'implemented_by');
 				const currentDocumentedBy = parseYamlArray(fm, 'documented_by');
 				const currentDecidedBy = parseYamlArray(fm, 'decided_by');
-				const supersededByMatch = fm.match(/^superseded_by:\s*(.+)$/m);
+				// Use [ \t]* instead of \s* to avoid matching newlines
+				const supersededByMatch = fm.match(/^superseded_by:[ \t]*(.+)$/m);
 				const currentSupersededBy = supersededByMatch?.[1]?.trim();
-				const nextVersionMatch = fm.match(/^next_version:\s*(.+)$/m);
+				const nextVersionMatch = fm.match(/^next_version:[ \t]*(.+)$/m);
 				const currentNextVersion = nextVersionMatch?.[1]?.trim();
 
 				// Compare reverse relationships
@@ -9644,6 +10345,13 @@ private registerCommands(): void {
 
 		new Notice(`Reconciled ${scannedCount} entities, updated ${updatedCount} files`);
 		console.debug('[Canvas Plugin] Reconcile complete:', { scannedCount, updatedCount });
+
+		// Detect and break cycles in milestone dependencies
+		const allEntityFiles = Array.from(entityIdToFile.values());
+		const cycleResult = await detectAndBreakCycles(this.app, allEntityFiles, "milestone");
+		if (cycleResult.cyclesFound > 0) {
+			console.log(`[Canvas Plugin] Broke ${cycleResult.cyclesFound} cycles:`, cycleResult.edgesRemoved);
+		}
 	}
 
 	// ==================== HTTP SERVER ====================
@@ -9701,6 +10409,12 @@ private registerCommands(): void {
 
 						case 'reposition':
 						case 'reposition-nodes':
+							await this.repositionCanvasNodesV4();
+							result = { success: true, message: 'Reposition nodes (V4) completed' };
+							break;
+
+						case 'reposition-v3':
+						case 'reposition-nodes-v3':
 							await this.repositionCanvasNodesV3();
 							result = { success: true, message: 'Reposition nodes (V3) completed' };
 							break;

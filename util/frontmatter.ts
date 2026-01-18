@@ -13,11 +13,12 @@ export type GenericFrontmatter = ItemFrontmatter | FeatureFrontmatter;
 /**
  * Parse a YAML value that might be a JSON array
  * e.g., '["ACC-001", "ACC-002"]' -> ["ACC-001", "ACC-002"]
+ * Also handles YAML-style arrays: '[T-108]' or '[T-106, T-107]'
  */
 function parseYamlValue(value: string): string | string[] | boolean | number {
 	const trimmed = value.trim();
 
-	// Try to parse as JSON array
+	// Try to parse as JSON array first
 	if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
 		try {
 			const parsed = JSON.parse(trimmed);
@@ -25,7 +26,15 @@ function parseYamlValue(value: string): string | string[] | boolean | number {
 				return parsed;
 			}
 		} catch {
-			// Not valid JSON, return as string
+			// Not valid JSON - try parsing as YAML-style array (unquoted values)
+			// e.g., [T-108] or [T-106, T-107]
+			const inner = trimmed.slice(1, -1).trim();
+			if (inner === '') {
+				return []; // Empty array
+			}
+			// Split by comma and trim each value
+			const items = inner.split(',').map(s => s.trim()).filter(s => s.length > 0);
+			return items;
 		}
 	}
 
