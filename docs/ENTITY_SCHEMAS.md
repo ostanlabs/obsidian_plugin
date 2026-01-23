@@ -1,33 +1,13 @@
-# Entity Schemas - Shared Type Definitions
+# Entity Schemas
 
-> **Version:** 1.8
-> **Date:** January 2026
+> **Version:** 2.0
 > **Scope:** Shared between Obsidian Plugin and MCP Server
-> **Status:** Implementation Spec
-
----
-
-## Implementation Status
-
-> ⚠️ **Note:** Not all features in this spec are fully implemented. See status markers:
-> - ✅ **Implemented** - Feature is working in the plugin
-> - 🚧 **Partial** - Feature is partially implemented
-> - ❌ **Not Implemented** - Feature is planned but not yet implemented
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| 6 Entity Types | ✅ | Milestone, Story, Task, Decision, Document, Feature |
-| Feature Entity | ✅ | F-XXX IDs, tier/phase classification, relationship fields |
-| Reverse Relationship Sync | ✅ | blocks, children, implemented_by, superseded_by, next_version |
-| CSS Classes in Frontmatter | ❌ | Visual styling done via DOM manipulation instead |
-| Type Guards (isMilestone, etc.) | ❌ | Not exported as utility functions |
-| Validation Functions | ❌ | validateEntity, validateFrontmatter not implemented |
 
 ---
 
 ## Overview
 
-This document defines the TypeScript interfaces for all entity types in the V2 system. These schemas are the **single source of truth** for both the Obsidian Plugin and MCP Server implementations.
+This document defines the TypeScript interfaces for all entity types. These schemas are the **single source of truth** for both the Obsidian Plugin and MCP Server implementations.
 
 ---
 
@@ -40,9 +20,9 @@ This document defines the TypeScript interfaces for all entity types in the V2 s
 5. [Task](#task)
 6. [Decision](#decision)
 7. [Document](#document)
-8. [Relationships](#relationships)
-9. [Canvas Integration](#canvas-integration)
-10. [Frontmatter Serialization](#frontmatter-serialization)
+8. [Feature](#feature)
+9. [Relationships](#relationships)
+10. [Canvas Integration](#canvas-integration)
 
 ---
 
@@ -67,15 +47,11 @@ type EntityStatus = MilestoneStatus | StoryStatus | TaskStatus | DecisionStatus 
 // === PRIORITY ===
 type Priority = 'Low' | 'Medium' | 'High' | 'Critical';
 
-// === EFFORT TYPES ===
-// Default effort types (user-configurable via settings)
-type DefaultEffortType = 'Engineering' | 'Business' | 'Infra' | 'Research' | 'Design' | 'Marketing';
-
 // === DOCUMENT TYPES ===
 type DocumentType = 'spec' | 'adr' | 'vision' | 'guide' | 'research';
 
 // === RELATIONSHIP TYPES ===
-type DependencyType = 'blocks' | 'implements' | 'enables' | 'references' | 'supersedes';
+type DependencyType = 'blocks' | 'implements' | 'affects' | 'references' | 'supersedes';
 ```
 
 ### ID Formats
@@ -142,30 +118,6 @@ interface EntityBase {
   // === FILE ===
   vault_path: VaultPath;           // Path to .md file
 }
-```
-
-### CSS Classes Convention
-
-> ❌ **Not Implemented**: CSS classes are NOT stored in frontmatter. Visual styling is applied via DOM manipulation using `data-canvas-pm-type` attributes and CSS selectors in `styles.css`.
-
-```typescript
-// CSS class patterns for entities (PLANNED - NOT IMPLEMENTED)
-interface CSSClassPatterns {
-  // Type classes
-  type: `canvas-${EntityType}`;                    // canvas-milestone, canvas-story, etc.
-
-  // Effort classes (for stories/tasks)
-  effort: `canvas-effort-${string}`;              // canvas-effort-engineering
-
-  // Status classes
-  status: `canvas-status-${string}`;              // canvas-status-completed
-
-  // Priority classes (optional)
-  priority: `canvas-priority-${string}`;          // canvas-priority-critical
-}
-
-// Example cssclasses array:
-// ["canvas-story", "canvas-effort-engineering", "canvas-status-in-progress"]
 ```
 
 ---
@@ -236,7 +188,9 @@ implements:
   - DOC-001
 cssclasses:
   - canvas-milestone
+  - canvas-workstream-engineering
   - canvas-status-not-started
+  - canvas-priority-critical
 created_at: 2024-12-01T00:00:00Z
 updated_at: 2024-12-17T00:00:00Z
 archived: false
@@ -268,9 +222,8 @@ canvas_source: projects/main.canvas
 interface Story extends EntityBase {
   type: 'story';
   status: StoryStatus;
-  
+
   // === STORY-SPECIFIC ===
-  effort: string;                  // Effort type (Engineering, Business, etc.)
   priority: Priority;
   
   // === HIERARCHY ===
@@ -310,7 +263,6 @@ interface StoryFrontmatter {
   type: 'story';
   title: string;
   status: StoryStatus;
-  effort: string;
   priority: Priority;
   workstream: string;
   parent?: string;
@@ -335,7 +287,6 @@ id: S-015
 type: story
 title: Implement Premium Features
 status: Not Started
-effort: Engineering
 priority: High
 workstream: engineering
 parent: M-001
@@ -354,8 +305,9 @@ acceptance_criteria:
   - Stripe integration handles payments
 cssclasses:
   - canvas-story
-  - canvas-effort-engineering
+  - canvas-workstream-engineering
   - canvas-status-not-started
+  - canvas-priority-high
 created_at: 2024-12-15T00:00:00Z
 updated_at: 2024-12-17T00:00:00Z
 archived: false
@@ -467,7 +419,7 @@ depends_on:
 blocks: []
 cssclasses:
   - canvas-task
-  - canvas-effort-engineering
+  - canvas-workstream-engineering
   - canvas-status-open
 created_at: 2024-12-17T00:00:00Z
 updated_at: 2024-12-17T00:00:00Z
@@ -512,8 +464,11 @@ interface Decision extends EntityBase {
   
   // === DEPENDENCIES ===
   depends_on?: DecisionId[];       // Other decisions this depends on
-  blocks?: EntityId[];             // Entities blocked by this decision (auto-synced)
-  
+  blocks?: EntityId[];             // Entities blocked by this decision (auto-synced from their depends_on)
+
+  // === IMPACT ===
+  affects?: EntityId[];            // Entities affected/enabled by this decision (M, S, T, DOC, Decision)
+
   // === SUPERSESSION ===
   supersedes?: DecisionId;         // Previous decision this replaces
   superseded_by?: DecisionId;      // Decision that replaced this one (auto-synced)
@@ -541,6 +496,7 @@ interface DecisionFrontmatter {
   decided_on?: string;
   depends_on?: string[];
   blocks?: string[];
+  affects?: string[];
   supersedes?: string;
   superseded_by?: string;
   cssclasses: string[];
@@ -563,13 +519,15 @@ workstream: business
 decided_by: "@founder"
 decided_on: 2024-12-10T00:00:00Z
 depends_on: []
-blocks:
+blocks: []
+affects:
   - S-015
   - DOC-005
 supersedes: null
 superseded_by: null
 cssclasses:
   - canvas-decision
+  - canvas-workstream-business
   - canvas-status-decided
 created_at: 2024-12-08T00:00:00Z
 updated_at: 2024-12-10T00:00:00Z
@@ -689,6 +647,7 @@ implemented_by:
   - S-016
 cssclasses:
   - canvas-document
+  - canvas-workstream-engineering
   - canvas-status-approved
 created_at: 2024-11-15T00:00:00Z
 updated_at: 2024-12-17T00:00:00Z
@@ -766,6 +725,8 @@ All relationships are **fully symmetric** - every forward relationship has a cor
 | **Dependency** |||||
 | `depends_on` | `(MilestoneId\|DecisionId)[]` | `EntityId[]` | `DecisionId[]` | `DecisionId[]` | `DecisionId[]` |
 | `blocks` | `EntityId[]` | `EntityId[]` | `EntityId[]` | `EntityId[]` | `EntityId[]` |
+| **Impact** |||||
+| `affects` | ❌ | ❌ | ❌ | `EntityId[]` | ❌ |
 | **Implementation** |||||
 | `implements` | `DocumentId[]` | `DocumentId[]` | ❌ | ❌ | ❌ |
 | `implemented_by` | ❌ | ❌ | ❌ | ❌ | `(StoryId\|MilestoneId)[]` |
@@ -785,6 +746,7 @@ When a forward relationship is set, the reverse is automatically updated:
 | `Story.parent = M-001` | Add `S-xxx` to `M-001.children` |
 | `Task.parent = S-001` | Add `T-xxx` to `S-001.children` |
 | `*.depends_on` includes `X` | Add `*` to `X.blocks` |
+| `Decision.affects` includes `X` | No auto-sync (one-way relationship) |
 | `Story.implements = [DOC-001]` | Add `S-xxx` to `DOC-001.implemented_by` |
 | `Decision.supersedes = DEC-001` | Set `DEC-001.superseded_by = DEC-xxx` |
 | `Document.previous_version = DOC-001` | Set `DOC-001.next_version = DOC-xxx` |
@@ -805,6 +767,13 @@ When a forward relationship is set, the reverse is automatically updated:
   - Cross-hierarchy dependencies (story in M-002 depends on story in M-001)
   - Decision prerequisites (work waiting for a decision)
   - Sequential work within same parent
+
+#### Impact (`affects`)
+- **Purpose:** Decision impact tracking - "what does this decision enable/affect?"
+- **Example:** `DEC-001.affects = [S-015, DOC-005]` → DEC-001 enables/affects S-015 and DOC-005
+- **Query:** "What does DEC-001 affect?" → `DEC-001.affects`
+- **Note:** This is a one-way relationship (no auto-sync to reverse field)
+- **Migration:** Replaces deprecated `enables` field
 
 #### Implementation (`implements` / `implemented_by`)
 - **Purpose:** Specification delivery - "what work delivers this spec?"
@@ -828,7 +797,7 @@ When a forward relationship is set, the reverse is automatically updated:
 | **Milestone** | Other Milestones (depends_on), Decisions (depends_on), Documents (implements), Stories (children) |
 | **Story** | Milestones (parent), Any entity (depends_on), Documents (implements), Tasks (children) |
 | **Task** | Stories (parent), Decisions (depends_on) |
-| **Decision** | Other Decisions (depends_on, supersedes, superseded_by) |
+| **Decision** | Other Decisions (depends_on, supersedes, superseded_by), Any entity (affects) |
 | **Document** | Decisions (depends_on), Stories/Milestones (implemented_by), Other Documents (previous_version, next_version) |
 
 ## Canvas Integration
@@ -837,8 +806,9 @@ When a forward relationship is set, the reverse is automatically updated:
 
 Visual differentiation is achieved through **CSS classes on individual nodes**, not canvas groups. Each entity's markdown frontmatter includes `cssclasses` that control:
 - **Border thickness** — entity type (milestone=4px, story=2px, task=1px)
-- **Border color** — workstream/effort type
+- **Border color** — workstream type
 - **Visual state** — status indicators
+- **Priority indicators** — priority level (for milestones and stories)
 
 ### Canvas Node Types
 
@@ -886,11 +856,6 @@ interface CanvasData {
 }
 ```
 
-
-  edges: CanvasEdge[];
-}
-```
-
 ### Node Sizing by Entity Type
 
 ```typescript
@@ -934,28 +899,14 @@ function serializeEntity<T extends EntityBase>(entity: T, bodyContent: string): 
 
 ### Type Guards
 
-> ❌ **Not Implemented**: These type guard functions are not exported from the plugin. Type checking is done inline where needed.
-
 ```typescript
-// Type guards for entity types (PLANNED - NOT IMPLEMENTED)
+// Type guards for entity types
 function isMilestone(entity: EntityBase): entity is Milestone {
   return entity.type === 'milestone';
 }
 
 function isStory(entity: EntityBase): entity is Story {
   return entity.type === 'story';
-}
-
-function isTask(entity: EntityBase): entity is Task {
-  return entity.type === 'task';
-}
-
-function isDecision(entity: EntityBase): entity is Decision {
-  return entity.type === 'decision';
-}
-
-function isDocument(entity: EntityBase): entity is Document {
-  return entity.type === 'document';
 }
 
 // ID type guards
@@ -978,117 +929,8 @@ function isDecisionId(id: string): id is DecisionId {
 function isDocumentId(id: string): id is DocumentId {
   return /^DOC-\d+$/.test(id);
 }
-```
 
-### Validation
-
-> ❌ **Not Implemented**: Validation functions are not implemented. Basic field checking is done in `parseFrontmatter()` but no comprehensive validation.
-
-```typescript
-// Validation result (PLANNED - NOT IMPLEMENTED)
-interface ValidationResult {
-  valid: boolean;
-  errors: ValidationError[];
-  warnings: ValidationWarning[];
+function isFeatureId(id: string): id is FeatureId {
+  return /^F-\d+$/.test(id);
 }
-
-interface ValidationError {
-  field: string;
-  message: string;
-  code: string;
-}
-
-interface ValidationWarning {
-  field: string;
-  message: string;
-  suggestion?: string;
-}
-
-// Validate entity against schema
-function validateEntity(entity: unknown, type: EntityType): ValidationResult;
-
-// Validate frontmatter has required fields
-function validateFrontmatter(frontmatter: Record<string, unknown>, type: EntityType): ValidationResult;
 ```
-
----
-
-## Appendix: Complete Type Exports
-
-```typescript
-// Export all types for use in Plugin and MCP
-export type {
-  // Core types
-  EntityType,
-  EntityStatus,
-  MilestoneStatus,
-  StoryStatus,
-  TaskStatus,
-  DecisionStatus,
-  DocumentStatus,
-  Priority,
-  DocumentType,
-  DependencyType,
-  
-  // ID types
-  EntityId,
-  MilestoneId,
-  StoryId,
-  TaskId,
-  DecisionId,
-  DocumentId,
-  InlineTaskId,
-  
-  // Utility types
-  ISODateTime,
-  UserRef,
-  VaultPath,
-  CanvasPath,
-  
-  // Entity types
-  EntityBase,
-  Milestone,
-  Story,
-  Task,
-  Decision,
-  Document,
-  InlineTask,
-  Alternative,
-  VersionInfo,
-  
-  // Frontmatter types
-  MilestoneFrontmatter,
-  StoryFrontmatter,
-  TaskFrontmatter,
-  DecisionFrontmatter,
-  DocumentFrontmatter,
-  
-  // Relationship types
-  DependencyEdge,
-  ResolvedDependency,
-  EntitySummary,
-  HierarchyNode,
-  HierarchyPath,
-  
-  // Canvas types
-  CanvasFileNode,
-  CanvasGroupNode,
-  CanvasEdge,
-  CanvasData,
-  NodeSizeConfig,
-  
-  // Validation types
-  ValidationResult,
-  ValidationError,
-  ValidationWarning,
-};
-```
-
----
-
-## Revision History
-
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.7 | 2025-01-13 | Added implementation status markers, removed accomplishment type |
-| 2.0 | 2024-12-17 | Initial V2 schema definition |
