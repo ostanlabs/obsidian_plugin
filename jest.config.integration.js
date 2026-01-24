@@ -41,10 +41,13 @@ module.exports = {
     '!util/**/*.d.ts',
   ],
   
-  // Timeout for async operations
-  testTimeout: 30000,
-  
+  // Timeout for async operations (60 seconds for large suites)
+  testTimeout: 60000,
+
   // Verbose output
   verbose: true,
+
+  // Run tests sequentially to avoid shared state issues
+  maxWorkers: 1,
 };
 

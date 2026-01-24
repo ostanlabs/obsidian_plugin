@@ -651,7 +651,7 @@ export class PositioningEngineV4 {
 						if (parent) {
 							parent.children.push(node);
 							// Debug logging
-							if (node.entityId === 'DOC-028' || node.containmentParentId === 'S-042') {
+							if (node.entityId === 'DOC-028' || node.containmentParentId === 'S-042' || node.containmentParentId === 'S-083' || node.containmentParentId === 'M-001') {
 								console.log(`[PositioningV4] DEBUG Phase 3: Added ${node.entityId} to ${parent.entityId}.children (now has ${parent.children.length} children)`);
 							}
 						}
@@ -690,6 +690,19 @@ export class PositioningEngineV4 {
 		console.log(`[PositioningV4] Categories: contained=${this.containedEntities.length}, ` +
 			`floating-single=${this.floatingSingleWs.length}, floating-multi=${this.floatingMultiWs.length}, ` +
 			`deferred=${this.deferredEntities.length}, orphan=${this.orphanedEntities.length}`);
+
+		// Debug: Check S-083's children categories
+		const s083 = this.processedNodes.get('S-083');
+		if (s083) {
+			console.log(`[PositioningV4] DEBUG Phase 3: S-083 has ${s083.children.length} children in ProcessedNode`);
+			const s083ChildIds = ['T-156', 'T-157', 'T-158', 'T-159', 'T-160', 'T-161', 'T-162', 'T-163', 'T-253'];
+			for (const childId of s083ChildIds) {
+				const child = this.processedNodes.get(childId);
+				if (child) {
+					console.log(`[PositioningV4] DEBUG Phase 3: ${childId} category=${child.category}, containmentParentId=${child.containmentParentId}`);
+				}
+			}
+		}
 	}
 
 	/**
@@ -2412,15 +2425,34 @@ export class PositioningEngineV4 {
 	}
 
 	private positionChildrenRecursive(parent: ProcessedNode): void {
-		if (parent.children.length === 0) return;
-
-		// Debug logging for S-042
-		if (parent.entityId === 'S-042') {
-			console.log(`[PositioningV4] DEBUG Phase 8: Positioning children of S-042: [${parent.children.map(c => c.entityId).join(', ')}]`);
+		// Debug logging for S-083, M-001, S-042
+		if (parent.entityId === 'S-083' || parent.entityId === 'M-001' || parent.entityId === 'S-042') {
+			console.log(`[PositioningV4] DEBUG Phase 8: positionChildrenRecursive called for ${parent.entityId}, children.length=${parent.children.length}, position=${parent.position ? `(${parent.position.x}, ${parent.position.y})` : 'null'}`);
+			if (parent.children.length > 0) {
+				console.log(`[PositioningV4] DEBUG Phase 8: ${parent.entityId} children: [${parent.children.map(c => c.entityId).join(', ')}]`);
+			}
 		}
+
+		if (parent.children.length === 0) return;
 
 		const parentPos = parent.position!;
 		const hasDeps = this.hasSiblingDependencies(parent.children);
+
+		// Debug logging for S-083
+		if (parent.entityId === 'S-083') {
+			console.log(`[PositioningV4] DEBUG Phase 8: S-083 hasSiblingDependencies=${hasDeps}`);
+			if (hasDeps) {
+				// Find which siblings have dependencies
+				const siblingIds = new Set(parent.children.map(c => c.entityId));
+				for (const child of parent.children) {
+					for (const targetId of [...child.sequencingBefore, ...child.sequencingAfter]) {
+						if (siblingIds.has(targetId)) {
+							console.log(`[PositioningV4] DEBUG Phase 8: S-083 sibling dep: ${child.entityId} -> ${targetId}`);
+						}
+					}
+				}
+			}
+		}
 
 		if (hasDeps) {
 			// Dependency-aware grid layout
@@ -2485,6 +2517,11 @@ export class PositioningEngineV4 {
 			const itemsInTopRow = n % grid.columns || grid.columns;
 			const emptySlots = grid.columns - itemsInTopRow;
 
+			// Debug logging for S-083
+			if (parent.entityId === 'S-083') {
+				console.log(`[PositioningV4] DEBUG Phase 8: S-083 grid layout: ${grid.rows}x${grid.columns}, n=${n}, itemsInTopRow=${itemsInTopRow}, emptySlots=${emptySlots}`);
+			}
+
 			const childPositions: { child: ProcessedNode; row: number; col: number }[] = [];
 			for (let i = 0; i < n; i++) {
 				const adjustedIndex = i + emptySlots;
@@ -2507,6 +2544,12 @@ export class PositioningEngineV4 {
 			const gridStartX = parentPos.x - this.config.childGap - gridWidth;
 			const gridStartY = parentPos.y - this.config.childGap - gridHeight;
 
+			// Debug logging for S-083
+			if (parent.entityId === 'S-083') {
+				console.log(`[PositioningV4] DEBUG Phase 8: S-083 gridWidth=${gridWidth}, gridHeight=${gridHeight}, gridStartX=${gridStartX}, gridStartY=${gridStartY}`);
+				console.log(`[PositioningV4] DEBUG Phase 8: S-083 colWidths=[${colWidths.join(', ')}], rowHeights=[${rowHeights.join(', ')}]`);
+			}
+
 			for (const { child, row, col } of childPositions) {
 				const childNodeSize = this.config.nodeSizes[child.type];
 				const childContainerSize = child.containerSize!;
@@ -2528,6 +2571,11 @@ export class PositioningEngineV4 {
 					width: childNodeSize.width,
 					height: childNodeSize.height,
 				};
+
+				// Debug logging for S-083's children
+				if (parent.entityId === 'S-083') {
+					console.log(`[PositioningV4] DEBUG Phase 8: S-083 child ${child.entityId} at row=${row}, col=${col}, position=(${child.position.x}, ${child.position.y})`);
+				}
 
 				this.positionChildrenRecursive(child);
 			}

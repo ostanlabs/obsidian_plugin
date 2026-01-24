@@ -20,6 +20,7 @@ export default defineScenario({
   },
 
   steps: [
+    command('populate-canvas', {}),
     command('update-frontmatter', {
       path: 'milestones/M-001_MVP.md',
       frontmatter: { status: 'InProgress' }, // Missing space - typo

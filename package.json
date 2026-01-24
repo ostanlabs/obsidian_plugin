@@ -9,6 +9,8 @@
     "version": "node version-bump.mjs && git add manifest.json versions.json",
     "test": "jest",
     "test:watch": "jest --watch",
+    "test:integration": "jest --config jest.config.integration.js",
+    "test:all": "npm run test && npm run test:integration",
     "lint": "eslint . --ext .ts",
     "format": "prettier --write \"**/*.{ts,tsx,json,md}\""
   },
