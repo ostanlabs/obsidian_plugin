@@ -27,6 +27,7 @@ export interface EntityFixture {
   title: string;
   workstream?: string;
   parent?: string;
+  children?: string[];
   status?: ItemStatus;
   priority?: ItemPriority;
   depends_on?: string[];
@@ -34,12 +35,14 @@ export interface EntityFixture {
   affects?: string[];
   implemented_by?: string[];
   documented_by?: string[];
+  archived?: boolean;
   /** Additional frontmatter fields */
   extra?: Record<string, unknown>;
 }
 
 export interface CanvasFixture {
-  name: string;
+  /** Canvas file name (defaults to 'project.canvas') */
+  name?: string;
   nodes?: CanvasNodeFixture[];
   edges?: CanvasEdgeFixture[];
 }
@@ -108,9 +111,13 @@ export interface ScenarioPreconditions {
   /** Entities to create before test */
   entities?: EntityFixture[];
   /** Canvas state */
-  canvas?: CanvasFixture;
+  canvas?: CanvasFixture | null;
   /** Plugin settings overrides */
   settings?: Record<string, unknown>;
+  /** Raw files to create (for migration scenarios, etc.) */
+  files?: Array<{ path: string; content: string }>;
+  /** Optional description of preconditions */
+  description?: string;
 }
 
 // ============================================================================
@@ -170,4 +177,119 @@ export type Expectation =
   | CanvasEdgeExpectation
   | ArrayContainsExpectation
   | NodePositionExpectation;
+
+export interface FileExistsExpectation {
+  check: 'file-exists';
+  path: string;
+  expected: boolean;
+}
+
+export interface FrontmatterExpectation {
+  check: 'frontmatter';
+  path: string;
+  field: string;
+  expected: unknown;
+  /** Optional: use 'contains' for array membership check */
+  mode?: 'equals' | 'contains';
+}
+
+export interface CanvasNodeExpectation {
+  check: 'canvas-node';
+  canvas: string;
+  /** Entity ID to find */
+  entityId: string;
+  expected: boolean;
+}
+
+export interface CanvasEdgeExpectation {
+  check: 'canvas-edge';
+  canvas: string;
+  fromEntityId: string;
+  toEntityId: string;
+  expected: boolean;
+}
+
+export interface ArrayContainsExpectation {
+  check: 'array-contains';
+  path: string;
+  field: string;
+  value: string;
+  expected: boolean;
+}
+
+export interface NodePositionExpectation {
+  check: 'node-position';
+  canvas: string;
+  entityIdA: string;
+  entityIdB: string;
+  /** 'left-of' means A.x + A.width < B.x */
+  relation: 'left-of' | 'right-of' | 'above' | 'below';
+}
+
+// ============================================================================
+// Test Results
+// ============================================================================
+
+export interface ExpectationResult {
+  expectation: Expectation;
+  passed: boolean;
+  actual?: unknown;
+  error?: string;
+}
+
+export interface ScenarioResult {
+  scenario: TestScenario;
+  passed: boolean;
+  results: ExpectationResult[];
+  duration: number;
+  error?: string;
+}
+
+export interface SuiteResult {
+  name: string;
+  fixture: string;
+  scenarios: ScenarioResult[];
+  passed: number;
+  failed: number;
+  duration: number;
+}
+
+export interface TestRunResult {
+  timestamp: string;
+  suites: SuiteResult[];
+  summary: {
+    total: number;
+    passed: number;
+    failed: number;
+    skipped: number;
+  };
+}
+
+// ============================================================================
+// Test Suite Definition
+// ============================================================================
+
+export interface TestSuite {
+  name: string;
+  /** Optional description */
+  description?: string;
+  /** Fixture folder to copy (relative to tests/fixtures/) - optional */
+  fixture?: string;
+  /** Scenarios to run in order */
+  scenarios: TestScenario[];
+  /** If true, reset adapter between each scenario (default: true) */
+  resetBetweenScenarios?: boolean;
+}
+
+// ============================================================================
+// Helper function type for defining scenarios
+// ============================================================================
+
+export function defineScenario(scenario: TestScenario): TestScenario {
+  return scenario;
+}
+
+export function defineSuite(suite: TestSuite): TestSuite {
+  return suite;
+}
 

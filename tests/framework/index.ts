@@ -1,6 +1,6 @@
 /**
  * Test Framework - Main Entry Point
- * 
+ *
  * Re-exports all framework components for easy importing.
  */
 
@@ -12,6 +12,9 @@ export * from './adapter';
 
 // Mock Adapter
 export { MockAdapter } from './mockAdapter';
+
+// Obsidian Adapter (for live testing)
+export { ObsidianAdapter } from './obsidianAdapter';
 
 // Runner
 export { ScenarioRunner, runScenarios, runSingleScenario } from './runner';

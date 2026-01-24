@@ -1,79 +1,28 @@
 # Contributing to Canvas Project Manager
 
-Thank you for your interest in contributing! This document provides guidelines and instructions for contributing to the project.
+Thank you for your interest in contributing! This document provides guidelines for contributing to the project.
 
-## 🎯 Ways to Contribute
+## Ways to Contribute
 
 - **Bug Reports**: Report issues you encounter
 - **Feature Requests**: Suggest new features or improvements
 - **Code Contributions**: Submit bug fixes or new features
 - **Documentation**: Improve or expand documentation
-- **Testing**: Help test new features and report feedback
 
-## 🚀 Getting Started
+## Getting Started
 
-### Development Setup
+For development setup, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-1. **Fork and Clone**
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/obsidian_plugin.git
-   cd obsidian_plugin
-   ```
+### Contribution Workflow
 
-2. **Install Dependencies**
-   ```bash
-   npm install
-   ```
+1. **Fork and clone** the repository
+2. **Create a feature branch**: `git checkout -b feature/your-feature-name`
+3. **Make your changes** following the code style guidelines below
+4. **Test your changes**: `npm test && npm run lint`
+5. **Commit** using conventional commits format
+6. **Push and create a Pull Request**
 
-3. **Build the Plugin**
-   ```bash
-   npm run build
-   ```
-
-4. **Deploy to Test Vault**
-   ```bash
-   mkdir -p /path/to/vault/.obsidian/plugins/canvas-project-manager
-   cp main.js manifest.json styles.css /path/to/vault/.obsidian/plugins/canvas-project-manager/
-   ```
-
-5. **Start Development Mode**
-   ```bash
-   npm run dev
-   # This will watch for changes and rebuild automatically
-   ```
-
-### Development Workflow
-
-1. **Create a Feature Branch**
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-2. **Make Your Changes**
-   - Write clean, documented code
-   - Follow existing code style
-   - Add tests for new functionality
-
-3. **Test Your Changes**
-   ```bash
-   make test        # Run tests
-   make lint        # Check code style
-   make format      # Auto-format code
-   ```
-
-4. **Commit Your Changes**
-   ```bash
-   git add .
-   git commit -m "feat: add your feature description"
-   ```
-
-5. **Push and Create PR**
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-   Then create a Pull Request on GitHub
-
-## 📝 Code Style
+## Code Style
 
 ### TypeScript Guidelines
 
@@ -85,27 +34,17 @@ Thank you for your interest in contributing! This document provides guidelines a
 ### Code Organization
 
 - **Modular**: Keep files focused and single-purpose
-- **DRY**: Don't repeat yourself - extract common logic
-- **Naming**: Use descriptive names (no single letters except loop counters)
-- **Comments**: Explain "why", not "what" (code should be self-documenting)
+- **DRY**: Extract common logic into utilities
+- **Naming**: Use descriptive names
+- **Comments**: Explain "why", not "what"
 
-### File Structure
-
-```
-util/           # Pure utility functions (no plugin dependencies)
-ui/             # UI components and modals
-notion/         # Notion API integration
-tests/          # Test files (mirror src structure)
-```
-
-### Example Code Style
+### Example
 
 ```typescript
 /**
  * Generates a unique ID for a structured item
  * @param prefix - ID prefix (e.g., "T" for tasks)
  * @param existingIds - Set of IDs already in use
- * @param padding - Number of digits for zero-padding
  * @returns New unique ID (e.g., "T001")
  */
 export function generateUniqueId(
@@ -115,143 +54,50 @@ export function generateUniqueId(
 ): string {
   let counter = 1;
   let id: string;
-  
+
   do {
     id = `${prefix}${counter.toString().padStart(padding, '0')}`;
     counter++;
   } while (existingIds.has(id));
-  
+
   return id;
 }
 ```
 
-## 🧪 Testing
+## Bug Reports
 
-### Writing Tests
-
-- **Unit Tests**: Test individual functions in isolation
-- **Integration Tests**: Test component interactions
-- **Coverage**: Aim for >80% code coverage
-- **Edge Cases**: Test boundary conditions and error cases
-
-### Test Structure
-
-```typescript
-describe('generateUniqueId', () => {
-  it('should generate ID with correct prefix', () => {
-    const id = generateUniqueId('T', new Set(), 3);
-    expect(id).toMatch(/^T\d{3}$/);
-  });
-  
-  it('should skip existing IDs', () => {
-    const existing = new Set(['T001', 'T002']);
-    const id = generateUniqueId('T', existing, 3);
-    expect(id).toBe('T003');
-  });
-});
-```
-
-### Running Tests
-
-```bash
-npm test                  # Run all tests
-npm run test -- --watch   # Watch mode
-npm test -- --coverage    # With coverage report
-```
-
-## 📚 Documentation
-
-### Code Documentation
-
-- **JSDoc Comments**: Document all public functions
-- **Type Annotations**: Self-document with good types
-- **Inline Comments**: Explain complex logic
-
-### User Documentation
-
-- **README.md**: Main user guide
-- **docs/ARCHITECTURE.md**: Technical architecture
-- **docs/GETTING_STARTED.md**: Quick start guide
-- **CHANGELOG.md**: Update with all changes
-
-## 🐛 Bug Reports
-
-### Before Reporting
-
+Before reporting:
 1. Check existing issues for duplicates
 2. Test on latest version
-3. Try to reproduce in a clean vault
-4. Check console for errors (Ctrl/Cmd+Shift+I)
+3. Check console for errors (`Ctrl/Cmd+Shift+I`)
 
-### Report Template
+Include in your report:
+- Clear description of the bug
+- Steps to reproduce
+- Expected vs actual behavior
+- Environment (Obsidian version, OS)
+- Console errors if any
 
-```markdown
-**Description**
-Clear description of the bug
+## Feature Requests
 
-**Steps to Reproduce**
-1. Go to...
-2. Click on...
-3. See error...
-
-**Expected Behavior**
-What should happen
-
-**Actual Behavior**
-What actually happens
-
-**Environment**
-- Obsidian Version: X.X.X
-- Plugin Version: X.X.X
-- OS: macOS/Windows/Linux
-
-**Console Errors**
-```
-Paste any console errors here
-```
-
-**Screenshots**
-If applicable
-```
-
-## ✨ Feature Requests
-
-### Before Requesting
-
+Before requesting:
 1. Check existing issues/discussions
 2. Consider if it fits the plugin's scope
-3. Think about implementation approach
 
-### Request Template
+Include in your request:
+- Feature description
+- Use case / why it's needed
+- Proposed solution
 
-```markdown
-**Feature Description**
-What feature you'd like to see
-
-**Use Case**
-Why this feature is needed
-
-**Proposed Solution**
-How you envision it working
-
-**Alternatives Considered**
-Other approaches you've thought about
-
-**Additional Context**
-Any other relevant information
-```
-
-## 🔄 Pull Request Process
+## Pull Request Process
 
 ### PR Checklist
 
 - [ ] Code follows style guidelines
 - [ ] Tests added for new functionality
-- [ ] All tests pass (`make test`)
-- [ ] Code linted and formatted (`make lint && make format`)
-- [ ] Documentation updated
+- [ ] All tests pass (`npm test`)
+- [ ] Code linted (`npm run lint`)
 - [ ] CHANGELOG.md updated
-- [ ] Commits follow conventional commits format
 
 ### Commit Message Format
 
@@ -261,62 +107,22 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 feat: add new feature
 fix: fix bug in X
 docs: update README
-style: format code
 refactor: restructure Y
 test: add tests for Z
 chore: update dependencies
 ```
 
-Examples:
-```
-feat: add batch conversion for canvas nodes
-fix: prevent race condition in canvas updates
-docs: add troubleshooting section for Notion sync
-refactor: extract canvas manipulation to utility module
-test: add integration tests for note creation
-```
+### Review Process
 
-### PR Review Process
+1. Automated checks must pass
+2. Maintainer reviews code
+3. Address any requested changes
+4. Once approved, will be merged
 
-1. **Automated Checks**: All CI checks must pass
-2. **Code Review**: Maintainer will review code
-3. **Feedback**: Address any requested changes
-4. **Approval**: Once approved, will be merged
-5. **Release**: Changes included in next release
-
-## 🤝 Community Guidelines
-
-### Be Respectful
-
-- Treat everyone with respect and kindness
-- Welcome newcomers and help them learn
-- Provide constructive feedback
-- Assume good intentions
-
-### Communication
-
-- **GitHub Issues**: Bug reports and feature requests
-- **Pull Requests**: Code contributions
-- **Discussions**: Questions and general discussion
-
-## 📄 License
+## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.
 
-## 🙏 Recognition
-
-Contributors will be:
-- Listed in CONTRIBUTORS.md
-- Mentioned in release notes
-- Credited in relevant documentation
-
-## ❓ Questions?
-
-- **General Questions**: Open a GitHub Discussion
-- **Bug Reports**: Open an issue
-- **Private Matters**: Contact maintainers directly
-
 ---
 
-Thank you for contributing to Canvas Project Manager! 🎉
-
+Thank you for contributing! 🎉

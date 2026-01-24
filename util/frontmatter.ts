@@ -38,6 +38,21 @@ function parseYamlValue(value: string): string | string[] | boolean | number {
 		}
 	}
 
+	// Handle quoted strings (both single and double quotes)
+	if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+	    (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+		return trimmed.slice(1, -1);
+	}
+
+	// Handle booleans
+	if (trimmed === 'true') return true;
+	if (trimmed === 'false') return false;
+
+	// Handle numbers
+	if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+		return parseFloat(trimmed);
+	}
+
 	return trimmed;
 }
 

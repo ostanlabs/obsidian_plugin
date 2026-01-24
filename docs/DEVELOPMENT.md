@@ -1,5 +1,12 @@
 # Canvas Project Manager - Development Guide
 
+## Prerequisites
+
+- Node.js v16 or higher
+- npm (comes with Node.js)
+- Obsidian (latest version)
+- An Obsidian vault for testing
+
 ## Quick Start
 
 ```bash
@@ -14,104 +21,68 @@ mkdir -p /path/to/vault/.obsidian/plugins/canvas-project-manager
 cp main.js manifest.json styles.css /path/to/vault/.obsidian/plugins/canvas-project-manager/
 ```
 
-## Development Workflow
+Then enable in Obsidian: **Settings → Community Plugins → Canvas Project Manager**
 
-### 1. Setup Development Environment
+## Development Workflow
 
 ```bash
 # Start watch mode for auto-rebuild
 npm run dev
 ```
 
-### 2. Making Changes
-
 1. Edit source files in `main.ts`, `util/`, `notion/`, etc.
-2. Watch mode will automatically rebuild
-3. In Obsidian, reload plugin (Ctrl+R with debug mode enabled)
+2. Watch mode automatically rebuilds
+3. Reload plugin in Obsidian (`Ctrl+R` with debug mode enabled)
 4. Test changes
 
-### 3. Testing
+## Commands Reference
 
 ```bash
-# Run tests once
-npm test
-
-# Run tests in watch mode
-npm test -- --watch
-
-# Run linter
-npm run lint
+npm install            # Install dependencies
+npm run build          # Production build
+npm run dev            # Development build with watch
+npm test               # Run tests
+npm test -- --watch    # Run tests in watch mode
+npm run lint           # Run linter
 ```
 
-## Architecture
+## Project Structure
 
-### Core Components
-
-1. **main.ts**: Plugin entry point, command registration, orchestration (~5900 lines)
-2. **settings.ts**: Settings UI and configuration management
-3. **types.ts**: TypeScript interfaces and type definitions
-
-### Utility Modules
-
-- **util/canvas.ts**: Canvas JSON manipulation (read/write nodes, edges)
-- **util/canvasView.ts**: Canvas DOM manipulation (styling, visibility toggles)
-- **util/entityNavigator.ts**: Entity relationship navigation and indexing
-- **util/fileNaming.ts**: Title-based file naming with collision detection
-- **util/frontmatter.ts**: YAML frontmatter parsing/serialization
-- **util/idGenerator.ts**: ID generation and scanning
-- **util/logger.ts**: Logging to console and file
-- **util/template.ts**: Template processing and placeholders
-
-### UI Components
-
-- **ui/StructuredItemModal.ts**: Modal for creating new items
-
-### Integration
-
-- **notion/notionClient.ts**: Notion API wrapper
-- **notion/contentSync.ts**: Content synchronization
+```
+├── main.ts              # Plugin entry point
+├── types.ts             # TypeScript interfaces
+├── settings.ts          # Settings UI
+├── styles.css           # Visual styling
+├── ui/                  # UI components
+│   └── StructuredItemModal.ts
+├── util/                # Utilities
+│   ├── canvas.ts        # Canvas JSON manipulation
+│   ├── canvasView.ts    # Canvas DOM manipulation
+│   ├── entityNavigator.ts # Entity navigation
+│   ├── fileNaming.ts    # File naming utilities
+│   ├── frontmatter.ts   # YAML frontmatter
+│   ├── idGenerator.ts   # ID generation
+│   ├── logger.ts        # Logging
+│   └── template.ts      # Template processing
+├── notion/              # Notion integration
+│   ├── notionClient.ts  # Notion API wrapper
+│   └── contentSync.ts   # Content synchronization
+└── tests/               # Test files
+```
 
 ## Key Concepts
 
-### Entity Types
-
-The plugin supports 6 entity types with distinct visual styles:
-
-| Type | ID Prefix | Border Style | Use Case |
-|------|-----------|--------------|----------|
-| Milestone | M-xxx | 3px solid | High-level project goals |
-| Story | S-xxx | 2px solid | User stories, features |
-| Task | T-xxx | 1px solid | Actionable work items |
-| Decision | DEC-xxx | 2px dashed | Architectural decisions |
-| Document | DOC-xxx | 1px dotted | Technical specs, designs |
-| Accomplishment | A-xxx | 2px solid | Completed achievements |
-
 ### Canvas Manipulation
 
-Canvas files are JSON with this structure:
+Canvas files are JSON with nodes and edges:
 
 ```json
 {
   "nodes": [
-    {
-      "id": "unique-id",
-      "type": "text|file|link|group",
-      "x": 0,
-      "y": 0,
-      "width": 250,
-      "height": 60,
-      "text": "...",
-      "file": "path/to/file.md"
-    }
+    { "id": "unique-id", "type": "file", "x": 0, "y": 0, "file": "path/to/file.md" }
   ],
   "edges": [
-    {
-      "id": "edge-id",
-      "fromNode": "node-id",
-      "fromSide": "right",
-      "toNode": "node-id",
-      "toSide": "left"
-    }
+    { "id": "edge-id", "fromNode": "node-id", "toNode": "node-id" }
   ]
 }
 ```
@@ -120,7 +91,7 @@ We read/write this JSON directly rather than using Canvas internal APIs.
 
 ### Entity Frontmatter
 
-Entities use YAML frontmatter with these key fields:
+Entities use YAML frontmatter:
 
 ```yaml
 ---
@@ -129,34 +100,10 @@ type: milestone
 title: "Project Alpha Launch"
 status: active
 workstream: engineering
-parent: null           # Parent entity ID
-depends_on: []         # Dependency IDs
-enables: []            # Entities this enables (for decisions)
-archived: false
+parent: null
+depends_on: []
 ---
 ```
-
-### Archive System
-
-Entities with `status: archived` or `archived: true` are:
-1. Moved to type-specific archive folders (`archive/milestones/`, etc.)
-2. Removed from canvas
-3. Excluded from future vault scans
-
-### Entity Navigator
-
-The plugin maintains an in-memory index of all entities for fast navigation:
-- Parent/child relationships
-- Dependencies (`depends_on`)
-- Enabled entities (`enables`)
-- Related documents and decisions
-
-### Notion Sync
-
-- Uses official `@notionhq/client` library
-- One-way sync: Obsidian → Notion
-- Stores Notion page ID in frontmatter
-- Creates/updates pages based on presence of page ID
 
 ## Adding New Features
 
@@ -178,13 +125,11 @@ this.addCommand({
 ```typescript
 // 1. Add to types.ts interface
 export interface CanvasItemFromTemplateSettings {
-  // ... existing settings
   yourNewSetting: string;
 }
 
 // 2. Add to DEFAULT_SETTINGS in types.ts
 export const DEFAULT_SETTINGS = {
-  // ... existing defaults
   yourNewSetting: "default value",
 };
 
@@ -202,81 +147,25 @@ new Setting(containerEl)
   );
 ```
 
-### Adding a New Template Placeholder
+## Testing
+
+Place tests in `tests/` directory with `.test.ts` extension:
 
 ```typescript
-// In util/template.ts replacePlaceholders()
-result = result.replace(/\{\{your_placeholder\}\}/g, frontmatter.yourField);
-```
-
-### Adding a New Notion Property
-
-```typescript
-// In notion/notionClient.ts createDatabase()
-// Add to properties object:
-"Your Property": {
-  rich_text: {}, // or select, date, etc.
-},
-
-// In notion/notionClient.ts buildProperties()
-// Add to properties object:
-"Your Property": {
-  rich_text: [
-    {
-      text: {
-        content: frontmatter.yourField,
-      },
-    },
-  ],
-},
-```
-
-## Testing Guidelines
-
-### Unit Tests
-
-Place tests in `tests/` directory with `.test.ts` extension.
-
-```typescript
-import { yourFunction } from "../util/yourModule";
-
 describe("YourModule", () => {
-  describe("yourFunction", () => {
-    it("should do something", () => {
-      const result = yourFunction("input");
-      expect(result).toBe("expected");
-    });
+  it("should do something", () => {
+    const result = yourFunction("input");
+    expect(result).toBe("expected");
   });
 });
 ```
 
-### Mocking Obsidian API
-
-```typescript
-const mockApp: any = {
-  vault: {
-    read: jest.fn(),
-    write: jest.fn(),
-  },
-  // ... other methods
-};
-```
-
 ## Debugging
-
-### Enable Debug Mode
-
-1. Obsidian Settings → Community Plugins → Canvas Project Manager
-2. Enable "Show debug info" (if available)
-3. Open Developer Tools: Ctrl+Shift+I (Cmd+Opt+I on Mac)
 
 ### View Logs
 
 ```bash
-# In vault
 cat .obsidian/plugins/canvas-project-manager/plugin.log
-
-# Or tail in real-time
 tail -f .obsidian/plugins/canvas-project-manager/plugin.log
 ```
 
@@ -285,45 +174,38 @@ tail -f .obsidian/plugins/canvas-project-manager/plugin.log
 ```typescript
 await this.logger?.debug("Debug message", { data: someData });
 await this.logger?.info("Info message");
-await this.logger?.warn("Warning message");
 await this.logger?.error("Error message", error);
 ```
 
-## Performance Considerations
+### Developer Tools
 
-### ID Generation
-- Scans all markdown files on each ID generation
-- For large vaults (1000+ files), consider caching
-- Current implementation is acceptable for most use cases
+Open with `Ctrl+Shift+I` (or `Cmd+Opt+I` on Mac) to view console errors.
 
-### Canvas Updates
-- Reading/writing JSON is fast
-- No performance issues expected
+## Troubleshooting
 
-### Notion API
-- Rate limited by Notion (3 requests/second)
-- Plugin doesn't batch requests in v1
-- Future: implement request queue
+### Build Fails
 
-## Code Style
+```bash
+rm -rf node_modules
+npm install
+npm run build
+```
 
-### TypeScript
-- Use strict typing
-- Avoid `any` where possible
-- Document complex functions
+### Plugin Not Loading
 
-### Formatting
-- Tabs for indentation (Obsidian convention)
-- Run `npm run lint` before committing
+- Check `main.js` exists in plugin folder
+- Verify `manifest.json` is valid JSON
+- Check console for errors
+- Restart Obsidian
 
-### Naming
-- camelCase for functions and variables
-- PascalCase for classes and interfaces
-- UPPER_SNAKE_CASE for constants
+### Tests Failing
+
+```bash
+npx jest --clearCache
+npm test
+```
 
 ## Release Process
-
-### Build Release
 
 ```bash
 # Clean build
@@ -332,6 +214,9 @@ npm run build
 
 # Verify files
 ls -la main.js manifest.json styles.css
+
+# Create release archive
+zip -r canvas-project-manager-vX.X.X.zip main.js manifest.json styles.css
 ```
 
 ### Testing Checklist
@@ -339,36 +224,9 @@ ls -la main.js manifest.json styles.css
 - [ ] All tests pass (`npm test`)
 - [ ] Linter passes (`npm run lint`)
 - [ ] Manual testing in Obsidian
-- [ ] Test with fresh vault
-- [ ] Test Notion integration
 - [ ] Test entity navigation
 - [ ] Test archive functionality
 - [ ] Test canvas population
-
-## Common Issues
-
-### TypeScript Errors
-
-```bash
-# Check types
-npx tsc --noEmit
-
-# Fix with linter
-npm run lint
-```
-
-### Plugin Not Loading
-
-- Check console for errors
-- Verify `main.js` is up to date
-- Check `manifest.json` is valid JSON
-- Restart Obsidian
-
-### Tests Failing
-
-- Clear Jest cache: `npx jest --clearCache`
-- Check mock data matches interfaces
-- Verify imports are correct
 
 ## Resources
 
@@ -376,11 +234,3 @@ npm run lint
 - [Obsidian API Reference](https://github.com/obsidianmd/obsidian-api)
 - [Notion API Documentation](https://developers.notion.com/)
 - [Canvas Format Spec](https://jsoncanvas.org/)
-
-## Getting Help
-
-- Check logs: `.obsidian/plugins/canvas-project-manager/plugin.log`
-- Console errors: Ctrl+Shift+I → Console tab
-- Review test files for usage examples
-- Check GitHub issues
-

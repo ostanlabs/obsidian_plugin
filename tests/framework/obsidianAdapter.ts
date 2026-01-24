@@ -156,3 +156,118 @@ export class ObsidianAdapter implements TestAdapter {
     throw new Error('Not implemented - use MockAdapter for CI testing');
   }
 
+  // --------------------------------------------------------------------------
+  // Command Execution
+  // --------------------------------------------------------------------------
+
+  async executeCommand(commandId: string, input?: Record<string, unknown>): Promise<void> {
+    // Store input for modal auto-fill
+    if (input) {
+      (this.plugin as any)._testInput = input;
+    }
+
+    // Execute the command
+    await (this.app as any).commands.executeCommandById(
+      `canvas-project-manager:${commandId}`
+    );
+
+    // Clear test input
+    (this.plugin as any)._testInput = undefined;
+  }
+
+  // --------------------------------------------------------------------------
+  // Fixture Setup (stub - delegates to MockAdapter logic)
+  // --------------------------------------------------------------------------
+
+  async createEntity(fixture: EntityFixture): Promise<string> {
+    // TODO: Implement entity creation
+    throw new Error('Not implemented - use MockAdapter for CI testing');
+  }
+
+  async createCanvas(fixture: CanvasFixture): Promise<void> {
+    const canvasData: CanvasData = {
+      nodes: fixture.nodes?.map(n => ({
+        id: n.id,
+        type: n.type,
+        file: n.file,
+        text: n.text,
+        x: n.x,
+        y: n.y,
+        width: n.width,
+        height: n.height,
+        color: n.color,
+      })) || [],
+      edges: fixture.edges?.map(e => ({
+        id: e.id,
+        fromNode: e.fromNode,
+        toNode: e.toNode,
+        fromSide: e.fromSide,
+        toSide: e.toSide,
+        label: e.label,
+      })) || [],
+    };
+
+    await this.createFile(fixture.name, JSON.stringify(canvasData, null, 2));
+  }
+
+  async copyFixture(fixtureName: string): Promise<void> {
+    // TODO: Copy from plugin's fixtures folder
+    throw new Error('Not implemented - use MockAdapter for CI testing');
+  }
+
+  // --------------------------------------------------------------------------
+  // Verification (stub)
+  // --------------------------------------------------------------------------
+
+  async verifyExpectation(expectation: Expectation): Promise<ExpectationResult> {
+    // TODO: Implement verification
+    throw new Error('Not implemented - use MockAdapter for CI testing');
+  }
+
+  // --------------------------------------------------------------------------
+  // Results Reporting
+  // --------------------------------------------------------------------------
+
+  async reportResults(results: TestRunResult): Promise<void> {
+    // Show results in a modal
+    // TODO: Create TestResultsModal component
+    console.log('Test Results:', JSON.stringify(results, null, 2));
+
+    // Also write to file for persistence
+    const outputPath = '_test_workspace/test-results.json';
+    await this.createFile(outputPath, JSON.stringify(results, null, 2));
+  }
+
+  // --------------------------------------------------------------------------
+  // Helpers
+  // --------------------------------------------------------------------------
+
+  private resolvePath(path: string): string {
+    // Prefix with test workspace
+    if (path.startsWith('_test_workspace/')) {
+      return path;
+    }
+    return `_test_workspace/${path}`;
+  }
+
+  private async ensureParentFolder(filePath: string): Promise<void> {
+    const parts = filePath.split('/');
+    parts.pop(); // Remove filename
+
+    let currentPath = '';
+    for (const part of parts) {
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      if (!await this.app.vault.adapter.exists(currentPath)) {
+        await this.app.vault.createFolder(currentPath);
+      }
+    }
+  }
+
+  private async deleteFolder(folderPath: string): Promise<void> {
+    const folder = this.app.vault.getAbstractFileByPath(folderPath);
+    if (folder) {
+      await this.app.vault.delete(folder, true);
+    }
+  }
+}
+
