@@ -15,10 +15,7 @@ export default defineScenario({
     entities: [
       milestone('M-001', { title: 'To Archive', workstream: 'engineering', archived: true }),
     ],
-    folders: {
-      'archive': false,
-      'archive/milestones': false,
-    },
+    // Note: archive folder intentionally NOT created - test verifies it gets created
     canvas: { nodes: [], edges: [] },
     description: 'M-001 has archived: true, archive folder does not exist',
   },

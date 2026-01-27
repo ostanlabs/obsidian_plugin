@@ -22,6 +22,7 @@ export default defineScenario({
   },
 
   steps: [
+    command('populate-canvas', {}),
     command('reposition-nodes', {}),
   ],
 
