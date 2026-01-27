@@ -1,0 +1,5 @@
+# Base Vault Fixture
+# 
+# This folder contains the minimal vault structure for tests.
+# Folders are created dynamically by the test framework.
+
