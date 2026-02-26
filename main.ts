@@ -624,6 +624,15 @@ private registerCommands(): void {
 			await this.bulkLinkFeatures();
 		},
 	});
+
+	// Command: Unarchive all stories and tasks
+	this.addCommand({
+		id: "unarchive-stories-and-tasks",
+		name: "Project Canvas: Unarchive All Stories and Tasks",
+		callback: async () => {
+			await this.unarchiveStoriesAndTasks();
+		},
+	});
 }
 
 	/**
@@ -4895,6 +4904,304 @@ private registerCommands(): void {
 	}
 
 	/**
+	 * Show unarchive confirmation dialog and perform unarchive
+	 */
+	private async unarchiveStoriesAndTasks(): Promise<void> {
+		// Get project root folder from settings or current canvas
+		const projectRoot = this.getProjectRootFolder();
+		const archiveFolder = projectRoot ? `${projectRoot}/archive` : 'archive';
+
+		// First, count archived files by type by scanning the archive folder
+		const allFiles = this.app.vault.getMarkdownFiles();
+		const typeToFolder: Record<string, string> = {
+			milestone: 'milestones',
+			story: 'stories',
+			task: 'tasks',
+			decision: 'decisions',
+			document: 'documents',
+		};
+		const allEntityTypes = Object.keys(typeToFolder);
+
+		// Filter to files in the project's archive folder
+		const archivedFiles = allFiles.filter(f =>
+			f.path.startsWith(`${archiveFolder}/`)
+		);
+
+		// Count files by entity type based on frontmatter
+		const counts: Record<string, number> = {};
+		for (const type of allEntityTypes) {
+			counts[type] = 0;
+		}
+
+		for (const file of archivedFiles) {
+			try {
+				const content = await this.app.vault.cachedRead(file);
+				const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+				if (frontmatterMatch) {
+					const typeMatch = frontmatterMatch[1].match(/^type:\s*(.+)$/m);
+					if (typeMatch) {
+						const entityType = typeMatch[1].trim().toLowerCase();
+						if (allEntityTypes.includes(entityType)) {
+							counts[entityType]++;
+						}
+					}
+				}
+			} catch (e) {
+				// Skip files that can't be read
+			}
+		}
+
+		// Show confirmation modal with checkboxes
+		const result = await this.showUnarchiveConfirmationModal(counts, typeToFolder, archiveFolder);
+		if (!result || result.selectedTypes.length === 0) {
+			return;
+		}
+
+		// Perform the unarchive
+		await this.performUnarchive(result.selectedTypes, typeToFolder, archiveFolder);
+	}
+
+	/**
+	 * Get the project root folder from the active canvas or settings
+	 */
+	private getProjectRootFolder(): string {
+		// Try to get from active canvas
+		const canvasFile = this.getActiveCanvasFile();
+		if (canvasFile) {
+			// Canvas is at project root, e.g., "Projects/AgentPlatform/project.canvas"
+			const parts = canvasFile.path.split('/');
+			if (parts.length > 1) {
+				parts.pop(); // Remove filename
+				return parts.join('/');
+			}
+		}
+		return '';
+	}
+
+	/**
+	 * Show confirmation modal for unarchiving with entity type selection
+	 */
+	private async showUnarchiveConfirmationModal(
+		counts: Record<string, number>,
+		typeToFolder: Record<string, string>,
+		archiveFolder: string
+	): Promise<{ selectedTypes: string[] } | null> {
+		return new Promise((resolve) => {
+			const modal = new (class extends Modal {
+				selectedTypes: Set<string> = new Set(['story', 'task']); // Default selection
+
+				constructor(app: App) {
+					super(app);
+				}
+
+				onOpen() {
+					const { contentEl } = this;
+					contentEl.empty();
+					contentEl.createEl("h2", { text: "Unarchive Entities" });
+					contentEl.createEl("p", {
+						text: `Scanning: ${archiveFolder}/`,
+						cls: "setting-item-description"
+					});
+					contentEl.createEl("p", {
+						text: "Select which entity types to unarchive. Files will be moved back to their original locations.",
+						cls: "setting-item-description"
+					});
+
+					// Create checkboxes for each entity type
+					const checkboxContainer = contentEl.createDiv({ cls: "unarchive-checkbox-container" });
+					checkboxContainer.style.marginBottom = "16px";
+
+					for (const [type, folder] of Object.entries(typeToFolder)) {
+						const count = counts[type] || 0;
+						const itemDiv = checkboxContainer.createDiv({ cls: "unarchive-checkbox-item" });
+						itemDiv.style.display = "flex";
+						itemDiv.style.alignItems = "center";
+						itemDiv.style.marginBottom = "8px";
+
+						const checkbox = itemDiv.createEl("input", { type: "checkbox" });
+						checkbox.id = `unarchive-${type}`;
+						checkbox.checked = this.selectedTypes.has(type);
+						checkbox.disabled = count === 0;
+						checkbox.style.marginRight = "8px";
+						checkbox.addEventListener("change", () => {
+							if (checkbox.checked) {
+								this.selectedTypes.add(type);
+							} else {
+								this.selectedTypes.delete(type);
+							}
+						});
+
+						const label = itemDiv.createEl("label");
+						label.htmlFor = `unarchive-${type}`;
+						label.textContent = `${type.charAt(0).toUpperCase() + type.slice(1)}s`;
+						label.style.marginRight = "8px";
+
+						const countSpan = itemDiv.createEl("span", {
+							text: `(${count} archived)`,
+							cls: count === 0 ? "faint" : ""
+						});
+						countSpan.style.color = count === 0 ? "var(--text-muted)" : "var(--text-normal)";
+					}
+
+					// Total count
+					const totalCount = Object.values(counts).reduce((a, b) => a + b, 0);
+					contentEl.createEl("p", {
+						text: `Total archived entities: ${totalCount}`,
+						cls: "setting-item-description"
+					});
+
+					// Buttons
+					const buttonContainer = contentEl.createDiv({ cls: "modal-button-container" });
+					buttonContainer.style.display = "flex";
+					buttonContainer.style.justifyContent = "flex-end";
+					buttonContainer.style.gap = "8px";
+					buttonContainer.style.marginTop = "16px";
+
+					const cancelBtn = buttonContainer.createEl("button", { text: "Cancel" });
+					cancelBtn.addEventListener("click", () => {
+						this.close();
+					});
+
+					const confirmBtn = buttonContainer.createEl("button", {
+						text: "Unarchive Selected",
+						cls: "mod-cta"
+					});
+					confirmBtn.addEventListener("click", () => {
+						this.close();
+					});
+				}
+
+				onClose() {
+					if (this.selectedTypes.size > 0) {
+						resolve({ selectedTypes: Array.from(this.selectedTypes) });
+					} else {
+						resolve(null);
+					}
+				}
+			})(this.app);
+			modal.open();
+		});
+	}
+
+	/**
+	 * Perform the actual unarchive operation
+	 */
+	private async performUnarchive(
+		typesToUnarchive: string[],
+		typeToFolder: Record<string, string>,
+		archiveFolder: string
+	): Promise<number> {
+		console.group('[Canvas Plugin] performUnarchive');
+		console.log('Archive folder:', archiveFolder);
+		new Notice(`🔍 Scanning ${archiveFolder}/...`);
+
+		let unarchivedCount = 0;
+
+		try {
+			const allFiles = this.app.vault.getMarkdownFiles();
+			console.log('Total markdown files in vault:', allFiles.length);
+
+			// Filter to files in the project's archive folder
+			const archivedFiles = allFiles.filter(f => f.path.startsWith(`${archiveFolder}/`));
+			console.log('Files in archive folder:', archivedFiles.length);
+
+			// Get project root (parent of archive folder)
+			const projectRoot = archiveFolder.endsWith('/archive')
+				? archiveFolder.slice(0, -8)
+				: archiveFolder.split('/').slice(0, -1).join('/');
+
+			let processedCount = 0;
+			for (const file of archivedFiles) {
+				try {
+					const content = await this.app.vault.read(file);
+					const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+					if (!frontmatterMatch) {
+						console.log(`  [SKIP] No frontmatter: ${file.path}`);
+						continue;
+					}
+
+					const frontmatterText = frontmatterMatch[1];
+
+					// Get entity type
+					const typeMatch = frontmatterText.match(/^type:\s*(.+)$/m);
+					if (!typeMatch) {
+						console.log(`  [SKIP] No type field in: ${file.path}`);
+						continue;
+					}
+
+					const entityType = typeMatch[1].trim().toLowerCase();
+					if (!typesToUnarchive.includes(entityType)) {
+						console.log(`  [SKIP] Type not selected: ${file.path} (type=${entityType})`);
+						continue;
+					}
+
+					// Determine destination folder
+					const destFolder = typeToFolder[entityType] || entityType + 's';
+					const destPath = projectRoot ? `${projectRoot}/${destFolder}/${file.name}` : `${destFolder}/${file.name}`;
+
+					// Ensure destination folder exists
+					try {
+						const destFolderPath = projectRoot ? `${projectRoot}/${destFolder}` : destFolder;
+						const folder = this.app.vault.getAbstractFileByPath(destFolderPath);
+						if (!folder) {
+							console.log(`    Creating folder: ${destFolderPath}`);
+							await this.app.vault.createFolder(destFolderPath);
+						}
+					} catch (folderError) {
+						// Folder might already exist - ignore
+						console.log(`    Folder check/create: ${destFolder} (may already exist)`);
+					}
+
+					// Check if destination file already exists
+					const existingFile = this.app.vault.getAbstractFileByPath(destPath);
+					if (existingFile instanceof TFile) {
+						// Destination exists - delete the archived duplicate quietly
+						console.log(`    [DUPLICATE] Destination exists, deleting archived file: ${file.path}`);
+						await this.app.vault.delete(file);
+						unarchivedCount++; // Count as processed
+						processedCount++;
+						continue;
+					}
+
+					// Move file to destination
+					console.log(`    Moving: ${file.path} -> ${destPath}`);
+					await this.app.fileManager.renameFile(file, destPath);
+
+					// Update frontmatter to set archived: false and status to "Not Started"
+					const movedFile = this.app.vault.getAbstractFileByPath(destPath);
+					if (movedFile instanceof TFile) {
+						const updatedContent = await this.app.vault.read(movedFile);
+						const newContent = updateFrontmatter(updatedContent, {
+							archived: false,
+							status: 'Not Started',
+						});
+						await this.app.vault.modify(movedFile, newContent);
+						console.log(`    ✅ Unarchived and updated frontmatter`);
+					}
+
+					unarchivedCount++;
+					processedCount++;
+
+				} catch (e) {
+					console.error('Error processing file:', file.path, e);
+					new Notice(`❌ Error unarchiving file: ${file.path}`);
+				}
+			}
+
+			console.log(`Summary: Unarchived ${unarchivedCount} files`);
+			console.groupEnd();
+			new Notice(`✅ Unarchived ${unarchivedCount} entities`);
+			return unarchivedCount;
+
+		} catch (error) {
+			console.error('Error in performUnarchive:', error);
+			console.groupEnd();
+			new Notice(`❌ Error in unarchive: ${(error as Error).message}`);
+			return unarchivedCount;
+		}
+	}
+
+	/**
 	 * Populate canvas from vault entities
 	 * Scans the vault for all entity files (milestones, stories, tasks, decisions, documents)
 	 * and creates canvas nodes for each entity that isn't already on the canvas
@@ -6104,6 +6411,14 @@ private registerCommands(): void {
 				return;
 			}
 
+			// Debug: Find DEC-034 in raw canvas data
+			const dec034Node = fileNodes.find(n => n.file?.includes('OSS_Retry') || n.metadata?.entityId === 'DEC-034');
+			if (dec034Node) {
+				console.log('[DEBUG] DEC-034 raw canvas node:', JSON.stringify(dec034Node, null, 2));
+			} else {
+				console.log('[DEBUG] DEC-034 NOT FOUND in canvas fileNodes!');
+			}
+
 			// Layout configuration (exposed as params for tuning)
 			const config = {
 				milestoneSpacing: 1800,     // Horizontal spacing between milestones (+50%)
@@ -6132,7 +6447,8 @@ private registerCommands(): void {
 				type: string;       // milestone, story, task, etc.
 				workstream: string; // engineering, business, etc.
 				filePath: string;
-				enables: string[];  // Entity IDs this decision enables/unblocks
+				enables: string[];  // Entity IDs this decision enables/unblocks (legacy)
+				affects: string[];  // Entity IDs this decision affects (new, replaces enables)
 				blocks: string[];   // Entity IDs this decision blocks
 				parent?: string;    // Parent entity ID (e.g., M-021 for a story)
 				dependsOn: string[];  // Entity IDs this depends on (for ordering)
@@ -6171,10 +6487,27 @@ private registerCommands(): void {
 				return [];
 			};
 
+			// Get canvas folder for resolving relative paths
+			const canvasFolder = canvasFile.parent?.path || '';
+			console.log('[DEBUG] Canvas folder:', canvasFolder);
+
 			for (const node of fileNodes) {
 				if (!node.file) continue;
-				const file = this.app.vault.getAbstractFileByPath(node.file);
-				if (!(file instanceof TFile)) continue;
+				// Try direct path first, then try with canvas folder prefix
+				let file = this.app.vault.getAbstractFileByPath(node.file);
+				const directFound = file instanceof TFile;
+				if (!directFound && canvasFolder) {
+					const prefixedPath = `${canvasFolder}/${node.file}`;
+					file = this.app.vault.getAbstractFileByPath(prefixedPath);
+					if (node.file.includes('OSS_Retry')) {
+						console.log(`[DEBUG DEC-034] Direct path "${node.file}" found: ${directFound}`);
+						console.log(`[DEBUG DEC-034] Prefixed path "${prefixedPath}" found: ${file instanceof TFile}`);
+					}
+				}
+				if (!(file instanceof TFile)) {
+					console.log(`  [SKIP] File not found: ${node.file}`);
+					continue;
+				}
 
 				try {
 					const content = await this.app.vault.read(file);
@@ -6188,6 +6521,7 @@ private registerCommands(): void {
 					const idMatch = fmText.match(/^id:[ \t]*(.+)$/m);
 					const parentMatch = fmText.match(/^parent:[ \t]*(.+)$/m);
 					const enables = parseYamlArrayRepos(fmText, 'enables');
+					const affectsArr = parseYamlArrayRepos(fmText, 'affects');
 					const blocksArr = parseYamlArrayRepos(fmText, 'blocks');
 					const dependsOnArr = parseYamlArrayRepos(fmText, 'depends_on');
 					const implementedByArr = parseYamlArrayRepos(fmText, 'implemented_by');
@@ -6195,18 +6529,32 @@ private registerCommands(): void {
 					const entityId = idMatch?.[1]?.trim();
 					const parent = parentMatch?.[1]?.trim();
 
+					const nodeType = typeMatch?.[1]?.trim().toLowerCase() || 'unknown';
+
+					// Debug: Log DEC-034 specifically
+					if (entityId === 'DEC-034') {
+						console.log(`[DEBUG DEC-034] Found! type=${nodeType}, affects=[${affectsArr.join(',')}], enables=[${enables.join(',')}]`);
+						console.log(`[DEBUG DEC-034] fmText:`, fmText);
+					}
+
 					nodeMeta.set(node.id, {
 						id: node.id,
 						entityId,
-						type: typeMatch?.[1]?.trim().toLowerCase() || 'unknown',
+						type: nodeType,
 						workstream: workstreamMatch?.[1]?.trim().toLowerCase() || 'unassigned',
 						filePath: node.file,
 						enables,
+						affects: affectsArr,
 						blocks: blocksArr,
 						parent,
 						dependsOn: dependsOnArr,
 						implementedBy: implementedByArr,
 					});
+
+					// Debug: Log decisions with affects
+					if (nodeType === 'decision' && affectsArr.length > 0) {
+						console.log(`PARSED decision ${entityId}: affects=[${affectsArr.join(',')}]`);
+					}
 
 					// Build entity ID -> node ID mapping
 					if (entityId) {
@@ -7213,97 +7561,149 @@ private registerCommands(): void {
 			}
 
 			// ============================================================
-			// STEP 9: Position decisions that enable documents
-			// Decisions are positioned to the LEFT of the document they enable
-			// Stacking direction follows the document's Y position relative to implementers:
-			// - Doc above implementers → stack decisions upward
-			// - Doc below implementers → stack decisions downward
-			// - Doc between implementers → stack decisions downward
+			// STEP 9: Position decisions that affect documents or features
+			// Decisions are positioned to the LEFT of the document/feature they affect
+			// For multi-milestone features: position ABOVE the feature
+			// Stacking direction follows the target's Y position relative to implementers:
+			// - Target above implementers → stack decisions upward
+			// - Target below implementers → stack decisions downward
+			// - Target between implementers → stack decisions downward
 			// ============================================================
-			// Track document stacking direction for decisions
-			const documentStackDirection = new Map<string, number>(); // docNodeId -> direction (-1=up, 1=down)
+			// Track target (doc/feature) stacking direction for decisions
+			const targetStackDirection = new Map<string, number>(); // targetNodeId -> direction (-1=up, 1=down)
+			// Track which features span multiple milestones (for special positioning)
+			const multiMilestoneFeatures = new Set<string>(); // nodeIds of multi-milestone features
 
-			// Calculate stacking direction for each positioned document
-			for (const doc of fileNodes) {
-				const meta = nodeMeta.get(doc.id);
-				if (meta?.type !== 'document') continue;
+			// Calculate stacking direction for each positioned document/feature
+			for (const node of fileNodes) {
+				const meta = nodeMeta.get(node.id);
+				if (meta?.type !== 'document' && meta?.type !== 'feature') continue;
 
-				const docPos = finalPositions.get(doc.id);
-				if (!docPos) continue;
+				const nodePos = finalPositions.get(node.id);
+				if (!nodePos) continue;
 
 				// Find implementer positions
 				const implementerYs: number[] = [];
+				const implementerMilestones = new Set<string>();
 				for (const implEntityId of meta.implementedBy || []) {
 					const implNodeId = entityIdToNodeId.get(implEntityId);
 					if (implNodeId) {
 						const implPos = finalPositions.get(implNodeId);
 						if (implPos) implementerYs.push(implPos.y);
+
+						// Track milestone for features
+						if (meta.type === 'feature') {
+							if (implEntityId.startsWith('M-')) {
+								implementerMilestones.add(implEntityId);
+							} else {
+								const implMeta = nodeMeta.get(implNodeId);
+								if (implMeta?.parent) implementerMilestones.add(implMeta.parent);
+							}
+						}
 					}
+				}
+
+				// Mark multi-milestone features
+				if (meta.type === 'feature' && implementerMilestones.size > 1) {
+					multiMilestoneFeatures.add(node.id);
 				}
 
 				if (implementerYs.length === 0) {
 					// No implementers found, default to downward
-					documentStackDirection.set(doc.id, 1);
+					targetStackDirection.set(node.id, 1);
 					continue;
 				}
 
 				const minImplY = Math.min(...implementerYs);
 				const maxImplY = Math.max(...implementerYs);
 
-				// Determine stacking direction based on doc position relative to implementers
+				// Determine stacking direction based on target position relative to implementers
 				if (maxImplY - minImplY > config.nodeHeight) {
-					// Doc is between implementers (vertically) → stack downward
-					documentStackDirection.set(doc.id, 1);
-				} else if (docPos.y < minImplY) {
-					// Doc is above implementers → stack upward
-					documentStackDirection.set(doc.id, -1);
+					// Target is between implementers (vertically) → stack downward
+					targetStackDirection.set(node.id, 1);
+				} else if (nodePos.y < minImplY) {
+					// Target is above implementers → stack upward
+					targetStackDirection.set(node.id, -1);
 				} else {
-					// Doc is below or at same level as implementers → stack downward
-					documentStackDirection.set(doc.id, 1);
+					// Target is below or at same level as implementers → stack downward
+					targetStackDirection.set(node.id, 1);
 				}
 			}
 
-			// Find all unpositioned decisions that enable documents
+			// Find all unpositioned decisions that affect documents or features
+			// Consider both 'enables' (legacy) and 'affects' (new) fields
 			const unpositionedDecisions = fileNodes.filter(n => {
 				const meta = nodeMeta.get(n.id);
-				return meta?.type === 'decision' && !finalPositions.has(n.id) && meta.enables.length > 0;
+				return meta?.type === 'decision' && !finalPositions.has(n.id) &&
+					(meta.enables.length > 0 || meta.affects.length > 0);
 			});
 
-			// Group decisions by the document they enable
-			const decisionsByEnabledDoc = new Map<string, string[]>(); // docNodeId -> [decisionNodeIds]
+			console.log(`Step 9: Found ${unpositionedDecisions.length} unpositioned decisions with enables/affects`);
+			for (const dec of unpositionedDecisions) {
+				const meta = nodeMeta.get(dec.id);
+				console.log(`  Decision ${meta?.entityId}: enables=[${meta?.enables.join(',')}], affects=[${meta?.affects.join(',')}]`);
+			}
+
+			// Group decisions by the document/feature they affect
+			const decisionsByTarget = new Map<string, string[]>(); // targetNodeId -> [decisionNodeIds]
 			for (const dec of unpositionedDecisions) {
 				const meta = nodeMeta.get(dec.id);
 				if (!meta) continue;
 
-				for (const enabledEntityId of meta.enables) {
-					const enabledNodeId = entityIdToNodeId.get(enabledEntityId);
-					if (!enabledNodeId) continue;
+				// Combine enables and affects, deduplicate
+				const affectedIds = [...new Set([...meta.enables, ...meta.affects])];
+				console.log(`  Decision ${meta.entityId} affectedIds: [${affectedIds.join(',')}]`);
 
-					const enabledMeta = nodeMeta.get(enabledNodeId);
-					if (enabledMeta?.type !== 'document') continue;
+				for (const affectedEntityId of affectedIds) {
+					const affectedNodeId = entityIdToNodeId.get(affectedEntityId);
+					if (!affectedNodeId) {
+						console.log(`    ${affectedEntityId}: NOT FOUND in entityIdToNodeId`);
+						continue;
+					}
 
-					// Check if the document is positioned
-					if (!finalPositions.has(enabledNodeId)) continue;
+					const affectedMeta = nodeMeta.get(affectedNodeId);
+					// Only handle documents and features here
+					if (affectedMeta?.type !== 'document' && affectedMeta?.type !== 'feature') {
+						console.log(`    ${affectedEntityId}: type=${affectedMeta?.type} (skipping, not doc/feature)`);
+						continue;
+					}
 
-					const existing = decisionsByEnabledDoc.get(enabledNodeId) || [];
+					// Check if the target is positioned
+					if (!finalPositions.has(affectedNodeId)) continue;
+
+					const existing = decisionsByTarget.get(affectedNodeId) || [];
 					if (!existing.includes(dec.id)) {
 						existing.push(dec.id);
-						decisionsByEnabledDoc.set(enabledNodeId, existing);
+						decisionsByTarget.set(affectedNodeId, existing);
 					}
 				}
 			}
 
-			// Position decisions relative to their enabled documents
-			for (const [docNodeId, decisionNodeIds] of decisionsByEnabledDoc) {
-				const docPos = finalPositions.get(docNodeId);
-				if (!docPos) continue;
+			// Position decisions relative to their affected documents/features
+			for (const [targetNodeId, decisionNodeIds] of decisionsByTarget) {
+				const targetPos = finalPositions.get(targetNodeId);
+				if (!targetPos) continue;
 
-				const stackDir = documentStackDirection.get(docNodeId) || 1;
+				const targetMeta = nodeMeta.get(targetNodeId);
+				const isMultiMilestoneFeature = multiMilestoneFeatures.has(targetNodeId);
 
-				// Position decisions to the LEFT of the document, stacked in the appropriate direction
-				// Use 60% of documentSpacing for tighter horizontal positioning
-				let decX = docPos.x - (config.documentSpacing * 0.6) - config.nodeWidth;
-				let decY = docPos.y; // Start at same Y as document
+				let decX: number;
+				let decY: number;
+				let stackDir: number;
+
+				if (isMultiMilestoneFeature) {
+					// Multi-milestone feature: position decisions ABOVE the feature
+					// Similar to how multi-milestone documents are positioned
+					decX = targetPos.x; // Same X as feature
+					decY = targetPos.y - config.nodeHeight - config.verticalSpacing; // Above feature
+					stackDir = -1; // Stack upward
+					console.log(`  Positioning decisions ABOVE multi-milestone feature`);
+				} else {
+					// Single-milestone feature or document: position LEFT of target
+					stackDir = targetStackDirection.get(targetNodeId) || 1;
+					decX = targetPos.x - (config.documentSpacing * 0.6) - config.nodeWidth;
+					decY = targetPos.y; // Start at same Y as target
+				}
 
 				for (const decNodeId of decisionNodeIds) {
 					finalPositions.set(decNodeId, {
@@ -7314,7 +7714,12 @@ private registerCommands(): void {
 					});
 
 					const decMeta = nodeMeta.get(decNodeId);
-					console.log(`  Decision ${decMeta?.entityId} positioned LEFT of document (stackDir=${stackDir})`);
+					const targetType = targetMeta?.type || 'unknown';
+					if (isMultiMilestoneFeature) {
+						console.log(`  Decision ${decMeta?.entityId} positioned ABOVE multi-milestone feature ${targetMeta?.entityId}`);
+					} else {
+						console.log(`  Decision ${decMeta?.entityId} positioned LEFT of ${targetType} ${targetMeta?.entityId} (stackDir=${stackDir})`);
+					}
 
 					// Stack next decision in the appropriate direction
 					decY += stackDir * (config.nodeHeight + config.verticalSpacing);
@@ -7322,20 +7727,21 @@ private registerCommands(): void {
 			}
 
 			// ============================================================
-			// STEP 9.5: Position orphan decisions that have blocks/enables relationships
-			// These decisions don't have a parent but block/enable other entities
-			// Position them to the LEFT of the entities they block
+			// STEP 9.5: Position orphan decisions that have blocks/enables/affects relationships
+			// These decisions don't have a parent but block/enable/affect other entities
+			// Position them to the LEFT of the entities they relate to
 			// ============================================================
 			const orphanDecisions = fileNodes.filter(n => {
 				const meta = nodeMeta.get(n.id);
-				return meta?.type === 'decision' && !finalPositions.has(n.id) && (meta.blocks?.length > 0 || meta.enables?.length > 0);
+				return meta?.type === 'decision' && !finalPositions.has(n.id) &&
+					(meta.blocks?.length > 0 || meta.enables?.length > 0 || meta.affects?.length > 0);
 			});
 
 			for (const decision of orphanDecisions) {
 				const meta = nodeMeta.get(decision.id);
 				if (!meta) continue;
 
-				// Find positions of entities this decision blocks or enables
+				// Find positions of entities this decision blocks, enables, or affects
 				const relatedPositions: { x: number; y: number }[] = [];
 
 				for (const blockedEntityId of meta.blocks || []) {
@@ -7351,6 +7757,14 @@ private registerCommands(): void {
 					if (enabledNodeId) {
 						const enabledPos = finalPositions.get(enabledNodeId);
 						if (enabledPos) relatedPositions.push({ x: enabledPos.x, y: enabledPos.y });
+					}
+				}
+
+				for (const affectedEntityId of meta.affects || []) {
+					const affectedNodeId = entityIdToNodeId.get(affectedEntityId);
+					if (affectedNodeId) {
+						const affectedPos = finalPositions.get(affectedNodeId);
+						if (affectedPos) relatedPositions.push({ x: affectedPos.x, y: affectedPos.y });
 					}
 				}
 
@@ -7507,6 +7921,10 @@ private registerCommands(): void {
 			const orphans = fileNodes.filter(n => !finalPositions.has(n.id));
 			if (orphans.length > 0) {
 				console.log(`Positioning ${orphans.length} orphan nodes`);
+				for (const orphan of orphans) {
+					const meta = nodeMeta.get(orphan.id);
+					console.log(`  Orphan: ${meta?.entityId} (type=${meta?.type}, affects=[${meta?.affects?.join(',')}])`);
+				}
 
 				// Position orphans in the orphan area
 				let orphanX = config.startX;
@@ -7987,6 +8405,9 @@ private registerCommands(): void {
 			// ============================================================
 			const entities: EntityData[] = [];
 
+			// Get canvas folder for resolving relative paths
+			const canvasFolderV3 = canvasFile.parent?.path || '';
+
 			// Helper to strip quotes from a value
 			const stripQuotesLayout = (value: string): string => {
 				const trimmed = value.trim();
@@ -8019,7 +8440,11 @@ private registerCommands(): void {
 
 			for (const node of fileNodes) {
 				if (!node.file) continue;
-				const file = this.app.vault.getAbstractFileByPath(node.file);
+				// Try direct path first, then try with canvas folder prefix
+				let file = this.app.vault.getAbstractFileByPath(node.file);
+				if (!(file instanceof TFile) && canvasFolderV3) {
+					file = this.app.vault.getAbstractFileByPath(`${canvasFolderV3}/${node.file}`);
+				}
 				if (!(file instanceof TFile)) continue;
 
 				try {
@@ -8198,9 +8623,16 @@ private registerCommands(): void {
 			// ============================================================
 			const entities: EntityDataV4[] = [];
 
+			// Get canvas folder for resolving relative paths
+			const canvasFolder = canvasFile.parent?.path || '';
+
 			for (const node of fileNodes) {
 				if (!node.file) continue;
-				const file = this.app.vault.getAbstractFileByPath(node.file);
+				// Try direct path first, then try with canvas folder prefix
+				let file = this.app.vault.getAbstractFileByPath(node.file);
+				if (!(file instanceof TFile) && canvasFolder) {
+					file = this.app.vault.getAbstractFileByPath(`${canvasFolder}/${node.file}`);
+				}
 				if (!(file instanceof TFile)) continue;
 
 				try {
