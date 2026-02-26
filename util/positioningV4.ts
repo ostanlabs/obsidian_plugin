@@ -99,13 +99,13 @@ export const RELATIONSHIP_RULES: RelationshipRule[] = [
 	{ sourceType: 'story', field: 'implements', targetType: ['feature', 'document'], action: 'containment', direction: 'parent' },
 
 	// TASK (crossWsPositioning: false - edge only, no position constraint)
-	{ sourceType: 'task', field: 'parent', targetType: 'story', action: 'containment', direction: 'child' },
+	{ sourceType: 'task', field: 'parent', targetType: ['story', 'milestone'], action: 'containment', direction: 'child' },
 	{ sourceType: 'task', field: 'depends_on', targetType: 'task', action: 'sequencing', direction: 'after', crossWsPositioning: false },
 	{ sourceType: 'task', field: 'blocks', targetType: 'task', action: 'sequencing', direction: 'before', crossWsPositioning: false },
 
 	// DECISION
 	{ sourceType: 'decision', field: 'parent', targetType: ['milestone', 'story'], action: 'containment', direction: 'child', priority: 1 },
-	{ sourceType: 'decision', field: 'affects', targetType: ['milestone', 'story', 'task', 'document'], action: 'containment', direction: 'child', priority: 2 },
+	{ sourceType: 'decision', field: 'affects', targetType: ['milestone', 'story', 'task', 'document', 'feature'], action: 'containment', direction: 'child', priority: 2 },
 	{ sourceType: 'decision', field: 'affects', targetType: 'decision', action: 'sequencing', direction: 'before', crossWsPositioning: false },
 	{ sourceType: 'decision', field: 'supersedes', targetType: 'decision', action: 'sequencing', direction: 'before' },
 	{ sourceType: 'decision', field: 'depends_on', targetType: 'decision', action: 'sequencing', direction: 'after', crossWsPositioning: false },
@@ -288,10 +288,13 @@ export class PositioningEngineV4 {
 		// Phase 9: Position floating entities
 		this.positionFloatingEntities();
 
-		// Phase 10: Position orphans
+		// Phase 10: Position deferred (multi-parent) entities
+		this.positionDeferredEntities();
+
+		// Phase 11: Position orphans
 		this.positionOrphans();
 
-		// Phase 11: Resolve overlaps
+		// Phase 12: Resolve overlaps
 		this.resolveOverlaps();
 
 		return this.collectResults();
@@ -1737,82 +1740,137 @@ export class PositioningEngineV4 {
 			}
 		}
 
-		// Position milestones with constraint propagation
+		// Position milestones using centered positioning algorithm
 		const milestoneX = new Map<string, number>();
 		const milestoneEndX = new Map<string, number>();
-		const milestoneNodeEndX = new Map<string, number>();
 
-		// Initialize all milestones with X=0
-		for (const ws of sortedWorkstreams) {
-			for (const m of ws.milestones) {
-				const containerWidth = m.containerSize?.width || this.config.nodeSizes.milestone.width;
-				milestoneX.set(m.entityId, 0);
-				milestoneEndX.set(m.entityId, containerWidth);
-				milestoneNodeEndX.set(m.entityId, containerWidth);
-			}
-		}
-
-		// Build predecessor map for same-workstream constraints (based on within-WS sorted order)
+		// Build predecessor/successor maps for same-workstream constraints
 		const wsPredecessor = new Map<string, ProcessedNode | null>();
+		const wsSuccessor = new Map<string, ProcessedNode | null>();
 		for (const ws of sortedWorkstreams) {
 			const sortedMilestones = sortedMilestonesByWs.get(ws.name)!;
 			for (let i = 0; i < sortedMilestones.length; i++) {
 				wsPredecessor.set(sortedMilestones[i].entityId, i > 0 ? sortedMilestones[i - 1] : null);
+				wsSuccessor.set(sortedMilestones[i].entityId, i < sortedMilestones.length - 1 ? sortedMilestones[i + 1] : null);
 			}
 		}
 
-		// Sort workstreams by cross-WS dependency order
-		// If workstream A has milestones that depend on workstream B's milestones, process B first
+		// Find root workstream (engineering, hardcoded for now)
+		const rootWsName = 'engineering';
+		const rootWs = sortedWorkstreams.find(ws => ws.name === rootWsName);
+		if (!rootWs) {
+			console.log(`[PositioningV4] WARNING: Root workstream '${rootWsName}' not found, using first workstream`);
+		}
+		const actualRootWs = rootWs || sortedWorkstreams[0];
+		console.log(`[PositioningV4] Root workstream: ${actualRootWs.name}`);
+
+		// Calculate root workstream total length (for centering)
+		const rootMilestones = sortedMilestonesByWs.get(actualRootWs.name) || [];
+		let rootTotalLength = 0;
+		for (const m of rootMilestones) {
+			const containerWidth = m.containerSize?.width || this.config.nodeSizes.milestone.width;
+			rootTotalLength += containerWidth;
+		}
+		rootTotalLength += (rootMilestones.length - 1) * this.config.containerGap;
+		const startX = -rootTotalLength / 2;
+		console.log(`[PositioningV4] Root workstream length: ${rootTotalLength}, startX: ${startX}`);
+
+		// Position root workstream starting at startX, left to right
+		let currentX = startX;
+		for (const m of rootMilestones) {
+			const containerWidth = m.containerSize?.width || this.config.nodeSizes.milestone.width;
+			milestoneX.set(m.entityId, currentX);
+			milestoneEndX.set(m.entityId, currentX + containerWidth);
+			currentX += containerWidth + this.config.containerGap;
+		}
+		console.log(`[PositioningV4] Positioned root workstream '${actualRootWs.name}' with ${rootMilestones.length} milestones`);
+
+		// Build cross-WS dependency lookup: milestone -> list of cross-WS deps where it's the target
+		const incomingCrossWsDeps = new Map<string, { source: string; target: string }[]>();
+		for (const dep of crossWsDeps) {
+			if (!incomingCrossWsDeps.has(dep.target)) {
+				incomingCrossWsDeps.set(dep.target, []);
+			}
+			incomingCrossWsDeps.get(dep.target)!.push(dep);
+		}
+
+		// Sort workstreams by dependency order (root first, then dependents)
 		const wsProcessingOrder = this.sortWorkstreamsByDependencyOrder(sortedWorkstreams, crossWsDeps);
 		console.log(`[PositioningV4] Workstream processing order: ${wsProcessingOrder.map(ws => ws.name).join(' → ')}`);
 
-		// Iterative constraint propagation
-		// Process workstreams in dependency order, iterate until stable
-		const maxIterations = 20;
-		for (let iteration = 0; iteration < maxIterations; iteration++) {
-			let changed = false;
+		// Position other workstreams
+		for (const ws of wsProcessingOrder) {
+			if (ws.name === actualRootWs.name) {
+				continue; // Already positioned
+			}
 
-			// Process workstreams in dependency order
-			for (const ws of wsProcessingOrder) {
-				const sortedMilestones = sortedMilestonesByWs.get(ws.name)!;
+			const sortedMilestones = sortedMilestonesByWs.get(ws.name)!;
+			if (sortedMilestones.length === 0) {
+				continue;
+			}
 
-				for (const milestone of sortedMilestones) {
-					const containerWidth = milestone.containerSize?.width || this.config.nodeSizes.milestone.width;
+			// Find anchor milestone: the one with cross-WS dep whose source is furthest right (already positioned)
+			let anchorMilestone: ProcessedNode | null = null;
+			let anchorX: number | null = null;
 
-					// Constraint 1: Must be after previous milestone in same workstream
-					let minX = 0;
-					const predecessor = wsPredecessor.get(milestone.entityId);
-					if (predecessor) {
-						const prevEndX = milestoneEndX.get(predecessor.entityId) || 0;
-						minX = prevEndX + this.config.containerGap;
-					}
-
-					// Constraint 2: Must be after all cross-workstream dependencies
-					for (const dep of crossWsDeps) {
-						if (dep.target === milestone.entityId) {
-							const sourceNodeEndX = milestoneNodeEndX.get(dep.source) || 0;
-							const newMinX = sourceNodeEndX + this.config.containerGap;
-							if (newMinX > minX) {
-								minX = newMinX;
-							}
+			for (const m of sortedMilestones) {
+				const deps = incomingCrossWsDeps.get(m.entityId) || [];
+				for (const dep of deps) {
+					const sourceEndX = milestoneEndX.get(dep.source);
+					if (sourceEndX !== undefined) {
+						// This milestone has a cross-WS dep from an already-positioned milestone
+						const requiredX = sourceEndX + this.config.containerGap;
+						if (anchorX === null || requiredX > anchorX) {
+							anchorMilestone = m;
+							anchorX = requiredX;
 						}
-					}
-
-					const currentX = milestoneX.get(milestone.entityId) || 0;
-					if (minX > currentX) {
-						milestoneX.set(milestone.entityId, minX);
-						milestoneEndX.set(milestone.entityId, minX + containerWidth);
-						milestoneNodeEndX.set(milestone.entityId, minX + containerWidth);
-						changed = true;
 					}
 				}
 			}
 
-			if (!changed) {
-				console.log(`[PositioningV4] Constraint propagation converged after ${iteration + 1} iterations`);
-				break;
+			if (anchorMilestone && anchorX !== null) {
+				// Position anchor milestone at anchorX
+				const anchorWidth = anchorMilestone.containerSize?.width || this.config.nodeSizes.milestone.width;
+				milestoneX.set(anchorMilestone.entityId, anchorX);
+				milestoneEndX.set(anchorMilestone.entityId, anchorX + anchorWidth);
+				console.log(`[PositioningV4] Workstream '${ws.name}': anchor=${anchorMilestone.entityId} at x=${anchorX}`);
+
+				// Position milestones to the RIGHT of anchor (left to right)
+				let rightX = anchorX + anchorWidth + this.config.containerGap;
+				let current = wsSuccessor.get(anchorMilestone.entityId);
+				while (current) {
+					const width = current.containerSize?.width || this.config.nodeSizes.milestone.width;
+					milestoneX.set(current.entityId, rightX);
+					milestoneEndX.set(current.entityId, rightX + width);
+					rightX += width + this.config.containerGap;
+					current = wsSuccessor.get(current.entityId);
+				}
+
+				// Position milestones to the LEFT of anchor (right to left)
+				let leftEndX = anchorX - this.config.containerGap;
+				current = wsPredecessor.get(anchorMilestone.entityId);
+				while (current) {
+					const width = current.containerSize?.width || this.config.nodeSizes.milestone.width;
+					const leftX = leftEndX - width;
+					milestoneX.set(current.entityId, leftX);
+					milestoneEndX.set(current.entityId, leftEndX);
+					leftEndX = leftX - this.config.containerGap;
+					current = wsPredecessor.get(current.entityId);
+				}
+			} else {
+				// No cross-WS deps found, position starting at x=0 (will be adjusted later if needed)
+				console.log(`[PositioningV4] Workstream '${ws.name}': no cross-WS anchor, starting at x=0`);
+				let x = 0;
+				for (const m of sortedMilestones) {
+					const width = m.containerSize?.width || this.config.nodeSizes.milestone.width;
+					milestoneX.set(m.entityId, x);
+					milestoneEndX.set(m.entityId, x + width);
+					x += width + this.config.containerGap;
+				}
 			}
 		}
+
+		console.log(`[PositioningV4] Centered positioning complete`)
 
 		// Debug: Log final X positions for ALL milestones to understand the chain
 		console.log(`[PositioningV4] Final milestone positions:`);
