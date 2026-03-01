@@ -5,6 +5,27 @@ All notable changes to the Canvas Project Manager plugin will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.42] - 2026-02-28
+
+### 📚 Documentation Release
+
+- **Comprehensive Documentation**: Complete documentation overhaul with 11 new guides
+- **README Updates**: Updated README with all 29 commands, version badges, and comprehensive feature documentation
+- **Feature Coverage**: Added Feature Coverage View documentation
+- **Entity Navigator**: Documented in-memory navigation system
+- **Relationship Reconciliation**: Complete guide for bidirectional relationship sync
+- **Visual Styling**: Comprehensive CSS patterns documentation
+- **Archive System**: Detailed archive structure and workflow documentation
+- **Workstream Normalization**: Auto-normalization rules and AI feedback
+- **Frontmatter Examples**: Complete examples for all entity types
+- **Version Badges**: Added version badges and release information
+
+### 🔧 Improvements
+
+- **Package Version Sync**: Synchronized package.json with manifest.json (v1.8.42)
+- **Documentation Links**: Added prominent links to obsidian_docs comprehensive documentation
+- **Installation Guide**: Updated with latest version information
+
 ## [1.8.4] - 2026-01-14
 
 ### ✨ Feature Entity Support
