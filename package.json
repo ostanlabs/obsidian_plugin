@@ -1,6 +1,6 @@
 {
   "name": "canvas-project-manager",
-  "version": "1.8.16",
+  "version": "1.8.42",
   "description": "Visual project management on Obsidian Canvas - manage milestones, stories, tasks, decisions, documents, and features with dependencies and Notion sync",
   "main": "main.js",
   "scripts": {
