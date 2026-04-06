@@ -74,8 +74,8 @@ import { PositioningEngineV4, EntityData as EntityDataV4 } from "./util/position
 import { parseEntityFromFrontmatter, generateNodeIdFromEntityId } from "./util/entityParser";
 import { reconcileRelationships, cleanTransitiveDependencies, detectAndBreakCycles } from "./util/relationshipReconciler";
 
-const DEFAULT_NODE_HEIGHT = 220;
-const DEFAULT_NODE_WIDTH = 400;
+const DEFAULT_NODE_HEIGHT = 242;  // 220 * 1.1
+const DEFAULT_NODE_WIDTH = 520;   // 400 * 1.3
 
 export default class CanvasStructuredItemsPlugin extends Plugin {
 	settings: CanvasItemFromTemplateSettings = DEFAULT_SETTINGS;
@@ -317,24 +317,6 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
  * Register all plugin commands
  */
 private registerCommands(): void {
-	// Command 1: Initialize Notion database
-	this.addCommand({
-		id: "initialize-notion-database",
-		name: "Project Canvas: Initialize Notion database",
-		callback: async () => {
-			await this.initializeNotionDatabase();
-		},
-	});
-
-	// Command 2: Sync current note to Notion
-	this.addCommand({
-		id: "sync-current-note-to-notion",
-		name: "Project Canvas: Sync current note to Notion",
-		callback: async () => {
-			await this.syncCurrentNoteToNotion();
-		},
-	});
-
 	// Command 3: Regenerate templates
 	this.addCommand({
 		id: "regenerate-templates",
@@ -354,15 +336,6 @@ private registerCommands(): void {
 		},
 	});
 
-	// Command 5: Sync canvas edges to MD depends_on fields
-	this.addCommand({
-		id: "sync-edges-to-depends-on",
-		name: "Project Canvas: Sync edges to dependencies",
-		callback: async () => {
-			await this.syncEdgesToDependsOnCommand();
-		},
-	});
-
 	// Command 6: Populate canvas from vault entities
 	this.addCommand({
 		id: "populate-canvas-from-vault",
@@ -372,123 +345,12 @@ private registerCommands(): void {
 		},
 	});
 
-	// Command 7: Debug - Inspect canvas API
-	this.addCommand({
-		id: "inspect-canvas-api",
-		name: "Project Canvas: [DEBUG] Inspect canvas API",
-		callback: () => {
-			const canvasFile = this.getActiveCanvasFile();
-			if (!canvasFile) {
-				new Notice("No active canvas file");
-				return;
-			}
-			inspectCanvasAPI(this.app, canvasFile);
-			new Notice("Check console for canvas API inspection results");
-		},
-	});
-
 	// Command 8: Reposition canvas nodes (V4 algorithm - default)
 	this.addCommand({
 		id: "reposition-canvas-nodes",
 		name: "Project Canvas: Reposition nodes (V4 algorithm)",
 		callback: async () => {
 			await this.repositionCanvasNodesV4();
-		},
-	});
-
-	// Command 8b: Reposition canvas nodes (V3 algorithm - legacy)
-	this.addCommand({
-		id: "reposition-canvas-nodes-v3",
-		name: "Project Canvas: Reposition nodes (V3 algorithm)",
-		callback: async () => {
-			await this.repositionCanvasNodesV3();
-		},
-	});
-
-	// Command 8c: Reposition canvas nodes (legacy V2 algorithm)
-	this.addCommand({
-		id: "reposition-canvas-nodes-v2",
-		name: "Project Canvas: Reposition nodes (legacy V2)",
-		callback: async () => {
-			await this.repositionCanvasNodes();
-		},
-	});
-
-	// Command 9: Strip IDs from filenames
-	this.addCommand({
-		id: "strip-ids-from-filenames",
-		name: "Project Canvas: Strip IDs from filenames",
-		callback: async () => {
-			await this.stripIdsFromFilenames();
-		},
-	});
-
-	// Command 10: Remove duplicate nodes
-	this.addCommand({
-		id: "remove-duplicate-nodes",
-		name: "Project Canvas: Remove duplicate nodes",
-		callback: async () => {
-			await this.removeDuplicateNodes();
-		},
-	});
-
-	// Command 11: Migrate decision fields (enables/blocks -> affects)
-	this.addCommand({
-		id: "migrate-decision-fields",
-		name: "Project Canvas: Migrate decision fields (enables → affects)",
-		callback: async () => {
-			await this.migrateDecisionFieldsInVault();
-		},
-	});
-
-	// Entity Navigator Commands
-	this.addCommand({
-		id: "entity-nav-go-to-parent",
-		name: "Entity Navigator: Go to Parent",
-		hotkeys: [{ modifiers: ["Ctrl", "Shift"], key: "p" }],
-		callback: () => this.navigateToParent(),
-	});
-
-	this.addCommand({
-		id: "entity-nav-go-to-children",
-		name: "Entity Navigator: Go to Children",
-		callback: () => this.navigateToChildren(),
-	});
-
-	this.addCommand({
-		id: "entity-nav-go-to-dependencies",
-		name: "Entity Navigator: Go to Dependencies",
-		callback: () => this.navigateToDependencies(),
-	});
-
-	this.addCommand({
-		id: "entity-nav-go-to-documents",
-		name: "Entity Navigator: Go to Documents",
-		hotkeys: [{ modifiers: ["Ctrl", "Shift"], key: "d" }],
-		callback: () => this.navigateToDocuments(),
-	});
-
-	this.addCommand({
-		id: "entity-nav-go-to-decisions",
-		name: "Entity Navigator: Go to Decisions",
-		hotkeys: [{ modifiers: ["Ctrl", "Shift"], key: "e" }],
-		callback: () => this.navigateToDecisions(),
-	});
-
-	this.addCommand({
-		id: "entity-nav-go-to-enabled",
-		name: "Entity Navigator: Go to Enabled Entities (for decisions)",
-		callback: () => this.navigateToEnabledEntities(),
-	});
-
-	this.addCommand({
-		id: "entity-nav-rebuild-index",
-		name: "Entity Navigator: Rebuild Index",
-		callback: async () => {
-			if (this.entityIndex) {
-				await this.entityIndex.buildIndex();
-				new Notice("Entity index rebuilt");
-			}
 		},
 	});
 
@@ -513,124 +375,11 @@ private registerCommands(): void {
 		},
 	});
 
-	// Feature Entity Commands
-	this.addCommand({
-		id: "create-feature",
-		name: "Project Canvas: Create Feature",
-		callback: async () => {
-			await this.createFeature();
-		},
-	});
-
-	this.addCommand({
-		id: "set-feature-phase",
-		name: "Project Canvas: Set Feature Phase",
-		callback: async () => {
-			await this.setFeaturePhase();
-		},
-	});
-
-	this.addCommand({
-		id: "set-feature-tier",
-		name: "Project Canvas: Set Feature Tier",
-		callback: async () => {
-			await this.setFeatureTier();
-		},
-	});
-
-	this.addCommand({
-		id: "entity-nav-go-to-features",
-		name: "Entity Navigator: Go to Features",
-		callback: () => this.navigateToFeatures(),
-	});
-
-	// Feature Canvas Commands
-	this.addCommand({
-		id: "create-features-canvas",
-		name: "Project Canvas: Create Features Canvas",
-		callback: async () => {
-			await this.createFeaturesCanvas();
-		},
-	});
-
-	this.addCommand({
-		id: "auto-layout-features",
-		name: "Project Canvas: Auto-Layout Features Canvas",
-		callback: async () => {
-			await this.autoLayoutFeaturesCanvas();
-		},
-	});
-
-	this.addCommand({
-		id: "populate-features-canvas",
-		name: "Project Canvas: Populate Features Canvas from Vault",
-		callback: async () => {
-			await this.populateFeaturesCanvas();
-		},
-	});
-
 	this.addCommand({
 		id: "reconcile-relationships",
 		name: "Project Canvas: Reconcile All Relationships",
 		callback: async () => {
 			await this.reconcileAllRelationships();
-		},
-	});
-
-	this.addCommand({
-		id: "link-to-feature",
-		name: "Project Canvas: Link Current Entity to Feature",
-		callback: async () => {
-			await this.linkCurrentEntityToFeature();
-		},
-	});
-
-	this.addCommand({
-		id: "open-feature-details",
-		name: "Project Canvas: Open Feature Details Panel",
-		callback: async () => {
-			await this.activateFeatureDetailsView();
-		},
-	});
-
-	this.addCommand({
-		id: "view-feature-coverage",
-		name: "Project Canvas: View Feature Coverage Report",
-		callback: async () => {
-			await this.activateFeatureCoverageView();
-		},
-	});
-
-	this.addCommand({
-		id: "import-future-features",
-		name: "Project Canvas: Import from FUTURE_FEATURES.md",
-		callback: async () => {
-			await this.importFromFutureFeatures();
-		},
-	});
-
-	this.addCommand({
-		id: "suggest-feature-links",
-		name: "Project Canvas: Suggest Feature Links",
-		callback: async () => {
-			await this.suggestFeatureLinks();
-		},
-	});
-
-	this.addCommand({
-		id: "bulk-link-features",
-		name: "Project Canvas: Bulk Link Features",
-		callback: async () => {
-			await this.bulkLinkFeatures();
-		},
-	});
-
-	// Command: Unarchive all stories and tasks
-	this.addCommand({
-		id: "unarchive-stories-and-tasks",
-		name: "Project Canvas: Unarchive All Stories and Tasks",
-		callback: async () => {
-			await this.unarchiveStoriesAndTasks();
 		},
 	});
 }
@@ -5288,14 +5037,14 @@ private registerCommands(): void {
 			// Entity types to scan for (V2 schema)
 			const entityTypes = ['milestone', 'story', 'task', 'decision', 'document', 'feature'];
 
-			// Node sizes by entity type
+			// Node sizes by entity type (+30% width, +10% height)
 			const nodeSizes: Record<string, { width: number; height: number }> = {
-				milestone: { width: 280, height: 200 },
-				story: { width: 200, height: 150 },
-				task: { width: 160, height: 100 },
-				decision: { width: 180, height: 120 },
-				document: { width: 200, height: 150 },
-				feature: { width: 300, height: 220 },
+				milestone: { width: 364, height: 220 },  // 280*1.3, 200*1.1
+				story: { width: 260, height: 165 },      // 200*1.3, 150*1.1
+				task: { width: 208, height: 110 },       // 160*1.3, 100*1.1
+				decision: { width: 234, height: 132 },   // 180*1.3, 120*1.1
+				document: { width: 260, height: 165 },   // 200*1.3, 150*1.1
+				feature: { width: 390, height: 242 },    // 300*1.3, 220*1.1
 			};
 
 			// Colors by entity type (Obsidian canvas colors 1-6)
@@ -5567,8 +5316,8 @@ private registerCommands(): void {
 			console.log('\n=== STAGE 4: CREATE NODE OBJECTS (GRAPH LAYOUT) ===');
 			// Graph-based layout using topological sort on dependencies
 			// Nodes are positioned in layers based on dependency depth
-			const nodeWidth = 300;
-			const nodeHeight = 200;
+			const nodeWidth = 390;   // 300 * 1.3
+			const nodeHeight = 220;  // 200 * 1.1
 			const horizontalGap = 80;
 			const verticalGap = 120;
 			const startX = 50;
@@ -6432,8 +6181,8 @@ private registerCommands(): void {
 				documentVerticalSpacing: 460, // Vertical spacing for documents (60 + 400)
 				featureVerticalSpacing: 200,  // Vertical spacing for features
 				streamSpacing: 400,         // Vertical spacing between workstream lanes
-				nodeWidth: 462,
-				nodeHeight: 250,
+				nodeWidth: 601,   // 462 * 1.3
+				nodeHeight: 275,  // 250 * 1.1
 				startX: 500,
 				startY: 500,
 			};
@@ -9862,9 +9611,9 @@ private registerCommands(): void {
 			return;
 		}
 
-		// Layout constants
-		const nodeWidth = 300;
-		const nodeHeight = 150;
+		// Layout constants (+30% width, +10% height)
+		const nodeWidth = 390;   // 300 * 1.3
+		const nodeHeight = 165;  // 150 * 1.1
 		const horizontalGap = 50;
 		const verticalGap = 30;
 		const startY = 140; // Below headers
@@ -9991,11 +9740,11 @@ private registerCommands(): void {
 			return file.basename.match(/^F-\d{3,}/);
 		});
 
-		// Add new feature nodes
+		// Add new feature nodes (+30% width, +10% height)
 		let addedCount = 0;
 		const startY = 140;
-		const nodeWidth = 300;
-		const nodeHeight = 150;
+		const nodeWidth = 390;   // 300 * 1.3
+		const nodeHeight = 165;  // 150 * 1.1
 		const verticalGap = 30;
 
 		for (const file of featureFiles) {
@@ -10462,6 +10211,7 @@ private registerCommands(): void {
 		// Build maps for all relationships
 		const reverseRels = new Map<string, {
 			blocks: string[];
+			dependsOn: string[];  // Added: reverse of blocks
 			children: string[];
 			implementedBy: string[];
 			documentedBy: string[];
@@ -10476,6 +10226,7 @@ private registerCommands(): void {
 			if (!reverseRels.has(entityId)) {
 				reverseRels.set(entityId, {
 					blocks: [],
+					dependsOn: [],  // Added: reverse of blocks
 					children: [],
 					implementedBy: [],
 					documentedBy: [],
@@ -10604,6 +10355,19 @@ private registerCommands(): void {
 					}
 				}
 
+				// blocks -> depends_on (reverse direction)
+				const blocksArr = parseYamlArray(fm, 'blocks');
+				if (blocksArr.length > 0) {
+					console.log(`[Reconciler] ${entityId} blocks: [${blocksArr.join(', ')}]`);
+				}
+				for (const blockedId of blocksArr) {
+					const blockedRels = ensureEntity(blockedId);
+					if (!blockedRels.dependsOn.includes(entityId)) {
+						blockedRels.dependsOn.push(entityId);
+						console.log(`[Reconciler] Adding ${entityId} to ${blockedId}.dependsOn`);
+					}
+				}
+
 				// parent -> children - use [ \t]* instead of \s* to avoid matching newlines
 				const parentMatch = fm.match(/^parent:[ \t]*(.+)$/m);
 				if (parentMatch) {
@@ -10699,6 +10463,7 @@ private registerCommands(): void {
 
 				// Check current values for reverse relationships
 				const currentBlocks = parseYamlArray(fm, 'blocks');
+				const currentDependsOn = parseYamlArray(fm, 'depends_on');  // Added: for blocks -> depends_on sync
 				const currentChildren = parseYamlArray(fm, 'children');
 				const currentImplementedBy = parseYamlArray(fm, 'implemented_by');
 				const currentDocumentedBy = parseYamlArray(fm, 'documented_by');
@@ -10711,6 +10476,12 @@ private registerCommands(): void {
 
 				// Compare reverse relationships
 				const blocksChanged = JSON.stringify([...currentBlocks].sort()) !== JSON.stringify([...rels.blocks].sort());
+				// Check if depends_on needs new values added (merge, don't replace)
+				const newDependsOn = rels.dependsOn.filter(id => !currentDependsOn.includes(id));
+				const dependsOnChanged = newDependsOn.length > 0;
+				if (rels.dependsOn.length > 0) {
+					console.log(`[Reconciler] ${entityId}: rels.dependsOn=[${rels.dependsOn.join(', ')}], currentDependsOn=[${currentDependsOn.join(', ')}], newDependsOn=[${newDependsOn.join(', ')}], changed=${dependsOnChanged}`);
+				}
 				const childrenChanged = JSON.stringify([...currentChildren].sort()) !== JSON.stringify([...rels.children].sort());
 				const implementedByChanged = JSON.stringify([...currentImplementedBy].sort()) !== JSON.stringify([...rels.implementedBy].sort());
 				const documentedByChanged = JSON.stringify([...currentDocumentedBy].sort()) !== JSON.stringify([...rels.documentedBy].sort());
@@ -10722,7 +10493,7 @@ private registerCommands(): void {
 				const forwardCleanup = forwardRelCleanup.get(entityId);
 				const hasForwardCleanup = forwardCleanup && Object.keys(forwardCleanup).length > 0;
 
-				if (blocksChanged || childrenChanged || implementedByChanged || documentedByChanged || decidedByChanged || supersededByChanged || nextVersionChanged || hasForwardCleanup) {
+				if (blocksChanged || dependsOnChanged || childrenChanged || implementedByChanged || documentedByChanged || decidedByChanged || supersededByChanged || nextVersionChanged || hasForwardCleanup) {
 					const updates: Record<string, unknown> = {
 						updated: new Date().toISOString(),
 					};
@@ -10730,6 +10501,11 @@ private registerCommands(): void {
 					// Reverse relationship updates
 					if (blocksChanged && rels.blocks.length > 0) {
 						updates.blocks = rels.blocks;
+					}
+					// Add new depends_on values (merge with existing)
+					if (dependsOnChanged) {
+						updates.depends_on = [...currentDependsOn, ...newDependsOn];
+						console.log(`[Reconciler] Will update ${entityId}.depends_on to [${updates.depends_on}]`);
 					}
 					if (childrenChanged && rels.children.length > 0) {
 						updates.children = rels.children;
