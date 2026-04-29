@@ -3,9 +3,21 @@
   "version": "1.8.42",
   "description": "Visual project management on Obsidian Canvas - manage milestones, stories, tasks, decisions, documents, and features with dependencies and Notion sync",
   "main": "main.js",
+  "files": [
+    "main.js",
+    "main.ts",
+    "manifest.json",
+    "styles.css",
+    "types.ts",
+    "settings.ts",
+    "notion/",
+    "ui/",
+    "util/"
+  ],
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "typecheck": "tsc -noEmit -skipLibCheck",
     "version": "node version-bump.mjs && git add manifest.json versions.json",
     "test": "jest",
     "test:watch": "jest --watch",
