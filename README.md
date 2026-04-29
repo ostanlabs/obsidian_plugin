@@ -1,9 +1,10 @@
 # Canvas Project Manager
 
+[![npm version](https://img.shields.io/npm/v/canvas-project-manager.svg)](https://www.npmjs.com/package/canvas-project-manager)
 [![GitHub release](https://img.shields.io/github/v/release/ostanlabs/obsidian_plugin.svg)](https://github.com/ostanlabs/obsidian_plugin/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Current Version:** v1.8.42
+**Current Version:** v1.8.42 | [📦 npm Package](https://www.npmjs.com/package/canvas-project-manager)
 
 A powerful Obsidian plugin that transforms Canvas into a full-featured project management tool with hierarchical entity management, visual organization, and optional Notion integration.
 
@@ -31,6 +32,20 @@ Canvas Project Manager enables structured project planning directly within Obsid
 
 **Latest Version:** v1.8.42
 
+#### Option A: Install from npm (Recommended)
+
+```bash
+# Install the package
+npm install canvas-project-manager
+
+# Copy to your vault
+mkdir -p /path/to/vault/.obsidian/plugins/canvas-project-manager
+cp node_modules/canvas-project-manager/{main.js,manifest.json,styles.css} \
+  /path/to/vault/.obsidian/plugins/canvas-project-manager/
+```
+
+#### Option B: Build from Source (For Development)
+
 ```bash
 # Clone and build
 git clone https://github.com/ostanlabs/obsidian_plugin.git
@@ -43,7 +58,7 @@ mkdir -p /path/to/vault/.obsidian/plugins/canvas-project-manager
 cp main.js manifest.json styles.css /path/to/vault/.obsidian/plugins/canvas-project-manager/
 ```
 
-Then in Obsidian: **Settings → Community Plugins → Enable Canvas Project Manager**
+**Enable in Obsidian:** Settings → Community Plugins → Enable Canvas Project Manager
 
 ### First Steps
 

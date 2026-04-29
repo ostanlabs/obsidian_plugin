@@ -1,15 +1,25 @@
 # Canvas Project Manager - Development Guide
 
+> **For Users:** If you just want to use the plugin, install from npm: `npm install canvas-project-manager`
+> This guide is for developers who want to contribute or modify the plugin.
+
 ## Prerequisites
 
 - Node.js v16 or higher
 - npm (comes with Node.js)
+- Git
 - Obsidian (latest version)
 - An Obsidian vault for testing
 
 ## Quick Start
 
+### Clone and Build
+
 ```bash
+# Clone the repository
+git clone https://github.com/ostanlabs/obsidian_plugin.git
+cd obsidian_plugin
+
 # Install dependencies
 npm install
 

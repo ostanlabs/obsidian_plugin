@@ -481,13 +481,16 @@ AI: "What entities have no dependencies?"
 
 ### Step 1: Install MCP Server
 
+The MCP server is available via npx (no installation needed):
+
 ```bash
-npm install -g obsidian-accomplishments-mcp
+npx -y obsidian-accomplishments-mcp
 ```
 
-Or use npx (no installation):
+Or install globally:
+
 ```bash
-npx obsidian-accomplishments-mcp
+npm install -g obsidian-accomplishments-mcp
 ```
 
 ### Step 2: Configure AI Assistant
