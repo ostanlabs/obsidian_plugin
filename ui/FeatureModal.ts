@@ -77,8 +77,8 @@ export class FeatureModal extends Modal {
 
 	private addUserStoryInput(contentEl: HTMLElement): void {
 		new Setting(contentEl)
-			.setName("User Story")
-			.setDesc("As a [user], I want to [action], so that [benefit]")
+			.setName("User story")
+			.setDesc("As a [user], i want to [action], so that [benefit]")
 			.addTextArea((text) => {
 				text.inputEl.rows = 3;
 				text.inputEl.cols = 50;
@@ -117,13 +117,13 @@ export class FeatureModal extends Modal {
 			.setDesc("Comma-separated list of target personas")
 			.addText((text) => {
 				text.setValue(this.result.personas.join(", "))
-					.setPlaceholder("Developer, Team Lead")
+					.setPlaceholder("Developer, team lead")
 					.onChange((v) => { this.result.personas = v.split(",").map(s => s.trim()).filter(s => s); });
 			});
 	}
 
 	private addAcceptanceCriteria(contentEl: HTMLElement): void {
-		new Setting(contentEl).setName("Acceptance Criteria").setHeading();
+		new Setting(contentEl).setName("Acceptance criteria").setHeading();
 		this.criteriaContainer = contentEl.createDiv({ cls: "feature-criteria-container" });
 		this.renderCriteria();
 	}
@@ -144,7 +144,7 @@ export class FeatureModal extends Modal {
 				this.renderCriteria();
 			});
 		}
-		const addBtn = this.criteriaContainer.createEl("button", { text: "+ Add criterion", cls: "feature-add-criterion" });
+		const addBtn = this.criteriaContainer.createEl("button", { text: "+ add criterion", cls: "feature-add-criterion" });
 		addBtn.addEventListener("click", () => {
 			this.result.acceptance_criteria.push("");
 			this.renderCriteria();

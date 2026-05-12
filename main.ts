@@ -320,7 +320,7 @@ private registerCommands(): void {
 	// Command 3: Regenerate templates
 	this.addCommand({
 		id: "regenerate-templates",
-		name: "Project Canvas: Regenerate templates",
+		name: "Project canvas: regenerate templates",
 		callback: async () => {
 			await this.ensureTemplatesExist(true);
 			new Notice("Templates regenerated successfully");
@@ -330,7 +330,7 @@ private registerCommands(): void {
 	// Command 4: Sync all notes in current canvas to Notion
 	this.addCommand({
 		id: "sync-canvas-notes-to-notion",
-		name: "Project Canvas: Sync all canvas notes to Notion",
+		name: "Project canvas: sync all canvas notes to Notion",
 		callback: async () => {
 			await this.syncAllCanvasNotesToNotion();
 		},
@@ -339,7 +339,7 @@ private registerCommands(): void {
 	// Command 6: Populate canvas from vault entities
 	this.addCommand({
 		id: "populate-canvas-from-vault",
-		name: "Project Canvas: Populate from vault",
+		name: "Project canvas: populate from vault",
 		callback: async () => {
 			await this.populateCanvasFromVault();
 		},
@@ -348,7 +348,7 @@ private registerCommands(): void {
 	// Command 8: Reposition canvas nodes (V4 algorithm - default)
 	this.addCommand({
 		id: "reposition-canvas-nodes",
-		name: "Project Canvas: Reposition nodes (V4 algorithm)",
+		name: "Project canvas: reposition nodes (v4 algorithm)",
 		callback: async () => {
 			await this.repositionCanvasNodesV4();
 		},
@@ -357,8 +357,8 @@ private registerCommands(): void {
 	// Command: Search for entity on canvas
 	this.addCommand({
 		id: "search-entity-on-canvas",
-		name: "Project Canvas: Search Entity on Canvas",
-		hotkeys: [{ modifiers: ["Mod", "Shift"], key: "f" }],
+		name: "Project canvas: search entity on canvas",
+
 		callback: () => {
 			// Create a dummy anchor element for the popup
 			const dummyAnchor = document.createElement("div");
@@ -369,7 +369,7 @@ private registerCommands(): void {
 	// Command: Focus on In Progress entities
 	this.addCommand({
 		id: "focus-in-progress",
-		name: "Project Canvas: Focus on In Progress",
+		name: "Project canvas: focus on in progress",
 		callback: async () => {
 			await this.focusOnInProgressEntities();
 		},
@@ -377,7 +377,7 @@ private registerCommands(): void {
 
 	this.addCommand({
 		id: "reconcile-relationships",
-		name: "Project Canvas: Reconcile All Relationships",
+		name: "Project canvas: reconcile all relationships",
 		callback: async () => {
 			await this.reconcileAllRelationships();
 		},
@@ -876,7 +876,7 @@ private registerCommands(): void {
 	 * and enables it in Obsidian's appearance settings
 	 */
 	async setupStyles(): Promise<void> {
-		const snippetsFolder = normalizePath(".obsidian/snippets");
+		const snippetsFolder = normalizePath(`${this.app.vault.configDir}/snippets`);
 		const snippetPath = normalizePath(`${snippetsFolder}/canvas-project-manager.css`);
 
 		// Ensure snippets folder exists
@@ -994,7 +994,7 @@ private registerCommands(): void {
 	 */
 	async enableCssSnippet(snippetName: string): Promise<void> {
 		try {
-			const configPath = normalizePath(".obsidian/appearance.json");
+			const configPath = normalizePath(`${this.app.vault.configDir}/appearance.json`);
 			const configExists = await this.app.vault.adapter.exists(configPath);
 
 			let config: { enabledCssSnippets?: string[]; [key: string]: unknown } = {};
@@ -1323,11 +1323,11 @@ private registerCommands(): void {
 		// Add "Hide All" toggle button
 		const hideAllBtn = document.createElement("button");
 		hideAllBtn.className = "canvas-pm-visibility-btn canvas-pm-hide-all-btn clickable-icon";
-		hideAllBtn.setAttribute("aria-label", "Hide All Entity Types");
+		hideAllBtn.setAttribute("aria-label", "Hide all entity types");
 		hideAllBtn.setAttribute("data-type", "hide-all");
 		hideAllBtn.textContent = "⊘";
-		hideAllBtn.title = "Hide All Entity Types";
-		hideAllBtn.style.marginLeft = "4px";
+		hideAllBtn.title = "Hide all entity types";
+		hideAllBtn.setCssProps({ "margin-left": "4px" });
 
 		hideAllBtn.addEventListener("click", (e) => {
 			e.preventDefault();
@@ -1356,10 +1356,10 @@ private registerCommands(): void {
 		// Add "Find" button for entity search
 		const findBtn = document.createElement("button");
 		findBtn.className = "canvas-pm-find-btn clickable-icon";
-		findBtn.setAttribute("aria-label", "Find Entity on Canvas");
+		findBtn.setAttribute("aria-label", "Find entity on canvas");
 		findBtn.textContent = "🔍";
-		findBtn.title = "Find Entity on Canvas";
-		findBtn.style.marginLeft = "4px";
+		findBtn.title = "Find entity on canvas";
+		findBtn.setCssProps({ "margin-left": "4px" });
 
 		findBtn.addEventListener("click", (e) => {
 			e.preventDefault();
@@ -1465,8 +1465,8 @@ private registerCommands(): void {
 			const findBtn = document.createElement("button");
 			findBtn.className = "canvas-pm-find-btn-floating";
 			findBtn.textContent = "🔍";
-			findBtn.title = "Find Entity on Canvas";
-			findBtn.style.cssText = "margin-left: 4px; background: none; border: none; cursor: pointer; font-size: 14px;";
+			findBtn.title = "Find entity on canvas";
+			findBtn.setCssProps({ "margin-left": "4px", background: "none", border: "none", cursor: "pointer", "font-size": "14px" });
 
 			findBtn.addEventListener("click", (e) => {
 				e.preventDefault();
@@ -1654,10 +1654,10 @@ private registerCommands(): void {
 				`;
 
 				item.addEventListener("mouseenter", () => {
-					item.style.background = "var(--background-modifier-hover)";
+					item.setCssProps({ background: "var(--background-modifier-hover)" });
 				});
 				item.addEventListener("mouseleave", () => {
-					item.style.background = "";
+					item.setCssProps({ background: "" });
 				});
 				item.addEventListener("click", () => {
 					this.zoomToCanvasNode(match.nodeId);
@@ -1690,7 +1690,7 @@ private registerCommands(): void {
 
 				if (currentFocused) {
 					currentFocused.classList.remove("canvas-pm-search-result-focused");
-					currentFocused.style.background = "";
+					currentFocused.setCssProps({ background: "" });
 					const currentIndex = items.indexOf(currentFocused);
 					nextIndex = e.key === "ArrowDown"
 						? (currentIndex + 1) % items.length
@@ -1698,7 +1698,7 @@ private registerCommands(): void {
 				}
 
 				items[nextIndex].classList.add("canvas-pm-search-result-focused");
-				items[nextIndex].style.background = "var(--background-modifier-hover)";
+				items[nextIndex].setCssProps({ background: "var(--background-modifier-hover)" });
 				items[nextIndex].scrollIntoView({ block: "nearest" });
 			}
 		});
@@ -2008,7 +2008,7 @@ private registerCommands(): void {
 		if (entity.type !== 'feature') {
 			menu.addItem((item: MenuItem) => {
 				item
-					.setTitle("Link to Feature...")
+					.setTitle("Link to feature...")
 					.setIcon("star")
 					.onClick(() => this.linkCurrentEntityToFeature());
 			});
@@ -2032,7 +2032,7 @@ private registerCommands(): void {
 		// Open Feature Details panel
 		menu.addItem((item: MenuItem) => {
 			item
-				.setTitle("Open Feature Details Panel")
+				.setTitle("Open feature details panel")
 				.setIcon("layout-sidebar-right")
 				.onClick(() => this.activateFeatureDetailsView());
 		});
@@ -4565,7 +4565,7 @@ private registerCommands(): void {
 	 */
 	private async removeArchivedNodesFromCanvas(canvasFile: TFile): Promise<number> {
 		console.group('[Canvas Plugin] removeArchivedNodesFromCanvas');
-		new Notice(`🔍 Scanning canvas for archived nodes...`);
+		new Notice("🔍 scanning canvas for archived nodes...");
 
 		try {
 			const canvasData = await loadCanvasData(this.app, canvasFile);
@@ -4618,7 +4618,7 @@ private registerCommands(): void {
 			if (nodesToRemove.size === 0) {
 				console.log('No archived nodes to remove');
 				console.groupEnd();
-				new Notice(`✅ No archived nodes found on canvas`);
+				new Notice("✅ no archived nodes found on canvas");
 				return 0;
 			}
 
@@ -4746,7 +4746,7 @@ private registerCommands(): void {
 				onOpen() {
 					const { contentEl } = this;
 					contentEl.empty();
-					contentEl.createEl("h2", { text: "Unarchive Entities" });
+					contentEl.createEl("h2", { text: "Unarchive entities" });
 					contentEl.createEl("p", {
 						text: `Scanning: ${archiveFolder}/`,
 						cls: "setting-item-description"
@@ -4758,20 +4758,18 @@ private registerCommands(): void {
 
 					// Create checkboxes for each entity type
 					const checkboxContainer = contentEl.createDiv({ cls: "unarchive-checkbox-container" });
-					checkboxContainer.style.marginBottom = "16px";
+					checkboxContainer.setCssProps({ "margin-bottom": "16px" });
 
 					for (const [type, folder] of Object.entries(typeToFolder)) {
 						const count = counts[type] || 0;
 						const itemDiv = checkboxContainer.createDiv({ cls: "unarchive-checkbox-item" });
-						itemDiv.style.display = "flex";
-						itemDiv.style.alignItems = "center";
-						itemDiv.style.marginBottom = "8px";
+						itemDiv.setCssProps({ display: "flex", "align-items": "center", "margin-bottom": "8px" });
 
 						const checkbox = itemDiv.createEl("input", { type: "checkbox" });
 						checkbox.id = `unarchive-${type}`;
 						checkbox.checked = this.selectedTypes.has(type);
 						checkbox.disabled = count === 0;
-						checkbox.style.marginRight = "8px";
+						checkbox.setCssProps({ "margin-right": "8px" });
 						checkbox.addEventListener("change", () => {
 							if (checkbox.checked) {
 								this.selectedTypes.add(type);
@@ -4783,7 +4781,7 @@ private registerCommands(): void {
 						const label = itemDiv.createEl("label");
 						label.htmlFor = `unarchive-${type}`;
 						label.textContent = `${type.charAt(0).toUpperCase() + type.slice(1)}s`;
-						label.style.marginRight = "8px";
+						label.setCssProps({ "margin-right": "8px" });
 
 						const countSpan = itemDiv.createEl("span", {
 							text: `(${count} archived)`,
@@ -4801,10 +4799,7 @@ private registerCommands(): void {
 
 					// Buttons
 					const buttonContainer = contentEl.createDiv({ cls: "modal-button-container" });
-					buttonContainer.style.display = "flex";
-					buttonContainer.style.justifyContent = "flex-end";
-					buttonContainer.style.gap = "8px";
-					buttonContainer.style.marginTop = "16px";
+					buttonContainer.setCssProps({ display: "flex", "justify-content": "flex-end", gap: "8px", "margin-top": "16px" });
 
 					const cancelBtn = buttonContainer.createEl("button", { text: "Cancel" });
 					cancelBtn.addEventListener("click", () => {
@@ -4812,7 +4807,7 @@ private registerCommands(): void {
 					});
 
 					const confirmBtn = buttonContainer.createEl("button", {
-						text: "Unarchive Selected",
+						text: "Unarchive selected",
 						cls: "mod-cta"
 					});
 					confirmBtn.addEventListener("click", () => {
@@ -4906,7 +4901,7 @@ private registerCommands(): void {
 					if (existingFile instanceof TFile) {
 						// Destination exists - delete the archived duplicate quietly
 						console.log(`    [DUPLICATE] Destination exists, deleting archived file: ${file.path}`);
-						await this.app.vault.delete(file);
+						await this.app.fileManager.trashFile(file);
 						unarchivedCount++; // Count as processed
 						processedCount++;
 						continue;
@@ -9123,7 +9118,7 @@ private registerCommands(): void {
 		if (this.settings.entityNavigator.showDataviewWarning) {
 			const dataviewPlugin = (this.app as any).plugins?.getPlugin?.('dataview');
 			if (!dataviewPlugin) {
-				new Notice("⚠️ Dataview plugin not found. Some Entity Navigator features may be limited.", 5000);
+				new Notice("⚠️ dataview plugin not found. Some entity navigator features may be limited.", 5000);
 			}
 		}
 
@@ -9489,15 +9484,13 @@ private registerCommands(): void {
 				}
 				onOpen() {
 					const { contentEl } = this;
-					contentEl.createEl("h3", { text: "Select Feature Phase" });
+					contentEl.createEl("h3", { text: "Select feature phase" });
 					phases.forEach((phase) => {
 						const btn = contentEl.createEl("button", {
 							text: `Phase ${phase}${phase === currentPhase ? " (current)" : ""}`,
 							cls: phase === currentPhase ? "mod-cta" : "",
 						});
-						btn.style.display = "block";
-						btn.style.marginBottom = "8px";
-						btn.style.width = "100%";
+						btn.setCssProps({ display: "block", "margin-bottom": "8px", width: "100%" });
 						btn.addEventListener("click", () => {
 							this.result = phase;
 							this.close();
@@ -9528,7 +9521,8 @@ private registerCommands(): void {
 			new Notice(`Features canvas already exists at ${canvasPath}`);
 			// Open the existing canvas
 			const leaf = this.app.workspace.getLeaf(false);
-			await leaf.openFile(existingFile as TFile);
+			if (!(existingFile instanceof TFile)) return;
+			await leaf.openFile(existingFile);
 			return;
 		}
 
@@ -9807,7 +9801,7 @@ private registerCommands(): void {
 	private async linkCurrentEntityToFeature(): Promise<void> {
 		const activeFile = this.app.workspace.getActiveFile();
 		if (!activeFile || activeFile.extension !== "md") {
-			new Notice("Please open a markdown file first");
+			new Notice("Please open a Markdown file first");
 			return;
 		}
 
@@ -9977,7 +9971,7 @@ private registerCommands(): void {
 		}
 
 		if (!futureFile) {
-			new Notice("FUTURE_FEATURES.md not found in vault root or docs folder");
+			new Notice("Future_features.md not found in vault root or docs folder");
 			return;
 		}
 
@@ -9985,7 +9979,7 @@ private registerCommands(): void {
 		const features = this.parseFutureFeatures(content);
 
 		if (features.length === 0) {
-			new Notice("No features found in FUTURE_FEATURES.md");
+			new Notice("No features found in future_features.md");
 			return;
 		}
 

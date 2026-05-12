@@ -311,11 +311,11 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 		}
 
 		// Entity Navigator Section
-		new Setting(containerEl).setName("Entity Navigator").setHeading();
+		new Setting(containerEl).setName("Entity navigator").setHeading();
 
 		new Setting(containerEl)
-			.setName("Show Dataview warning")
-			.setDesc("Show a warning notice if Dataview plugin is not installed")
+			.setName("Show dataview warning")
+			.setDesc("Show a warning notice if dataview plugin is not installed")
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.entityNavigator.showDataviewWarning)
@@ -345,7 +345,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			.setDesc("Folder path for milestone entities")
 			.addText((text) =>
 				text
-					.setPlaceholder("milestones")
+					.setPlaceholder("Milestones")
 					.setValue(this.plugin.settings.entityNavigator.milestonesFolder)
 					.onChange((value) => {
 						this.plugin.settings.entityNavigator.milestonesFolder = value;
@@ -358,7 +358,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			.setDesc("Folder path for story entities")
 			.addText((text) =>
 				text
-					.setPlaceholder("stories")
+					.setPlaceholder("Stories")
 					.setValue(this.plugin.settings.entityNavigator.storiesFolder)
 					.onChange((value) => {
 						this.plugin.settings.entityNavigator.storiesFolder = value;
@@ -371,7 +371,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			.setDesc("Folder path for task entities")
 			.addText((text) =>
 				text
-					.setPlaceholder("tasks")
+					.setPlaceholder("Tasks")
 					.setValue(this.plugin.settings.entityNavigator.tasksFolder)
 					.onChange((value) => {
 						this.plugin.settings.entityNavigator.tasksFolder = value;
@@ -384,7 +384,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			.setDesc("Folder path for decision entities")
 			.addText((text) =>
 				text
-					.setPlaceholder("decisions")
+					.setPlaceholder("Decisions")
 					.setValue(this.plugin.settings.entityNavigator.decisionsFolder)
 					.onChange((value) => {
 						this.plugin.settings.entityNavigator.decisionsFolder = value;
@@ -397,7 +397,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			.setDesc("Folder path for document entities")
 			.addText((text) =>
 				text
-					.setPlaceholder("documents")
+					.setPlaceholder("Documents")
 					.setValue(this.plugin.settings.entityNavigator.documentsFolder)
 					.onChange((value) => {
 						this.plugin.settings.entityNavigator.documentsFolder = value;
@@ -410,7 +410,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			.setDesc("Folder path for feature entities")
 			.addText((text) =>
 				text
-					.setPlaceholder("features")
+					.setPlaceholder("Features")
 					.setValue(this.plugin.settings.entityNavigator.featuresFolder)
 					.onChange((value) => {
 						this.plugin.settings.entityNavigator.featuresFolder = value;
@@ -419,7 +419,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 			);
 
 		// HTTP Server Section
-		new Setting(containerEl).setName("HTTP Server").setHeading();
+		new Setting(containerEl).setName("HTTP server").setHeading();
 
 		new Setting(containerEl)
 			.setName("Enable HTTP server")
@@ -453,7 +453,7 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 				)
 				.addButton((button) =>
 					button
-						.setButtonText("Restart Server")
+						.setButtonText("Restart server")
 						.onClick(() => {
 							this.plugin.restartHttpServer();
 						})

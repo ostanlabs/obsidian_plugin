@@ -64,7 +64,7 @@ export class LinkFeatureModal extends Modal {
 
 		// Relationship type dropdown
 		new Setting(contentEl)
-			.setName("Relationship Type")
+			.setName("Relationship type")
 			.setDesc("How this entity relates to the feature")
 			.addDropdown((dropdown) => {
 				if (this.options.entityType === "milestone" || this.options.entityType === "story") {
@@ -91,7 +91,7 @@ export class LinkFeatureModal extends Modal {
 			.setName("Feature")
 			.setDesc("Select the feature to link to")
 			.addDropdown((dropdown) => {
-				dropdown.addOption("", "-- Select a feature --");
+				dropdown.addOption("", "-- select a feature --");
 				for (const feature of this.options.availableFeatures) {
 					const label = `${feature.id}: ${feature.title} (${feature.tier}/${feature.phase})`;
 					dropdown.addOption(feature.id, label);
@@ -108,7 +108,7 @@ export class LinkFeatureModal extends Modal {
 		cancelBtn.addEventListener("click", () => this.close());
 		
 		const submitBtn = buttonContainer.createEl("button", { 
-			text: "Link Feature", 
+			text: "Link feature", 
 			cls: "mod-cta" 
 		});
 		submitBtn.addEventListener("click", () => this.submit());

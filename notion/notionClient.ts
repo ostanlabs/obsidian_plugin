@@ -280,12 +280,11 @@ export class NotionClient {
 					},
 				},
 			};
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			await this.client.databases.update({
+			await (this.client.databases.update as Function)({
 				database_id: databaseId,
 				properties: {
 					"Depends On": dependsOnProperty,
-				} as any,
+				},
 			});
 
 			this.logger.info("Dependency relation added successfully");

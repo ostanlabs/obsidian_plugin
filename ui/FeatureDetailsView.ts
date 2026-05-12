@@ -17,7 +17,7 @@ export class FeatureDetailsView extends ItemView {
 	}
 
 	getDisplayText(): string {
-		return "Feature Details";
+		return "Feature details";
 	}
 
 	getIcon(): string {
@@ -104,7 +104,7 @@ export class FeatureDetailsView extends ItemView {
 		// User Story
 		if (f.user_story) {
 			const storySection = container.createDiv({ cls: "feature-details-section" });
-			storySection.createEl("h5", { text: "User Story" });
+			storySection.createEl("h5", { text: "User story" });
 			storySection.createEl("p", { text: f.user_story, cls: "feature-user-story" });
 		}
 
@@ -120,7 +120,7 @@ export class FeatureDetailsView extends ItemView {
 		// Acceptance Criteria
 		if (f.acceptance_criteria && f.acceptance_criteria.length > 0) {
 			const acSection = container.createDiv({ cls: "feature-details-section" });
-			acSection.createEl("h5", { text: "Acceptance Criteria" });
+			acSection.createEl("h5", { text: "Acceptance criteria" });
 			const list = acSection.createEl("ul");
 			for (const criterion of f.acceptance_criteria) {
 				list.createEl("li", { text: criterion });
@@ -152,7 +152,7 @@ export class FeatureDetailsView extends ItemView {
 	private renderEmptyState(container: HTMLElement): void {
 		const empty = container.createDiv({ cls: "feature-details-empty" });
 		empty.createEl("p", { text: "Open a feature file to see details" });
-		empty.createEl("p", { text: "Feature files start with F- (e.g., F-001)", cls: "feature-details-hint" });
+		empty.createEl("p", { text: "Feature files start with f- (e.g., f-001)", cls: "feature-details-hint" });
 	}
 }
 

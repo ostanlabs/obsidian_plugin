@@ -42,7 +42,7 @@ export class FeatureCoverageView extends ItemView {
 	}
 
 	getDisplayText(): string {
-		return "Feature Coverage";
+		return "Feature coverage";
 	}
 
 	getIcon(): string {
@@ -104,7 +104,7 @@ export class FeatureCoverageView extends ItemView {
 		container.addClass("feature-coverage-container");
 
 		// Header
-		container.createEl("h3", { text: "Feature Coverage Report" });
+		container.createEl("h3", { text: "Feature coverage report" });
 
 		// Filters
 		this.renderFilters(container);
@@ -121,7 +121,7 @@ export class FeatureCoverageView extends ItemView {
 
 		// Tier filter
 		const tierSelect = filterRow.createEl("select");
-		tierSelect.createEl("option", { value: "all", text: "All Tiers" });
+		tierSelect.createEl("option", { value: "all", text: "All tiers" });
 		tierSelect.createEl("option", { value: "OSS", text: "OSS" });
 		tierSelect.createEl("option", { value: "Premium", text: "Premium" });
 		tierSelect.value = this.filters.tier;
@@ -132,7 +132,7 @@ export class FeatureCoverageView extends ItemView {
 
 		// Phase filter
 		const phaseSelect = filterRow.createEl("select");
-		phaseSelect.createEl("option", { value: "all", text: "All Phases" });
+		phaseSelect.createEl("option", { value: "all", text: "All phases" });
 		["MVP", "0", "1", "2", "3", "4", "5"].forEach((p) => {
 			phaseSelect.createEl("option", { value: p, text: `Phase ${p}` });
 		});
@@ -144,7 +144,7 @@ export class FeatureCoverageView extends ItemView {
 
 		// Status filter
 		const statusSelect = filterRow.createEl("select");
-		statusSelect.createEl("option", { value: "all", text: "All Statuses" });
+		statusSelect.createEl("option", { value: "all", text: "All statuses" });
 		["Planned", "In Progress", "Complete", "Deferred"].forEach((s) => {
 			statusSelect.createEl("option", { value: s, text: s });
 		});
