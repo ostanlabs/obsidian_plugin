@@ -29,6 +29,15 @@ export function sanitizeFilename(filename: string): string {
 }
 
 /**
+ * WI-3: Generate filename in format <ID>_<title>.md
+ * ID-prefixed so files are self-identifying, aligned with MCP
+ */
+export function generateEntityFilename(id: string, title: string): string {
+	const sanitized = sanitizeFilename(title).substring(0, 100);
+	return `${id}_${sanitized}.md`;
+}
+
+/**
  * Generate a unique filename by adding -index suffix if file exists
  * @param app Obsidian app instance
  * @param folderPath Folder path (vault-relative)
@@ -62,7 +71,7 @@ export function generateUniqueFilename(
  * Check if a note was created by our plugin
  */
 export function isPluginCreatedNote(frontmatter: Partial<ItemFrontmatter> | undefined): boolean {
-	const validEntityTypes = ['milestone', 'story', 'task', 'decision', 'document'];
+	const validEntityTypes = ['milestone', 'story', 'task', 'decision', 'document', 'feature'];
 	return !!(
 		frontmatter &&
 		frontmatter.type &&
