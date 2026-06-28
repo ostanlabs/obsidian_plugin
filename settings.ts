@@ -418,47 +418,23 @@ export class CanvasStructuredItemsSettingTab extends PluginSettingTab {
 					})
 			);
 
-		// HTTP Server Section
-		new Setting(containerEl).setName("HTTP server").setHeading();
+		// Developer section
+		new Setting(containerEl).setName("Developer").setHeading();
 
 		new Setting(containerEl)
-			.setName("Enable HTTP server")
-			.setDesc("Start an HTTP server to allow external tools to trigger plugin actions")
+			.setName("Debug mode")
+			.setDesc(
+				"When enabled, verbose console.debug and console.log output is printed to the developer console. Disable in production to keep logs clean."
+			)
 			.addToggle((toggle) =>
 				toggle
-					.setValue(this.plugin.settings.httpServerEnabled)
+					.setValue(this.plugin.settings.debugMode)
 					.onChange((value) => {
-						this.plugin.settings.httpServerEnabled = value;
+						this.plugin.settings.debugMode = value;
 						void this.plugin.saveSettings();
-						this.plugin.restartHttpServer();
-						this.display(); // Refresh to show/hide port setting
 					})
 			);
 
-		if (this.plugin.settings.httpServerEnabled) {
-			new Setting(containerEl)
-				.setName("Server port")
-				.setDesc("Port number for the HTTP server (default: 12312)")
-				.addText((text) =>
-					text
-						.setPlaceholder("12312")
-						.setValue(String(this.plugin.settings.httpServerPort))
-						.onChange((value) => {
-							const port = parseInt(value, 10);
-							if (!isNaN(port) && port > 0 && port < 65536) {
-								this.plugin.settings.httpServerPort = port;
-								void this.plugin.saveSettings();
-							}
-						})
-				)
-				.addButton((button) =>
-					button
-						.setButtonText("Restart server")
-						.onClick(() => {
-							this.plugin.restartHttpServer();
-						})
-				);
-		}
 	}
 }
 

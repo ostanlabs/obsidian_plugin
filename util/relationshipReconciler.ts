@@ -1,5 +1,11 @@
 import { App, TFile, Notice } from "obsidian";
-import { parseAnyFrontmatter, updateFrontmatter } from "./frontmatter";
+import { parseAnyFrontmatter, applyFrontmatterUpdates } from "./frontmatter";
+
+/**
+ * Fields that must remain scalar (single string value) rather than an array.
+ * When the reconciler adds a value to one of these fields it writes a string, not an array.
+ */
+const SCALAR_FIELDS = new Set(["parent"]);
 
 /**
  * Relationship pairs that should be bidirectional
@@ -107,7 +113,8 @@ export async function reconcileRelationships(
 		for (const [field, valuesToAdd] of fieldUpdates) {
 			const existingValues = getArrayField(frontmatter, field);
 			const newValues = [...new Set([...existingValues, ...valuesToAdd])];
-			updates[field] = newValues;
+			// Scalar fields (e.g. "parent") must not be written as an array
+			updates[field] = SCALAR_FIELDS.has(field) ? newValues[0] ?? "" : newValues;
 			
 			result.details.push({
 				entityId,
@@ -119,9 +126,7 @@ export async function reconcileRelationships(
 
 		// Update the file
 		try {
-			const content = await app.vault.read(file);
-			const updatedContent = updateFrontmatter(content, updates);
-			await app.vault.modify(file, updatedContent);
+			await applyFrontmatterUpdates(app, file, updates);
 			console.log(`[Reconciler] Updated ${entityId}: ${JSON.stringify(updates)}`);
 		} catch (e) {
 			console.error(`[Reconciler] Failed to update ${file.path}:`, e);
@@ -381,9 +386,7 @@ export async function cleanTransitiveDependencies(
 		// Update the file if there are changes
 		if (Object.keys(updates).length > 0) {
 			try {
-				const content = await app.vault.read(file);
-				const updatedContent = updateFrontmatter(content, updates);
-				await app.vault.modify(file, updatedContent);
+				await applyFrontmatterUpdates(app, file, updates);
 			} catch (e) {
 				console.error(`[TransitiveCleanup] Failed to update ${file.path}:`, e);
 			}
@@ -407,9 +410,7 @@ export async function cleanTransitiveDependencies(
 
 		if (Object.keys(frontmatterUpdates).length > 0) {
 			try {
-				const content = await app.vault.read(entity.file);
-				const updatedContent = updateFrontmatter(content, frontmatterUpdates);
-				await app.vault.modify(entity.file, updatedContent);
+				await applyFrontmatterUpdates(app, entity.file, frontmatterUpdates);
 			} catch (e) {
 				console.error(`[TransitiveCleanup] Failed to update reverse relationships for ${entity.file.path}:`, e);
 			}
@@ -692,9 +693,7 @@ export async function detectAndBreakCycles(
 
 		if (Object.keys(updates).length > 0) {
 			try {
-				const content = await app.vault.read(file);
-				const updatedContent = updateFrontmatter(content, updates);
-				await app.vault.modify(file, updatedContent);
+				await applyFrontmatterUpdates(app, file, updates);
 				console.log(`[CycleBreaker] Updated ${file.path}`);
 			} catch (e) {
 				console.error(`[CycleBreaker] Failed to update ${file.path}:`, e);

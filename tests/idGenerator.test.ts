@@ -1,4 +1,4 @@
-import { generateId, findHighestId } from "../util/idGenerator";
+import { generateId, findHighestId, _resetSessionHighWaterForTests } from "../util/idGenerator";
 import { DEFAULT_SETTINGS } from "../types";
 
 // Mock Obsidian App
@@ -14,6 +14,7 @@ const mockApp: any = {
 describe("ID Generator", () => {
 	beforeEach(() => {
 		jest.clearAllMocks();
+		_resetSessionHighWaterForTests();
 	});
 
 	describe("generateId", () => {

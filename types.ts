@@ -53,9 +53,8 @@ export interface CanvasItemFromTemplateSettings {
 	autoSyncOnMdChange: boolean; // Auto-sync when MD file is modified
 	// Entity Navigator
 	entityNavigator: EntityNavigatorSettings;
-	// HTTP Server
-	httpServerEnabled: boolean;
-	httpServerPort: number;
+	// Developer options
+	debugMode: boolean; // When true, verbose console.debug/log output is emitted
 }
 
 export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
@@ -84,19 +83,24 @@ export const DEFAULT_SETTINGS: CanvasItemFromTemplateSettings = {
 	notionSyncIntervalMinutes: 5,
 	autoSyncOnMdChange: true,
 	entityNavigator: DEFAULT_ENTITY_NAVIGATOR_SETTINGS,
-	httpServerEnabled: false,
-	httpServerPort: 12312,
+	debugMode: false,
 };
 // v2.1 spec-aligned status/priority while staying backward compatible with Notion mapping
 export type ItemStatus = "Not Started" | "In Progress" | "Completed" | "Blocked";
 export type ItemPriority = "Low" | "Medium" | "High" | "Critical";
 
+/** Decision status values - per MCP v2 spec */
+export type DecisionStatus = 'Pending' | 'Decided' | 'Superseded';
+
+/** Document status values - per MCP v2 spec */
+export type DocumentStatus = 'Draft' | 'Review' | 'Approved' | 'Superseded';
+
 export interface ItemFrontmatter {
 	type: EntityType;
 	title: string;
-	effort: string;
+	workstream?: string; // MCP v2 spec: workstream (not effort)
 	id: string;
-	status: ItemStatus;
+	status: ItemStatus | DecisionStatus | DocumentStatus; // Type-aware status
 	priority: ItemPriority;
 	inProgress?: boolean; // When true, node border is red
 	time_estimate?: number; // Total time estimate in hours (sum of task estimates)
@@ -105,11 +109,16 @@ export interface ItemFrontmatter {
 	documents?: string[]; // Array of feature IDs this document documents (for documents)
 	affects?: string[]; // Array of feature IDs this decision affects (for decisions)
 	created_by_plugin?: boolean;
-	created: string;
-	updated: string;
+	created_at: string; // MCP v2 spec: created_at (not created)
+	updated_at: string; // MCP v2 spec: updated_at (not updated)
 	canvas_source: string;
 	vault_path: string;
 	notion_page_id?: string;
+
+	// Legacy fields for backwards compatibility during migration
+	effort?: string; // Deprecated: use workstream
+	created?: string; // Deprecated: use created_at
+	updated?: string; // Deprecated: use updated_at
 }
 
 /**
@@ -142,10 +151,13 @@ export interface FeatureFrontmatter {
 	depends_on?: string[];           // Other Features (F-XXX)
 	blocks?: string[];               // Features this blocks (auto-synced)
 
-	// Metadata (auto-managed)
-	last_updated: string;            // ISO 8601 datetime
+	// Metadata (auto-managed) - aligned with MCP v2 spec
+	updated_at: string;              // MCP v2 spec: updated_at (not last_updated)
 	created_at: string;              // ISO 8601 datetime
 	created_by_plugin?: boolean;
+
+	// Legacy field for backwards compatibility during migration
+	last_updated?: string;           // Deprecated: use updated_at
 }
 
 /**

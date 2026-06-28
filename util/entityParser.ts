@@ -93,7 +93,7 @@ export function parseEntityFromFrontmatter(
 		entityId,
 		nodeId,
 		type: entityType,
-		workstream: parseYamlValue(frontmatterText, 'workstream')?.toLowerCase() || 'unassigned',
+		workstream: parseYamlValue(frontmatterText, 'workstream')?.toLowerCase() || parseYamlValue(frontmatterText, 'effort')?.toLowerCase() || 'default',
 		parent: parseYamlValue(frontmatterText, 'parent'),
 		dependsOn: parseYamlArray(frontmatterText, 'depends_on'),
 		blocks: parseYamlArray(frontmatterText, 'blocks'),

@@ -1,3 +1,4 @@
+import { App, TFile } from "obsidian";
 import { ItemFrontmatter, FeatureFrontmatter, ItemStatus, ItemPriority, FeatureTier, FeaturePhase, FeatureStatus } from "../types";
 
 /**
@@ -121,12 +122,23 @@ export function parseFrontmatter(content: string): ItemFrontmatter | null {
 	const frontmatter = parseRawFrontmatter(content);
 	if (!frontmatter) return null;
 
+	// Auto-migrate legacy fields (WI-1 migration: auto-migrate on read)
+	if (frontmatter.created && !frontmatter.created_at) {
+		frontmatter.created_at = frontmatter.created;
+	}
+	if (frontmatter.updated && !frontmatter.updated_at) {
+		frontmatter.updated_at = frontmatter.updated;
+	}
+	if (frontmatter.effort && !frontmatter.workstream) {
+		frontmatter.workstream = frontmatter.effort;
+	}
+
 	// Validate required fields for standard entities
+	// Note: workstream is optional (defaults to 'default' in MCP spec)
 	if (
 		!frontmatter.type ||
 		!frontmatter.title ||
-		!frontmatter.id ||
-		!frontmatter.effort
+		!frontmatter.id
 	) {
 		return null;
 	}
@@ -288,6 +300,31 @@ export function createWithFrontmatter(body: string, frontmatter: Partial<ItemFro
 }
 
 /**
+ * Apply frontmatter updates to a file using Obsidian's processFrontMatter API.
+ * This is the safe, API-compliant replacement for the read→updateFrontmatter→modify pattern.
+ * processFrontMatter handles all YAML escaping, comment preservation, and concurrent-write safety.
+ *
+ * @param app Obsidian App instance
+ * @param file TFile to update
+ * @param updates Fields to set/update. Pass null or undefined for a field to delete it.
+ */
+export async function applyFrontmatterUpdates(
+	app: App,
+	file: TFile,
+	updates: Record<string, unknown>
+): Promise<void> {
+	await app.fileManager.processFrontMatter(file, (fm) => {
+		for (const [key, value] of Object.entries(updates)) {
+			if (value === undefined || value === null || value === "") {
+				delete fm[key];
+			} else {
+				fm[key] = value;
+			}
+		}
+	});
+}
+
+/**
  * Serialize frontmatter object to YAML string
  */
 export function serializeFrontmatter(frontmatter: ItemFrontmatter): string {
@@ -296,14 +333,22 @@ export function serializeFrontmatter(frontmatter: ItemFrontmatter): string {
 	lines.push(`type: ${frontmatter.type}`);
 	lines.push(`title: ${frontmatter.title}`);
 	lines.push(`id: ${frontmatter.id}`);
-	lines.push(`effort: ${frontmatter.effort}`);
+
+	// MCP v2 spec: use workstream (with backwards compat fallback)
+	const workstream = frontmatter.workstream ?? frontmatter.effort ?? 'default';
+	lines.push(`workstream: ${workstream}`);
 
 	lines.push(`status: ${frontmatter.status}`);
 	lines.push(`priority: ${frontmatter.priority}`);
 	lines.push(`inProgress: ${frontmatter.inProgress ?? false}`);
 	lines.push(`created_by_plugin: ${frontmatter.created_by_plugin ?? true}`);
-	lines.push(`created: ${frontmatter.created}`);
-	lines.push(`updated: ${frontmatter.updated}`);
+
+	// MCP v2 spec: use created_at/updated_at (with backwards compat fallback)
+	const created_at = frontmatter.created_at ?? frontmatter.created ?? '';
+	const updated_at = frontmatter.updated_at ?? frontmatter.updated ?? '';
+	lines.push(`created_at: ${created_at}`);
+	lines.push(`updated_at: ${updated_at}`);
+
 	lines.push(`canvas_source: ${frontmatter.canvas_source}`);
 	lines.push(`vault_path: ${frontmatter.vault_path}`);
 

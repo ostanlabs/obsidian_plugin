@@ -12,15 +12,15 @@ export function replacePlaceholders(
 	// Replace all frontmatter fields
 	result = result.replace(/\{\{title\}\}/g, frontmatter.title);
 	result = result.replace(/\{\{type\}\}/g, frontmatter.type);
-	result = result.replace(/\{\{effort\}\}/g, frontmatter.effort);
+	result = result.replace(/\{\{workstream\}\}/g, frontmatter.workstream ?? frontmatter.effort ?? 'default');
 	result = result.replace(/\{\{id\}\}/g, frontmatter.id);
 	result = result.replace(/\{\{status\}\}/g, frontmatter.status);
 	result = result.replace(/\{\{priority\}\}/g, frontmatter.priority);
 	result = result.replace(/\{\{inProgress\}\}/g, String(frontmatter.inProgress ?? false));
 	result = result.replace(/\{\{time_estimate\}\}/g, String(frontmatter.time_estimate ?? 0));
 	result = result.replace(/\{\{depends_on\}\}/g, JSON.stringify(frontmatter.depends_on ?? []));
-	result = result.replace(/\{\{created\}\}/g, frontmatter.created);
-	result = result.replace(/\{\{updated\}\}/g, frontmatter.updated);
+	result = result.replace(/\{\{created_at\}\}/g, frontmatter.created_at ?? frontmatter.created ?? '');
+	result = result.replace(/\{\{updated_at\}\}/g, frontmatter.updated_at ?? frontmatter.updated ?? '');
 	result = result.replace(/\{\{created_by_plugin\}\}/g, String(frontmatter.created_by_plugin ?? true));
 	result = result.replace(/\{\{canvas_source\}\}/g, frontmatter.canvas_source);
 	result = result.replace(/\{\{vault_path\}\}/g, frontmatter.vault_path);
@@ -56,7 +56,7 @@ export function replaceFeaturePlaceholders(
 	result = result.replace(/\{\{decided_by\}\}/g, JSON.stringify(frontmatter.decided_by ?? []));
 	result = result.replace(/\{\{depends_on\}\}/g, JSON.stringify(frontmatter.depends_on ?? []));
 	result = result.replace(/\{\{blocks\}\}/g, JSON.stringify(frontmatter.blocks ?? []));
-	result = result.replace(/\{\{last_updated\}\}/g, frontmatter.last_updated);
+	result = result.replace(/\{\{updated_at\}\}/g, frontmatter.updated_at);
 	result = result.replace(/\{\{created_at\}\}/g, frontmatter.created_at);
 	result = result.replace(/\{\{created_by_plugin\}\}/g, String(frontmatter.created_by_plugin ?? true));
 
@@ -70,15 +70,15 @@ export const DEFAULT_ACCOMPLISHMENT_TEMPLATE = `---
 type: {{type}}
 title: {{title}}
 id: {{id}}
-effort: {{effort}}
+workstream: {{workstream}}
 status: Not Started
 priority: High
 inProgress: false
 time_estimate: 0
 depends_on: []
 created_by_plugin: true
-created: {{created}}
-updated: {{updated}}
+created_at: {{created_at}}
+updated_at: {{updated_at}}
 canvas_source: {{canvas_source}}
 vault_path: {{vault_path}}
 notion_page_id: {{notion_page_id}}
@@ -143,7 +143,7 @@ depends_on: {{depends_on}}
 blocks: {{blocks}}
 
 # Metadata
-last_updated: {{last_updated}}
+updated_at: {{updated_at}}
 created_at: {{created_at}}
 created_by_plugin: {{created_by_plugin}}
 ---

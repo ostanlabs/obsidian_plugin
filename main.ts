@@ -1,5 +1,4 @@
 import { Plugin, TFile, Notice, normalizePath, Menu, MenuItem, WorkspaceLeaf, Modal, App } from "obsidian";
-import * as http from "http";
 import {
 	CanvasItemFromTemplateSettings,
 	DEFAULT_SETTINGS,
@@ -42,7 +41,7 @@ import {
 	replacePlaceholders,
 	replaceFeaturePlaceholders,
 } from "./util/template";
-import { parseFrontmatter, parseAnyFrontmatter, updateFrontmatter, parseFrontmatterAndBody, createWithFrontmatter } from "./util/frontmatter";
+import { parseFrontmatter, parseAnyFrontmatter, parseFrontmatterAndBody, createWithFrontmatter, applyFrontmatterUpdates } from "./util/frontmatter";
 import {
 	loadCanvasData,
 	saveCanvasData,
@@ -66,7 +65,7 @@ import {
 	edgeExists,
 	findNodeByEntityId,
 } from "./util/canvas";
-import { generateUniqueFilename, isPluginCreatedNote } from "./util/fileNaming";
+import { generateUniqueFilename, isPluginCreatedNote, generateEntityFilename } from "./util/fileNaming";
 import { addNodesToCanvasView, getCanvasView, hasInternalCanvasAPI, inspectCanvasAPI, addEdgesToCanvasView } from "./util/canvasView";
 import { EntityIndex, EntityIndexEntry, getEntityTypeFromId } from "./util/entityNavigator";
 import { PositioningEngineV3, EntityData, PositioningResult, EntityType as PositioningEntityType } from "./util/positioningV3";
@@ -115,8 +114,23 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	private controlPanelEl: HTMLElement | null = null;
 	// Entity Navigator index
 	private entityIndex: EntityIndex | null = null;
-	// HTTP Server instance
-	private httpServer: http.Server | null = null;
+	// Debug logging — replaced with no-op when debugMode is false
+	private _origConsoleDebug = console.debug.bind(console);
+	private _origConsoleLog   = console.log.bind(console);
+
+	/**
+	 * Install or remove the console.debug / console.log gate based on settings.debugMode.
+	 * When debugMode is off, both are silenced; console.warn/error always pass through.
+	 */
+	private applyDebugLogging(): void {
+		if (this.settings.debugMode) {
+			console.debug = this._origConsoleDebug;
+			console.log   = this._origConsoleLog;
+		} else {
+			console.debug = () => { /* debug logging silenced – enable Debug Mode in settings */ };
+			console.log   = () => { /* debug logging silenced – enable Debug Mode in settings */ };
+		}
+	}
 
 	private getCanvasNodeFromEventTarget(target: EventTarget | null): CanvasNodeResult | null {
 		if (!(target instanceof HTMLElement)) return null;
@@ -164,6 +178,7 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
+		this.applyDebugLogging();
 
 		// Initialize logger
 		this.logger = new Logger(this.app, "canvas-project-manager");
@@ -265,8 +280,6 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 			this.applyStylesToAllCanvasViews();
 			// Initialize Entity Navigator index
 			await this.initializeEntityNavigator();
-			// Start HTTP server if enabled
-			this.startHttpServer();
 		});
 
 		// Watch for canvas views opening to apply styles
@@ -290,10 +303,11 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	}
 
 	onunload() {
+		// Restore console methods to their originals before unloading
+		console.debug = this._origConsoleDebug;
+		console.log   = this._origConsoleLog;
 		// Stop bi-directional sync polling
 		this.stopNotionSyncPolling();
-		// Stop HTTP server
-		this.stopHttpServer();
 		// Remove control panel if exists
 		this.removeControlPanel();
 		void this.logger?.info("Plugin unloaded");
@@ -305,6 +319,8 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+		// Apply debug logging gate based on current settings
+		this.applyDebugLogging();
 		// Update Notion client with new settings
 		if (this.notionClient) {
 			this.notionClient.updateSettings(this.settings);
@@ -426,15 +442,29 @@ private registerCommands(): void {
 
 	/**
 	 * Determine the path for the new note
+	 * WI-2: Route to per-type folders matching MCP's TYPE_FOLDERS
+	 * WI-3: Use <ID>_<title>.md naming convention
 	 */
 	private async determineNotePath(
 		canvasFile: TFile,
 		title: string,
-		_id: string // ID is no longer used in filename
+		id: string,
+		type?: EntityType
 	): Promise<string> {
 		let baseFolder: string;
 
-		if (this.settings.inferBaseFolderFromCanvas) {
+		// WI-2: Use type-specific folders when type is provided
+		if (type) {
+			const typeFolderMap: Record<EntityType, string> = {
+				milestone: this.settings.entityNavigator.milestonesFolder,
+				story: this.settings.entityNavigator.storiesFolder,
+				task: this.settings.entityNavigator.tasksFolder,
+				decision: this.settings.entityNavigator.decisionsFolder,
+				document: this.settings.entityNavigator.documentsFolder,
+				feature: this.settings.entityNavigator.featuresFolder,
+			};
+			baseFolder = typeFolderMap[type];
+		} else if (this.settings.inferBaseFolderFromCanvas) {
 			// Use the same folder as the canvas file
 			baseFolder = canvasFile.parent?.path || "";
 		} else {
@@ -446,9 +476,9 @@ private registerCommands(): void {
 			await this.ensureFolderExists(baseFolder);
 		}
 
-		// Use title as filename, preserving whitespaces
-		// generateUniqueFilename will add -index suffix if file already exists
-		return generateUniqueFilename(this.app, baseFolder, title, "md");
+		// WI-3: Use <ID>_<title>.md format for consistency with MCP
+		const filename = generateEntityFilename(id, title);
+		return normalizePath(baseFolder ? `${baseFolder}/${filename}` : filename);
 	}
 
 	/**
@@ -605,13 +635,10 @@ private registerCommands(): void {
 			throw new Error("Note file not found");
 		}
 
-		const content = await this.app.vault.read(file);
-		const updatedContent = updateFrontmatter(content, {
+		await applyFrontmatterUpdates(this.app, file, {
 			notion_page_id: notionPageId,
-			updated: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
 		});
-
-		await this.app.vault.modify(file, updatedContent);
 		this.logger?.info("Note updated with Notion page ID", { notePath, notionPageId });
 	}
 
@@ -1391,38 +1418,36 @@ private registerCommands(): void {
 
 		const panel = document.createElement("div");
 		panel.className = "canvas-pm-control-panel";
-		panel.innerHTML = `
-			<div class="canvas-pm-control-header">
-				<span>Visibility</span>
-				<button class="canvas-pm-hide-all-btn-floating" title="${allHidden ? 'Show All' : 'Hide All'}">${allHidden ? '⊕' : '⊘'}</button>
-			</div>
-			<div class="canvas-pm-control-toggles">
-				<label class="canvas-pm-toggle">
-					<input type="checkbox" data-type="milestones" ${this.visibilityState.milestones ? "checked" : ""}>
-					<span class="canvas-pm-toggle-label">Milestones</span>
-				</label>
-				<label class="canvas-pm-toggle">
-					<input type="checkbox" data-type="stories" ${this.visibilityState.stories ? "checked" : ""}>
-					<span class="canvas-pm-toggle-label">Stories</span>
-				</label>
-				<label class="canvas-pm-toggle">
-					<input type="checkbox" data-type="tasks" ${this.visibilityState.tasks ? "checked" : ""}>
-					<span class="canvas-pm-toggle-label">Tasks</span>
-				</label>
-				<label class="canvas-pm-toggle">
-					<input type="checkbox" data-type="decisions" ${this.visibilityState.decisions ? "checked" : ""}>
-					<span class="canvas-pm-toggle-label">Decisions</span>
-				</label>
-				<label class="canvas-pm-toggle">
-					<input type="checkbox" data-type="documents" ${this.visibilityState.documents ? "checked" : ""}>
-					<span class="canvas-pm-toggle-label">Documents</span>
-				</label>
-				<label class="canvas-pm-toggle">
-					<input type="checkbox" data-type="features" ${this.visibilityState.features ? "checked" : ""}>
-					<span class="canvas-pm-toggle-label">Features</span>
-				</label>
-			</div>
-		`;
+
+		// Header
+		const header = panel.createDiv({ cls: "canvas-pm-control-header" });
+		header.createSpan({ text: "Visibility" });
+		header.createEl("button", {
+			cls: "canvas-pm-hide-all-btn-floating",
+			text: allHidden ? "⊕" : "⊘",
+			attr: { title: allHidden ? "Show All" : "Hide All" },
+		});
+
+		// Toggles
+		const togglesDiv = panel.createDiv({ cls: "canvas-pm-control-toggles" });
+		type VisKey = keyof typeof this.visibilityState;
+		const toggleDefs: { type: VisKey; label: string }[] = [
+			{ type: "milestones", label: "Milestones" },
+			{ type: "stories",    label: "Stories" },
+			{ type: "tasks",      label: "Tasks" },
+			{ type: "decisions",  label: "Decisions" },
+			{ type: "documents",  label: "Documents" },
+			{ type: "features",   label: "Features" },
+		];
+		for (const { type, label } of toggleDefs) {
+			const lbl = togglesDiv.createEl("label", { cls: "canvas-pm-toggle" });
+			const isChecked: boolean = this.visibilityState[type];
+			lbl.createEl("input", {
+				type: "checkbox",
+				attr: { "data-type": type, ...(isChecked ? { checked: "" } : {}) },
+			});
+			lbl.createSpan({ cls: "canvas-pm-toggle-label", text: label });
+		}
 
 		// Add event listeners for toggles
 		panel.querySelectorAll("input[type='checkbox']").forEach((checkbox) => {
@@ -1620,10 +1645,12 @@ private registerCommands(): void {
 		// Handle input changes
 		const updateResults = () => {
 			const query = input.value.toLowerCase().trim();
-			results.innerHTML = "";
+			results.empty();
 
 			if (!query) {
-				results.innerHTML = '<div style="padding: 8px; color: var(--text-muted); font-size: 12px;">Type to search...</div>';
+				const hint = results.createDiv({ cls: "canvas-pm-search-hint" });
+				hint.setCssProps({ padding: "8px", color: "var(--text-muted)", "font-size": "12px" });
+				hint.textContent = "Type to search...";
 				return;
 			}
 
@@ -1633,25 +1660,31 @@ private registerCommands(): void {
 			).slice(0, 10); // Limit to 10 results
 
 			if (matches.length === 0) {
-				results.innerHTML = '<div style="padding: 8px; color: var(--text-muted); font-size: 12px;">No matches found</div>';
+				const noMatch = results.createDiv({ cls: "canvas-pm-search-hint" });
+				noMatch.setCssProps({ padding: "8px", color: "var(--text-muted)", "font-size": "12px" });
+				noMatch.textContent = "No matches found";
 				return;
 			}
 
 			for (const match of matches) {
-				const item = document.createElement("div");
-				item.className = "canvas-pm-search-result-item";
-				item.style.cssText = `
-					padding: 8px 12px;
-					cursor: pointer;
-					border-radius: 4px;
-					display: flex;
-					align-items: center;
-					gap: 8px;
-				`;
-				item.innerHTML = `
-					<span style="font-weight: 600; color: var(--text-accent); min-width: 60px;">${match.entityId}</span>
-					<span style="color: var(--text-normal); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${match.title}</span>
-				`;
+				const item = results.createDiv({ cls: "canvas-pm-search-result-item" });
+				item.setCssProps({
+					padding: "8px 12px",
+					cursor: "pointer",
+					"border-radius": "4px",
+					display: "flex",
+					"align-items": "center",
+					gap: "8px",
+				});
+				// Use textContent to prevent XSS — match.entityId and match.title are user-controlled
+				item.createSpan({
+					text: match.entityId,
+					attr: { style: "font-weight: 600; color: var(--text-accent); min-width: 60px;" },
+				});
+				item.createSpan({
+					text: match.title,
+					attr: { style: "color: var(--text-normal); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" },
+				});
 
 				item.addEventListener("mouseenter", () => {
 					item.setCssProps({ background: "var(--background-modifier-hover)" });
@@ -2906,16 +2939,16 @@ private registerCommands(): void {
 				...existingFrontmatter, // Keep existing fields
 				type: result.type,
 				title: file.basename,
-				effort: result.effort,
+				workstream: result.effort, // Map effort to workstream
 				id,
-				status: this.normalizeStatus(existingFrontmatter.status),
+				status: this.normalizeStatus(existingFrontmatter.status, result.type),
 				priority: this.normalizePriority(
 					existingFrontmatter.priority || "Medium"
 				),
 				depends_on: existingFrontmatter.depends_on || [],
 				created_by_plugin: existingFrontmatter.created_by_plugin ?? true,
-				created: existingFrontmatter.created || now,
-				updated: now,
+				created_at: existingFrontmatter.created_at || existingFrontmatter.created || now,
+				updated_at: now,
 				canvas_source: existingFrontmatter.canvas_source || "",
 				vault_path: existingFrontmatter.vault_path || file.path,
 			};
@@ -3079,16 +3112,9 @@ private registerCommands(): void {
 					id = generateId(this.app, this.settings, result.type);
 				}
 			} else {
-				// Generate new path (conversion flow)
+				// Generate new path (conversion flow) - WI-2: Use type-specific routing
 				id = generateId(this.app, this.settings, result.type);
-				const baseFolder = canvasFile.parent?.path || this.settings.notesBaseFolder;
-				// Use title as filename, preserving whitespaces
-				notePath = generateUniqueFilename(
-					this.app,
-					baseFolder,
-					title,
-					"md"
-				);
+				notePath = await this.determineNotePath(canvasFile, title, id, result.type);
 				console.debug('[Canvas Plugin] Generated new note path:', notePath);
 			}
 
@@ -3100,15 +3126,15 @@ private registerCommands(): void {
 				const frontmatter: ItemFrontmatter = {
 					type: result.type,
 					title: title,
-					effort: result.effort,
+					workstream: result.effort,
 					id,
-					status: this.normalizeStatus("Not Started"),
+					status: this.normalizeStatus("Not Started", result.type),
 					priority: this.normalizePriority("High"),
 					inProgress: false,
 					depends_on: [],
 					created_by_plugin: true,
-					created: now,
-					updated: now,
+					created_at: now,
+					updated_at: now,
 					canvas_source: canvasFile.path,
 					vault_path: notePath,
 					notion_page_id: undefined,
@@ -3292,8 +3318,47 @@ private registerCommands(): void {
 
 	/**
 	 * Normalize status values to v2.1 human-readable set
+	 * WI-1: Type-aware status normalization for Decision/Document entities
 	 */
-	private normalizeStatus(status?: string): ItemStatus {
+	private normalizeStatus(status?: string, entityType?: string): ItemStatus | import("./types").DecisionStatus | import("./types").DocumentStatus {
+		if (!status) {
+			// Default status depends on entity type
+			if (entityType === 'decision') return "Pending";
+			if (entityType === 'document') return "Draft";
+			return "Not Started";
+		}
+
+		const trimmed = status.trim();
+		const lower = trimmed.toLowerCase();
+
+		// Decision-specific statuses (preserve MCP v2 spec values)
+		if (entityType === 'decision') {
+			const decisionAllowed: import("./types").DecisionStatus[] = ["Pending", "Decided", "Superseded"];
+			if (decisionAllowed.includes(trimmed as import("./types").DecisionStatus)) {
+				return trimmed as import("./types").DecisionStatus;
+			}
+			// Map common variants
+			if (lower === 'pending' || lower === 'open') return "Pending";
+			if (lower === 'decided' || lower === 'approved' || lower === 'done') return "Decided";
+			if (lower === 'superseded' || lower === 'deprecated') return "Superseded";
+			return "Pending"; // Default for decisions
+		}
+
+		// Document-specific statuses (preserve MCP v2 spec values)
+		if (entityType === 'document') {
+			const documentAllowed: import("./types").DocumentStatus[] = ["Draft", "Review", "Approved", "Superseded"];
+			if (documentAllowed.includes(trimmed as import("./types").DocumentStatus)) {
+				return trimmed as import("./types").DocumentStatus;
+			}
+			// Map common variants
+			if (lower === 'draft') return "Draft";
+			if (lower === 'review' || lower === 'in review') return "Review";
+			if (lower === 'approved' || lower === 'done' || lower === 'published') return "Approved";
+			if (lower === 'superseded' || lower === 'deprecated' || lower === 'obsolete') return "Superseded";
+			return "Draft"; // Default for documents
+		}
+
+		// Standard task/milestone/story status mapping
 		const map: Record<string, ItemStatus> = {
 			todo: "Not Started",
 			"not started": "Not Started",
@@ -3304,12 +3369,9 @@ private registerCommands(): void {
 			blocked: "Blocked",
 		};
 
-		if (!status) return "Not Started";
-		const trimmed = status.trim();
-		const lower = trimmed.toLowerCase();
 		if (map[lower]) return map[lower];
 
-		// If already a valid value, return as-is
+		// If already a valid ItemStatus value, return as-is
 		const allowed: ItemStatus[] = ["Not Started", "In Progress", "Completed", "Blocked"];
 		if (allowed.includes(trimmed as ItemStatus)) {
 			return trimmed as ItemStatus;
@@ -3653,13 +3715,8 @@ private registerCommands(): void {
 					if (updated) updatedCount++;
 				}
 
-				// Clear depends_on for files that no longer have incoming edges
-				for (const filePath of allPluginFiles) {
-					if (!dependenciesByFile.has(filePath)) {
-						const cleared = await this.updateDependsOnInFile(filePath, []);
-						if (cleared) clearedCount++;
-					}
-				}
+				// WI-4: Do NOT clear depends_on for files without canvas edges
+				// MCP owns relationship state; canvas edges are only a UI view
 			} finally {
 				// Reset flag after a delay to allow file system to settle
 				setTimeout(() => {
@@ -3669,8 +3726,8 @@ private registerCommands(): void {
 
 			console.debug('[Canvas Plugin] Edge sync complete:', { updatedCount, clearedCount });
 
-			// Also sync reverse relationships (blocks, children, implemented_by, etc.)
-			await this.syncReverseRelationships(canvasFile);
+			// WI-4: Plugin is now read-only for inverse relationships (MCP owns relationship sync)
+			// Removed: await this.syncReverseRelationships(canvasFile);
 		} catch (error) {
 			console.error('[Canvas Plugin] Failed to sync edges to MD files:', error);
 			this.logger?.error("Failed to sync edges to MD files", error);
@@ -3706,12 +3763,10 @@ private registerCommands(): void {
 			}
 
 			// Update the file
-			const updatedContent = updateFrontmatter(content, {
+			await applyFrontmatterUpdates(this.app, file, {
 				depends_on: dependencyIds,
-				updated: new Date().toISOString(),
+				updated_at: new Date().toISOString(),
 			});
-
-			await this.app.vault.modify(file, updatedContent);
 			console.debug('[Canvas Plugin] Updated depends_on in', filePath, ':', dependencyIds);
 			return true;
 		} catch (error) {
@@ -3927,7 +3982,7 @@ private registerCommands(): void {
 					if (blocksChanged || childrenChanged || implementedByChanged || documentedByChanged || decidedByChanged || supersededByChanged || nextVersionChanged) {
 						// Build update object
 						const updates: Record<string, unknown> = {
-							updated: new Date().toISOString(),
+							updated_at: new Date().toISOString(),
 						};
 
 						if (blocksChanged && rels.blocks.length > 0) {
@@ -3953,8 +4008,7 @@ private registerCommands(): void {
 						}
 
 						// Update the file
-						const updatedContent = updateFrontmatter(content, updates);
-						await this.app.vault.modify(file, updatedContent);
+						await applyFrontmatterUpdates(this.app, file, updates);
 						updatedCount++;
 						console.debug('[Canvas Plugin] Updated reverse relationships in', node.file);
 					}
@@ -4014,8 +4068,8 @@ private registerCommands(): void {
 				return;
 			}
 
-			// Resolve the new color based on inProgress and effort
-			const newColor = this.resolveNodeColor(frontmatter.effort, frontmatter.inProgress);
+			// Resolve the new color based on inProgress and workstream
+			const newColor = this.resolveNodeColor(frontmatter.workstream ?? frontmatter.effort, frontmatter.inProgress);
 
 			// Check if color needs to be updated
 			if (node.color !== newColor) {
@@ -4248,7 +4302,7 @@ private registerCommands(): void {
 					const frontmatter = parseFrontmatter(content);
 					if (!frontmatter) continue;
 
-					const localUpdated = new Date(frontmatter.updated).getTime();
+					const localUpdated = new Date(frontmatter.updated_at ?? frontmatter.updated ?? new Date()).getTime();
 
 					// If Notion is newer, update local file
 					if (notionUpdated > localUpdated + 1000) { // 1 second buffer
@@ -4427,8 +4481,8 @@ private registerCommands(): void {
 			frontmatter.time_estimate !== undefined ? `time_estimate: ${frontmatter.time_estimate}` : null,
 			frontmatter.depends_on?.length ? `depends_on: [${frontmatter.depends_on.map(d => `"${d}"`).join(", ")}]` : null,
 			`created_by_plugin: ${frontmatter.created_by_plugin ?? true}`,
-			`created: ${frontmatter.created}`,
-			`updated: ${frontmatter.updated}`,
+			`created_at: ${frontmatter.created_at ?? frontmatter.created ?? ''}`,
+			`updated_at: ${frontmatter.updated_at ?? frontmatter.updated ?? ''}`,
 			`canvas_source: "${frontmatter.canvas_source}"`,
 			`vault_path: "${frontmatter.vault_path}"`,
 			frontmatter.notion_page_id ? `notion_page_id: "${frontmatter.notion_page_id}"` : null,
@@ -4914,12 +4968,10 @@ private registerCommands(): void {
 					// Update frontmatter to set archived: false and status to "Not Started"
 					const movedFile = this.app.vault.getAbstractFileByPath(destPath);
 					if (movedFile instanceof TFile) {
-						const updatedContent = await this.app.vault.read(movedFile);
-						const newContent = updateFrontmatter(updatedContent, {
+						await applyFrontmatterUpdates(this.app, movedFile, {
 							archived: false,
 							status: 'Not Started',
 						});
-						await this.app.vault.modify(movedFile, newContent);
 						console.log(`    ✅ Unarchived and updated frontmatter`);
 					}
 
@@ -9389,7 +9441,7 @@ private registerCommands(): void {
 			decided_by: [],
 			depends_on: [],
 			blocks: [],
-			last_updated: now,
+			updated_at: now,
 			created_at: now,
 			created_by_plugin: true,
 		};
@@ -9441,8 +9493,7 @@ private registerCommands(): void {
 		// Simple prompt for now - could be enhanced with a modal
 		const newPhase = await this.showPhaseSelector(phases, currentPhase);
 		if (newPhase && newPhase !== currentPhase) {
-			const updatedContent = updateFrontmatter(content, { phase: newPhase, last_updated: new Date().toISOString() });
-			await this.app.vault.modify(file, updatedContent);
+			await applyFrontmatterUpdates(this.app, file, { phase: newPhase, updated_at: new Date().toISOString() });
 			new Notice(`Feature phase updated to ${newPhase}`);
 		}
 	}
@@ -9467,8 +9518,7 @@ private registerCommands(): void {
 		const currentTier = (fm.tier as FeatureTier) || "OSS";
 		const newTier: FeatureTier = currentTier === "OSS" ? "Premium" : "OSS";
 
-		const updatedContent = updateFrontmatter(content, { tier: newTier, last_updated: new Date().toISOString() });
-		await this.app.vault.modify(file, updatedContent);
+		await applyFrontmatterUpdates(this.app, file, { tier: newTier, updated_at: new Date().toISOString() });
 		new Notice(`Feature tier updated to ${newTier}`);
 	}
 
@@ -9893,11 +9943,10 @@ private registerCommands(): void {
 		}
 
 		// Update the entity file
-		const updatedContent = updateFrontmatter(content, {
+		await applyFrontmatterUpdates(this.app, entityFile, {
 			[fieldName]: currentLinks,
-			updated: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
 		});
-		await this.app.vault.modify(entityFile, updatedContent);
 
 		new Notice(`Linked ${entityId} to ${linkResult.featureId} (${linkResult.relationshipType})`);
 
@@ -10016,7 +10065,7 @@ private registerCommands(): void {
 				workstream: "engineering",
 				personas: [],
 				acceptance_criteria: [],
-				last_updated: now,
+				updated_at: now,
 				created_at: now,
 				created_by_plugin: true,
 			});
@@ -10489,7 +10538,7 @@ private registerCommands(): void {
 
 				if (blocksChanged || dependsOnChanged || childrenChanged || implementedByChanged || documentedByChanged || decidedByChanged || supersededByChanged || nextVersionChanged || hasForwardCleanup) {
 					const updates: Record<string, unknown> = {
-						updated: new Date().toISOString(),
+						updated_at: new Date().toISOString(),
 					};
 
 					// Reverse relationship updates
@@ -10536,8 +10585,7 @@ private registerCommands(): void {
 						}
 					}
 
-					const updatedContent = updateFrontmatter(content, updates);
-					await this.app.vault.modify(file, updatedContent);
+					await applyFrontmatterUpdates(this.app, file, updates);
 					updatedCount++;
 				}
 			} catch (e) {
@@ -10556,135 +10604,6 @@ private registerCommands(): void {
 		}
 	}
 
-	// ==================== HTTP SERVER ====================
-
-	/**
-	 * Start the HTTP server for external API access.
-	 * Listens for POST requests to trigger plugin functions.
-	 */
-	private startHttpServer(): void {
-		if (!this.settings.httpServerEnabled) {
-			console.debug('[Canvas Plugin] HTTP server disabled in settings');
-			return;
-		}
-
-		const port = this.settings.httpServerPort;
-
-		this.httpServer = http.createServer(async (req, res) => {
-			// Set CORS headers
-			res.setHeader('Access-Control-Allow-Origin', '*');
-			res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-			res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-			// Handle preflight
-			if (req.method === 'OPTIONS') {
-				res.writeHead(204);
-				res.end();
-				return;
-			}
-
-			// Only accept POST requests
-			if (req.method !== 'POST') {
-				res.writeHead(405, { 'Content-Type': 'application/json' });
-				res.end(JSON.stringify({ error: 'Method not allowed. Use POST.' }));
-				return;
-			}
-
-			// Parse request body
-			let body = '';
-			req.on('data', chunk => { body += chunk.toString(); });
-			req.on('end', async () => {
-				try {
-					const data = body ? JSON.parse(body) : {};
-					const action = data.action || req.url?.replace('/', '');
-
-					console.log('[Canvas Plugin] HTTP request received:', { action, data });
-
-					let result: { success: boolean; message: string; error?: string };
-
-					switch (action) {
-						case 'populate':
-						case 'populate-from-vault':
-							await this.populateCanvasFromVault();
-							result = { success: true, message: 'Populate from vault completed' };
-							break;
-
-						case 'reposition':
-						case 'reposition-nodes':
-							await this.repositionCanvasNodesV4();
-							result = { success: true, message: 'Reposition nodes (V4) completed' };
-							break;
-
-						case 'reposition-v3':
-						case 'reposition-nodes-v3':
-							await this.repositionCanvasNodesV3();
-							result = { success: true, message: 'Reposition nodes (V3) completed' };
-							break;
-
-						case 'reposition-v2':
-						case 'reposition-nodes-v2':
-							await this.repositionCanvasNodes();
-							result = { success: true, message: 'Reposition nodes (V2 legacy) completed' };
-							break;
-
-						default:
-							result = {
-								success: false,
-								message: 'Unknown action',
-								error: `Unknown action: ${action}. Valid actions: populate, reposition, reposition-v2`
-							};
-					}
-
-					res.writeHead(result.success ? 200 : 400, { 'Content-Type': 'application/json' });
-					res.end(JSON.stringify(result));
-
-				} catch (error) {
-					console.error('[Canvas Plugin] HTTP request error:', error);
-					res.writeHead(500, { 'Content-Type': 'application/json' });
-					res.end(JSON.stringify({
-						success: false,
-						error: (error as Error).message
-					}));
-				}
-			});
-		});
-
-		this.httpServer.on('error', (error: NodeJS.ErrnoException) => {
-			if (error.code === 'EADDRINUSE') {
-				console.error(`[Canvas Plugin] HTTP server port ${port} is already in use`);
-				new Notice(`❌ HTTP server port ${port} is already in use`);
-			} else {
-				console.error('[Canvas Plugin] HTTP server error:', error);
-				new Notice(`❌ HTTP server error: ${error.message}`);
-			}
-			this.httpServer = null;
-		});
-
-		this.httpServer.listen(port, '127.0.0.1', () => {
-			console.log(`[Canvas Plugin] HTTP server listening on http://127.0.0.1:${port}`);
-			new Notice(`✅ HTTP server started on port ${port}`);
-		});
-	}
-
-	/**
-	 * Stop the HTTP server.
-	 */
-	private stopHttpServer(): void {
-		if (this.httpServer) {
-			this.httpServer.close(() => {
-				console.log('[Canvas Plugin] HTTP server stopped');
-			});
-			this.httpServer = null;
-		}
-	}
-
-	/**
-	 * Restart the HTTP server (e.g., when settings change).
-	 */
-	public restartHttpServer(): void {
-		this.stopHttpServer();
-		this.startHttpServer();
-	}
 }
 
 

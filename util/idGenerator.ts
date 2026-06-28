@@ -14,8 +14,25 @@ const ENTITY_ID_PREFIXES: Record<EntityType, string> = {
 };
 
 /**
- * Generate a unique ID for a new entity
- * Scans existing notes to find the highest ID and increments
+ * In-process counter to avoid collisions when multiple entities are created in
+ * the same tick (metadataCache may not have updated yet between rapid creations).
+ */
+const sessionHighWater: Partial<Record<EntityType, number>> = {};
+
+/**
+ * Reset the in-process high-water mark. Exposed for use in unit tests only.
+ * @internal
+ */
+export function _resetSessionHighWaterForTests(): void {
+	for (const key of Object.keys(sessionHighWater) as EntityType[]) {
+		delete sessionHighWater[key];
+	}
+}
+
+/**
+ * Generate a unique ID for a new entity.
+ * Scans existing notes to find the highest ID then increments.
+ * A per-session high-water mark prevents collisions when metadataCache lags.
  */
 export function generateId(
 	app: App,
@@ -46,10 +63,17 @@ export function generateId(
 		}
 	}
 
-	// Generate new ID
-	const newId = maxId + 1;
-	const paddedId = String(newId).padStart(padLength, "0");
+	// Advance past the in-process high-water mark to prevent same-tick collisions
+	const sessionMax = sessionHighWater[entityType] ?? 0;
+	if (sessionMax > maxId) {
+		maxId = sessionMax;
+	}
 
+	// Generate new ID and persist the high-water mark
+	const newId = maxId + 1;
+	sessionHighWater[entityType] = newId;
+
+	const paddedId = String(newId).padStart(padLength, "0");
 	return `${prefix}${paddedId}`;
 }
 
