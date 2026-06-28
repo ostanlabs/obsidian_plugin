@@ -40,7 +40,8 @@ export function generateId(
 	entityType: EntityType = "task"
 ): string {
 	const prefix = ENTITY_ID_PREFIXES[entityType];
-	const padLength = settings.idZeroPadLength;
+	// WI-6: Ensure ID padding is ≥3 to match MCP validation requirements
+	const padLength = Math.max(3, settings.idZeroPadLength);
 
 	// Get all markdown files
 	const files = app.vault.getMarkdownFiles();
