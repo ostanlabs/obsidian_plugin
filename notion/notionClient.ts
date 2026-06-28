@@ -388,7 +388,7 @@ export class NotionClient {
 			},
 			Effort: {
 				select: {
-					name: frontmatter.effort,
+					name: frontmatter.workstream ?? frontmatter.effort ?? 'default',
 				},
 			},
 			ID: {
