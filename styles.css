@@ -201,11 +201,11 @@
 }
 
 .canvas-pm-workstream-marketing {
-    --canvas-pm-workstream-color: var(--color-orange);
+    --canvas-pm-workstream-color: var(--color-yellow);
 }
 
 .canvas-pm-workstream-infra {
-    --canvas-pm-workstream-color: var(--color-yellow);
+    --canvas-pm-workstream-color: var(--color-orange);
 }
 
 .canvas-pm-workstream-research {

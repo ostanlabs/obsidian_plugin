@@ -5,6 +5,27 @@ All notable changes to the Canvas Project Manager plugin will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.46] - 2026-06-29
+
+### 🔒 Security & Submission Compliance
+
+- **Removed HTTP server**: Eliminated embedded localhost HTTP server with unauthenticated wildcard-CORS access (A7/B1 blockers)
+- **Manifest: removed "Obsidian" from description** to satisfy community-plugin validation bot (A1)
+- **Manifest: `isDesktopOnly` set to `true`** — plugin uses Node.js APIs not available on mobile (A2)
+- **versions.json**: Updated to include all released versions mapped to minAppVersion (A4)
+- **Fixed XSS via `innerHTML`**: Replaced with safe DOM API construction (A5/B8)
+- **Fixed template replacement injection**: User values no longer passed as raw `String.replace` replacement strings (B11)
+- **Fixed canvas double-node add**: Single-node creation no longer pushes to both internal data and visual layer (B4)
+- **Fixed Notion content replacement**: Now uses chunked append with 100-block batching; no delete-before-append data loss (B3)
+- **Fixed leaked DOM listeners**: Search-popup close-on-outside-click listener now properly cleaned up (B9)
+- **Fixed Notion rate-limit handling**: Added exponential backoff and 429 retry (B10)
+- **`isPluginCreatedNote` now includes `feature` entity type** (fileNaming.ts)
+- **Fixed `entityNavigator` reading migrated-away `enables` field**
+- **Logger: gated file writes behind debug flag** to avoid excessive I/O (A8/B12)
+- **Logger: append-only writes** instead of O(n) read-rewrite per call (B12)
+- **ESLint config: added `@typescript-eslint` rules** — previously only `obsidianmd/*` rules ran
+- **README: added Network Use / Privacy section** disclosing Notion API data transmission (A6)
+
 ## [1.8.42] - 2026-02-28
 
 ### 📚 Documentation Release

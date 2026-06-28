@@ -192,7 +192,7 @@ See [Workstream Normalization Guide](../obsidian_docs/docs/user-guide/workstream
 - Archive sync for deleted notes
 
 ### MCP Integration (Optional)
-Enable HTTP server for AI-assisted project management via [obsidian-accomplishments-mcp](https://www.npmjs.com/package/obsidian-accomplishments-mcp). See [MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) for details.
+Enable HTTP server for AI-assisted project management via [@ostanlabs/obsidian-mcp](https://www.npmjs.com/package/@ostanlabs/obsidian-mcp). See [MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) for details.
 
 ## Entity Frontmatter
 

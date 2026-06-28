@@ -11,7 +11,7 @@
 The Canvas Project Manager ecosystem consists of two complementary components:
 
 1. **Canvas Project Manager Plugin** (this repository) - Visual project management in Obsidian
-2. **Obsidian MCP Server** ([obsidian-accomplishments-mcp](https://www.npmjs.com/package/obsidian-accomplishments-mcp)) - AI-native project management via Model Context Protocol
+2. **Obsidian MCP Server** ([@ostanlabs/obsidian-mcp](https://www.npmjs.com/package/@ostanlabs/obsidian-mcp)) - AI-native project management via Model Context Protocol
 
 Both components work with the same vault and entity model, enabling seamless collaboration between human visual management and AI-assisted project operations.
 
@@ -454,14 +454,14 @@ AI: "What entities have no dependencies?"
 
 - **[ENTITY_SCHEMAS.md](./ENTITY_SCHEMAS.md)** - Complete entity type definitions
 - **[CANVAS_LAYOUT.md](./CANVAS_LAYOUT.md)** - Canvas positioning and layout algorithm
-- **[MCP Server README](https://www.npmjs.com/package/obsidian-accomplishments-mcp)** - MCP server documentation
+- **[MCP Server README](https://www.npmjs.com/package/@ostanlabs/obsidian-mcp)** - MCP server documentation
 
 ---
 
 ## Support and Feedback
 
 - **Plugin Issues:** [GitHub Issues](https://github.com/ostanlabs/internal-tools/issues)
-- **MCP Server Issues:** [NPM Package](https://www.npmjs.com/package/obsidian-accomplishments-mcp)
+- **MCP Server Issues:** [NPM Package](https://www.npmjs.com/package/@ostanlabs/obsidian-mcp)
 - **Documentation:** This repository's `docs/` folder
 
 ---
@@ -484,13 +484,13 @@ AI: "What entities have no dependencies?"
 The MCP server is available via npx (no installation needed):
 
 ```bash
-npx -y obsidian-accomplishments-mcp
+npx -y @ostanlabs/obsidian-mcp
 ```
 
 Or install globally:
 
 ```bash
-npm install -g obsidian-accomplishments-mcp
+npm install -g @ostanlabs/obsidian-mcp
 ```
 
 ### Step 2: Configure AI Assistant
@@ -504,7 +504,7 @@ Add to your AI client's MCP configuration (e.g., Claude Desktop):
   "mcpServers": {
     "obsidian": {
       "command": "npx",
-      "args": ["-y", "obsidian-accomplishments-mcp"],
+      "args": ["-y", "@ostanlabs/obsidian-mcp"],
       "env": {
         "VAULT_PATH": "/absolute/path/to/your/obsidian/vault",
         "DEFAULT_CANVAS": "projects/main.canvas"
