@@ -61,7 +61,7 @@ export interface EntityData {
 	affects: string[];        // New field for Decision
 	implementedBy: string[];
 	implements: string[];
-	documents?: string;       // Document -> Feature relationship
+	documents: string[];      // Document -> Feature relationship (array, many-to-many)
 	supersedes?: string;      // Decision -> Decision relationship
 	previousVersion?: string; // Document -> Document relationship
 	filePath: string;
@@ -245,15 +245,37 @@ export class PositioningEngineV4 {
 	private errors: string[] = [];
 	private warnings: string[] = [];
 
-	constructor(config: Partial<PositioningConfig> = {}) {
+	// Logger callback
+	private logger?: (msg: string) => void;
+	private verbose: boolean = false;
+
+	constructor(config: Partial<PositioningConfig> = {}, logger?: (msg: string) => void, verbose: boolean = false) {
 		this.config = { ...DEFAULT_POSITIONING_CONFIG, ...config };
+		this.logger = logger;
+		this.verbose = verbose;
+	}
+
+	private log(msg: string): void {
+		console.log(msg);
+		if (this.logger) {
+			this.logger(msg);
+		}
+	}
+
+	private vlog(msg: string): void {
+		if (this.verbose) {
+			console.log(msg);
+			if (this.logger) {
+				this.logger(msg);
+			}
+		}
 	}
 
 	/**
 	 * Main entry point: calculate positions for all nodes
 	 */
 	public calculatePositions(entities: EntityData[]): PositioningResult {
-		console.log(`[PositioningV4] Starting positioning for ${entities.length} entities`);
+		this.log(`[PositioningV4] Starting positioning for ${entities.length} entities`);
 
 		// Reset state
 		this.resetState();
@@ -438,8 +460,8 @@ export class PositioningEngineV4 {
 		if (entity.previousVersion === selfId) {
 			entity.previousVersion = undefined;
 		}
-		if (entity.documents === selfId) {
-			entity.documents = undefined;
+		if (entity.documents) {
+			entity.documents = entity.documents.filter(id => id !== selfId);
 		}
 	}
 
@@ -625,13 +647,41 @@ export class PositioningEngineV4 {
 
 	private categorizeEntities(): void {
 		console.log(`[PositioningV4] Phase 3: Categorizing entities`);
+		this.vlog(`[PositioningV4] === PHASE 3: CATEGORIZE ENTITIES ===`);
 
 		for (const node of this.processedNodes.values()) {
+			// Validate containment parent exists
+			if (node.containmentParentId && !this.processedNodes.has(node.containmentParentId)) {
+				this.warnings.push(
+					`${node.entityId} references parent ${node.containmentParentId} which is not in the entity set (may be archived). Treating as orphan.`
+				);
+				node.containmentParentId = undefined;
+			}
+
+			// Validate containment edge targets exist
+			node.containmentEdgeTargets = node.containmentEdgeTargets.filter(targetId => {
+				if (!this.processedNodes.has(targetId)) {
+					this.warnings.push(
+						`${node.entityId} references containment target ${targetId} which is not in the entity set (may be archived). Removing reference.`
+					);
+					return false;
+				}
+				return true;
+			});
+
 			const hasContainment = !!node.containmentParentId || node.containmentEdgeTargets.length > 0;
 			const hasSequencing = node.sequencingBefore.length > 0 || node.sequencingAfter.length > 0;
 
 			// Special case: Milestone with workstream is contained
 			const isMilestoneWithWorkstream = node.type === 'milestone' && node.workstream;
+
+			// Verbose: Log DEC-043 categorization
+			if (node.entityId === 'DEC-043' && this.verbose) {
+				this.vlog(`[DEC-043 TRACE] Phase 3 Categorization:`);
+				this.vlog(`  hasContainment: ${hasContainment} (parentId=${node.containmentParentId}, edgeTargets=${node.containmentEdgeTargets.length})`);
+				this.vlog(`  hasSequencing: ${hasSequencing} (before=${node.sequencingBefore.length}, after=${node.sequencingAfter.length})`);
+				this.vlog(`  isMilestoneWithWorkstream: ${isMilestoneWithWorkstream}`);
+			}
 
 			if (hasContainment || isMilestoneWithWorkstream) {
 				// Check for deferred (multiple containment parents at same priority)
@@ -656,6 +706,13 @@ export class PositioningEngineV4 {
 							// Debug logging
 							if (node.entityId === 'DOC-028' || node.containmentParentId === 'S-042' || node.containmentParentId === 'S-083' || node.containmentParentId === 'M-001') {
 								console.log(`[PositioningV4] DEBUG Phase 3: Added ${node.entityId} to ${parent.entityId}.children (now has ${parent.children.length} children)`);
+							}
+							// Verbose: Log DEC-043 parent assignment
+							if (node.entityId === 'DEC-043' && this.verbose) {
+								this.vlog(`[DEC-043 TRACE] Categorized as CONTAINED, added to parent ${parent.entityId}`);
+								this.vlog(`  parent type: ${parent.type}`);
+								this.vlog(`  parent workstream: ${parent.workstream}`);
+								this.vlog(`  parent has ${parent.children.length} children total`);
 							}
 						}
 					}
@@ -687,6 +744,11 @@ export class PositioningEngineV4 {
 				// Orphan: no relationships at all
 				node.category = 'orphan';
 				this.orphanedEntities.push(node);
+
+				// Verbose: Log DEC-043 orphan categorization
+				if (node.entityId === 'DEC-043' && this.verbose) {
+					this.vlog(`[DEC-043 TRACE] Categorized as ORPHAN (no containment or sequencing)`);
+				}
 			}
 		}
 
@@ -891,6 +953,7 @@ export class PositioningEngineV4 {
 	 */
 	private inferContainmentFromDependents(): void {
 		console.log(`[PositioningV4] Phase 3.5: Inferring containment from dependents`);
+		this.vlog(`[PositioningV4] === PHASE 3.5: INFER CONTAINMENT FROM DEPENDENTS ===`);
 
 		// Build reverse dependency map: entityId -> entities that depend on it (via blocks)
 		const dependentsMap = this.buildDependentsMap();
@@ -908,6 +971,19 @@ export class PositioningEngineV4 {
 		const tasksCount = entitiesWithoutParent.filter(n => n.type === 'task').length;
 		const decisionsCount = entitiesWithoutParent.filter(n => n.type === 'decision').length;
 		console.log(`[PositioningV4] Found ${entitiesWithoutParent.length} entities without parent (${storiesCount} stories, ${tasksCount} tasks, ${decisionsCount} decisions)`);
+
+		// Verbose: Log DEC-043 state before inference
+		const dec043 = this.processedNodes.get('DEC-043');
+		if (dec043 && this.verbose) {
+			this.vlog(`[DEC-043 TRACE] Before Phase 3.5:`);
+			this.vlog(`  containmentParentId: ${dec043.containmentParentId || 'NONE'}`);
+			this.vlog(`  category: ${dec043.category}`);
+			this.vlog(`  sequencingBefore: [${dec043.sequencingBefore.join(', ')}]`);
+			this.vlog(`  sequencingAfter: [${dec043.sequencingAfter.join(', ')}]`);
+			this.vlog(`  workstream: ${dec043.workstream}`);
+			const dependents = dependentsMap.get('DEC-043') || [];
+			this.vlog(`  dependents (entities that depend on DEC-043): [${dependents.map(d => d.entityId).join(', ')}]`);
+		}
 
 		// Process entities iteratively until no more changes
 		let changed = true;
@@ -937,6 +1013,17 @@ export class PositioningEngineV4 {
 		console.log(`[PositioningV4] Resolved: ${resolved.length}, Unresolved: ${unresolved.length}`);
 		for (const s of resolved) {
 			console.log(`[PositioningV4]   ${s.entityId} -> ${s.containmentParentId}`);
+		}
+
+		// Verbose: Log DEC-043 state after inference
+		if (dec043 && this.verbose) {
+			this.vlog(`[DEC-043 TRACE] After Phase 3.5:`);
+			this.vlog(`  containmentParentId: ${dec043.containmentParentId || 'NONE'}`);
+			this.vlog(`  category: ${dec043.category}`);
+			if (dec043.containmentParentId) {
+				const parent = this.processedNodes.get(dec043.containmentParentId);
+				this.vlog(`  parent details: ${parent?.entityId} (${parent?.type}, workstream=${parent?.workstream})`);
+			}
 		}
 	}
 
@@ -2471,11 +2558,17 @@ export class PositioningEngineV4 {
 
 	private positionAllChildren(): void {
 		console.log(`[PositioningV4] Phase 8: Positioning children within containers`);
+		if (this.verbose) {
+			this.vlog(`[PositioningV4] === PHASE 8: POSITION CHILDREN WITHIN CONTAINERS ===`);
+		}
 
 		// Position children for all milestones
 		for (const ws of this.workstreams.values()) {
 			for (const milestone of ws.milestones) {
 				if (milestone.position) {
+					if (this.verbose && milestone.children.length > 0) {
+						this.vlog(`[PositioningV4] Phase 8: Processing milestone ${milestone.entityId} (${milestone.children.length} children)`);
+					}
 					this.positionChildrenRecursive(milestone);
 				}
 			}
@@ -2489,6 +2582,25 @@ export class PositioningEngineV4 {
 			if (parent.children.length > 0) {
 				console.log(`[PositioningV4] DEBUG Phase 8: ${parent.entityId} children: [${parent.children.map(c => c.entityId).join(', ')}]`);
 			}
+		}
+
+		// Verbose: Check if DEC-043 is among children
+		const hasDec043 = parent.children.some(c => c.entityId === 'DEC-043');
+		if (hasDec043 && this.verbose) {
+			this.vlog(`[DEC-043 TRACE] Phase 8: positionChildrenRecursive - DEC-043 is child of ${parent.entityId}`);
+			this.vlog(`  parent position: (${parent.position?.x}, ${parent.position?.y})`);
+			this.vlog(`  parent has ${parent.children.length} children total`);
+			this.vlog(`  all children: [${parent.children.map(c => c.entityId).join(', ')}]`);
+		}
+
+		// Verbose: Trace F-017 and all its children
+		if (parent.entityId === 'F-017' && this.verbose) {
+			this.vlog(`[F-017 TRACE] Phase 8: positionChildrenRecursive - Processing F-017`);
+			this.vlog(`  parent position: (${parent.position?.x}, ${parent.position?.y})`);
+			this.vlog(`  parent has ${parent.children.length} children total`);
+			this.vlog(`  all children: [${parent.children.map(c => c.entityId).join(', ')}]`);
+			const hasDEC043 = parent.children.some(c => c.entityId === 'DEC-043');
+			this.vlog(`  DEC-043 in children list: ${hasDEC043}`);
 		}
 
 		if (parent.children.length === 0) return;
@@ -2560,6 +2672,18 @@ export class PositioningEngineV4 {
 					height: childNodeSize.height,
 				};
 
+				// Verbose: Log DEC-043 position calculation (dependency-aware grid)
+				if (child.entityId === 'DEC-043' && this.verbose) {
+					this.vlog(`[DEC-043 TRACE] Phase 8: Positioned using DEPENDENCY-AWARE GRID`);
+					this.vlog(`  parent: ${parent.entityId} at (${parentPos.x}, ${parentPos.y})`);
+					this.vlog(`  level (column): ${level}`);
+					this.vlog(`  indexInColumn: ${indexInColumn}`);
+					this.vlog(`  gridStartX: ${gridStartX}, colStartX: ${colStartX}`);
+					this.vlog(`  childX: ${childX} = colStartX(${colStartX}) + (colWidths[${level}](${colWidths[level]}) - containerWidth(${childContainerSize.width}))`);
+					this.vlog(`  childY: ${childY}`);
+					this.vlog(`  FINAL position: (${child.position.x}, ${child.position.y})`);
+				}
+
 				this.positionChildrenRecursive(child);
 			}
 		} else {
@@ -2592,7 +2716,7 @@ export class PositioningEngineV4 {
 			const colWidths: number[] = new Array(grid.columns).fill(0);
 
 			for (const { child, row, col } of childPositions) {
-				const childSize = child.containerSize!;
+				const childSize = child.containerSize || this.config.nodeSizes[child.type];
 				colWidths[col] = Math.max(colWidths[col], childSize.width);
 				rowHeights[row] = Math.max(rowHeights[row], childSize.height);
 			}
@@ -2610,7 +2734,7 @@ export class PositioningEngineV4 {
 
 			for (const { child, row, col } of childPositions) {
 				const childNodeSize = this.config.nodeSizes[child.type];
-				const childContainerSize = child.containerSize!;
+				const childContainerSize = child.containerSize || childNodeSize;
 
 				let colStartX = gridStartX;
 				for (let c = 0; c < col; c++) {
@@ -2633,6 +2757,19 @@ export class PositioningEngineV4 {
 				// Debug logging for S-083's children
 				if (parent.entityId === 'S-083') {
 					console.log(`[PositioningV4] DEBUG Phase 8: S-083 child ${child.entityId} at row=${row}, col=${col}, position=(${child.position.x}, ${child.position.y})`);
+				}
+
+				// Verbose: Log DEC-043 position calculation (simple grid)
+				if (child.entityId === 'DEC-043' && this.verbose) {
+					this.vlog(`[DEC-043 TRACE] Phase 8: Positioned using SIMPLE GRID`);
+					this.vlog(`  parent: ${parent.entityId} at (${parentPos.x}, ${parentPos.y})`);
+					this.vlog(`  grid: ${grid.rows}x${grid.columns}`);
+					this.vlog(`  position in grid: row=${row}, col=${col}`);
+					this.vlog(`  gridStartX: ${gridStartX}, colStartX: ${colStartX}`);
+					this.vlog(`  gridStartY: ${gridStartY}`);
+					this.vlog(`  childX: ${childX} = colStartX(${colStartX}) + (colWidths[${col}](${colWidths[col]}) - containerWidth(${childContainerSize.width}))`);
+					this.vlog(`  childY: ${childY} + rowHeights[${row}](${rowHeights[row]}) - nodeHeight(${childNodeSize.height})`);
+					this.vlog(`  FINAL position: (${child.position.x}, ${child.position.y})`);
 				}
 
 				this.positionChildrenRecursive(child);
@@ -2894,6 +3031,17 @@ export class PositioningEngineV4 {
 		if (this.orphanedEntities.length === 0) return;
 
 		console.log(`[PositioningV4] Phase 11: Positioning ${this.orphanedEntities.length} orphans`);
+		this.vlog(`[PositioningV4] === PHASE 11: POSITION ORPHANS ===`);
+
+		// Verbose: Check if DEC-043 is in orphan list
+		const dec043Orphan = this.orphanedEntities.find(o => o.entityId === 'DEC-043');
+		if (dec043Orphan && this.verbose) {
+			this.vlog(`[DEC-043 TRACE] Found in orphan list at Phase 11`);
+			this.vlog(`  orphan category: ${dec043Orphan.category}`);
+			this.vlog(`  children count: ${dec043Orphan.children.length}`);
+			this.vlog(`  sequencingBefore: [${dec043Orphan.sequencingBefore.join(', ')}]`);
+			this.vlog(`  sequencingAfter: [${dec043Orphan.sequencingAfter.join(', ')}]`);
+		}
 
 		// Find the bottom of all positioned content
 		let maxY = 0;
@@ -2954,6 +3102,16 @@ export class PositioningEngineV4 {
 					width: nodeSize.width,
 					height: nodeSize.height,
 				};
+
+				// Verbose: Log DEC-043 final position
+				if (orphan.entityId === 'DEC-043' && this.verbose) {
+					this.vlog(`[DEC-043 TRACE] Positioned as simple orphan:`);
+					this.vlog(`  grid position: col=${col}, row=${row}`);
+					this.vlog(`  final X: ${orphan.position.x} = simpleStartX(${simpleStartX}) + col(${col}) * (maxWidth(${maxWidth}) + childGap(${this.config.childGap}))`);
+					this.vlog(`  final Y: ${orphan.position.y}`);
+					this.vlog(`  grid columns: ${grid.columns}`);
+					this.vlog(`  orphan index in sorted list: ${i} / ${sortedSimpleOrphans.length}`);
+				}
 			}
 		}
 	}
@@ -3030,37 +3188,111 @@ export class PositioningEngineV4 {
 	// ========================================================================
 
 	private resolveOverlaps(): void {
-		console.log(`[PositioningV4] Phase 12: Resolving overlaps`);
+		this.log(`[PositioningV4] Phase 12: Resolving overlaps`);
 
-		const allNodes: ProcessedNode[] = [];
+		// Resolve overlaps per container (per milestone or orphan area)
+		// This prevents the algorithm from breaking container layouts
+		const containers = new Map<string, ProcessedNode[]>();
+
+		// Group nodes by their root container
 		for (const node of this.processedNodes.values()) {
-			if (node.position) allNodes.push(node);
+			if (!node.position) continue;
+
+			const rootContainer = this.getRootContainer(node);
+			const containerKey = rootContainer || 'FLOATING';
+
+			if (!containers.has(containerKey)) {
+				containers.set(containerKey, []);
+			}
+			containers.get(containerKey)!.push(node);
 		}
 
-		const maxIterations = 50;
-		let iteration = 0;
-		let hasOverlap = true;
+		this.log(`[PositioningV4] Found ${containers.size} containers to process`);
 
-		while (hasOverlap && iteration < maxIterations) {
-			hasOverlap = false;
-			iteration++;
+		let totalIterations = 0;
+		let totalOverlapsResolved = 0;
 
-			for (let i = 0; i < allNodes.length; i++) {
-				for (let j = i + 1; j < allNodes.length; j++) {
-					const nodeA = allNodes[i];
-					const nodeB = allNodes[j];
+		// Resolve overlaps within each container independently
+		for (const [containerKey, containerNodes] of containers) {
+			if (containerNodes.length < 2) continue;
 
-					if (this.nodesOverlap(nodeA.position!, nodeB.position!)) {
-						hasOverlap = true;
-						this.resolveNodeOverlap(nodeA, nodeB);
+			this.log(`[PositioningV4] Processing container ${containerKey} with ${containerNodes.length} nodes`);
+
+			const maxIterationsPerContainer = 50; // Max iterations per container
+			let iteration = 0;
+			let hasOverlap = true;
+
+			while (hasOverlap && iteration < maxIterationsPerContainer) {
+				hasOverlap = false;
+				iteration++;
+
+				for (let i = 0; i < containerNodes.length; i++) {
+					const nodeA = containerNodes[i];
+					if (!nodeA.position) continue;
+
+					for (let j = i + 1; j < containerNodes.length; j++) {
+						const nodeB = containerNodes[j];
+						if (!nodeB.position) continue;
+
+						if (this.nodesOverlap(nodeA.position, nodeB.position, 10)) {
+							hasOverlap = true;
+							totalOverlapsResolved++;
+
+							// Resolve using type-based priority (like the old algorithm)
+							this.resolveNodeOverlapWithPriority(nodeA, nodeB);
+						}
 					}
 				}
 			}
+
+			totalIterations += iteration;
+
+			if (iteration >= maxIterationsPerContainer) {
+				this.log(`[PositioningV4] Container ${containerKey}: Reached max iterations (${maxIterationsPerContainer})`);
+			} else {
+				this.log(`[PositioningV4] Container ${containerKey}: Resolved in ${iteration} iterations`);
+			}
 		}
 
-		if (iteration >= maxIterations) {
-			this.warnings.push(`Overlap resolution reached max iterations (${maxIterations})`);
+		this.log(`[PositioningV4] Overlap resolution complete: ${totalIterations} total iterations, ${totalOverlapsResolved} overlaps resolved`);
+	}
+
+	/**
+	 * Get the root container (milestone or orphan parent) for a node.
+	 * Returns the entity ID of the root container, or null if the node is orphan.
+	 */
+	private getRootContainer(node: ProcessedNode): string | null {
+		// Traverse up the containment hierarchy to find the root milestone
+		let current = node;
+		let depth = 0;
+		const maxDepth = 100; // Prevent infinite loops
+
+		while (current.containmentParentId && depth < maxDepth) {
+			const parent = this.processedNodes.get(current.containmentParentId);
+			if (!parent) break;
+
+			// If parent is a milestone, that's the root
+			if (parent.type === 'milestone') {
+				return parent.entityId;
+			}
+
+			current = parent;
+			depth++;
 		}
+
+		// If current is a milestone itself, return it
+		if (current.type === 'milestone') {
+			return current.entityId;
+		}
+
+		// Otherwise, it's an orphan or floating entity
+		// For orphans, we'll use a special marker to group them together
+		if (node.category === 'orphan') {
+			return 'ORPHAN_AREA';
+		}
+
+		// Floating entities can overlap with anything (null means no container restriction)
+		return null;
 	}
 
 	private nodesOverlap(a: NodePosition, b: NodePosition, padding: number = 10): boolean {
@@ -3072,35 +3304,36 @@ export class PositioningEngineV4 {
 		);
 	}
 
-	private resolveNodeOverlap(nodeA: ProcessedNode, nodeB: ProcessedNode): void {
+	/**
+	 * Resolve overlap between two nodes using type-based priority.
+	 * Higher priority nodes (milestones > stories > tasks > decisions > documents > features) stay fixed.
+	 * Lower priority nodes are moved VERTICALLY ONLY to preserve horizontal layout.
+	 */
+	private resolveNodeOverlapWithPriority(nodeA: ProcessedNode, nodeB: ProcessedNode): void {
 		const posA = nodeA.position!;
 		const posB = nodeB.position!;
 
-		// Determine which node to move based on type priority
+		// Type priority order (lower index = higher priority = stays fixed)
 		const priorityOrder: EntityType[] = ['milestone', 'story', 'task', 'decision', 'document', 'feature'];
 		const priorityA = priorityOrder.indexOf(nodeA.type);
 		const priorityB = priorityOrder.indexOf(nodeB.type);
 
+		// Move the lower priority node (higher index), or if same priority, move nodeB
 		const nodeToMove = priorityB >= priorityA ? nodeB : nodeA;
 		const posToMove = nodeToMove.position!;
 		const otherPos = nodeToMove === nodeB ? posA : posB;
 
-		const overlapX = Math.min(
-			otherPos.x + otherPos.width - posToMove.x,
-			posToMove.x + posToMove.width - otherPos.x
-		);
+		// Calculate overlap amount in Y direction
 		const overlapY = Math.min(
 			otherPos.y + otherPos.height - posToMove.y,
 			posToMove.y + posToMove.height - otherPos.y
 		);
 
-		if (overlapX < overlapY) {
-			const pushDirection = posToMove.x >= otherPos.x ? 1 : -1;
-			posToMove.x += pushDirection * (overlapX + 20);
-		} else {
-			const pushDirection = posToMove.y >= otherPos.y ? 1 : -1;
-			posToMove.y += pushDirection * (overlapY + 20);
-		}
+		// Push vertically only (preserves horizontal container layout)
+		// Use half the overlap amount for gentler movement
+		const pushDirection = posToMove.y >= otherPos.y ? 1 : -1;
+		const minSpacing = 50; // Minimum gap between nodes
+		posToMove.y += pushDirection * (overlapY / 2 + minSpacing / 2);
 	}
 
 	// ========================================================================
