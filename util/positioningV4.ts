@@ -2562,15 +2562,14 @@ export class PositioningEngineV4 {
 			this.vlog(`[PositioningV4] === PHASE 8: POSITION CHILDREN WITHIN CONTAINERS ===`);
 		}
 
-		// Position children for all milestones
-		for (const ws of this.workstreams.values()) {
-			for (const milestone of ws.milestones) {
-				if (milestone.position) {
-					if (this.verbose && milestone.children.length > 0) {
-						this.vlog(`[PositioningV4] Phase 8: Processing milestone ${milestone.entityId} (${milestone.children.length} children)`);
-					}
-					this.positionChildrenRecursive(milestone);
+		// Position children for all nodes that have a position and children
+		// This includes milestones, stories, features, and any other container types
+		for (const node of this.processedNodes.values()) {
+			if (node.position && node.children.length > 0) {
+				if (this.verbose) {
+					this.vlog(`[PositioningV4] Phase 8: Processing ${node.type} ${node.entityId} (${node.children.length} children)`);
 				}
+				this.positionChildrenRecursive(node);
 			}
 		}
 	}
