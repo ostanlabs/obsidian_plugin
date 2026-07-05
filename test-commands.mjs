@@ -7,9 +7,30 @@
  * the core logic for each command.
  */
 
-import { readFileSync, existsSync, readdirSync } from 'fs';
+import { readFileSync, existsSync, readdirSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+
+/**
+ * Recursively find all .md files in a directory
+ */
+function findMarkdownFiles(dir, results = []) {
+	if (!existsSync(dir)) return results;
+
+	const entries = readdirSync(dir);
+	for (const entry of entries) {
+		const fullPath = join(dir, entry);
+		const stat = statSync(fullPath);
+
+		if (stat.isDirectory()) {
+			findMarkdownFiles(fullPath, results);
+		} else if (entry.endsWith('.md')) {
+			results.push(fullPath);
+		}
+	}
+
+	return results;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -47,9 +68,9 @@ try {
 	} else {
 		const templates = readdirSync(TEMPLATES_DIR).filter(f => f.endsWith('.md'));
 		logTest('Templates directory exists', 'PASS', `Found ${templates.length} template files`);
-		
-		// Check for key templates
-		const expectedTemplates = ['task.md', 'story.md', 'milestone.md', 'feature.md', 'decision.md'];
+
+		// Check for canvas templates (entity-core doesn't use entity-type templates)
+		const expectedTemplates = ['canvas-entity-template.md', 'canvas-accomplishment-template.md'];
 		for (const tmpl of expectedTemplates) {
 			const exists = existsSync(join(TEMPLATES_DIR, tmpl));
 			logTest(`  Template: ${tmpl}`, exists ? 'PASS' : 'FAIL');
@@ -83,7 +104,8 @@ try {
 			
 			// Check frontmatter exists
 			const hasFrontmatter = content.startsWith('---\n');
-			const hasId = content.match(/^id:\s*[A-Z]+-\d+$/m);
+			// ID can be T-123, T-1234, DEC-123, etc. (letters, dash, numbers)
+			const hasId = content.match(/^id:\s*[A-Z]+(?:-[A-Z]+)*-\d+$/m);
 			const hasTitle = content.match(/^title:\s*.+$/m);
 			const hasType = content.match(/^type:\s*.+$/m);
 			
@@ -152,6 +174,119 @@ try {
 	logTest('YAML safety check', 'FAIL', e.message);
 }
 
+// TEST 4: Check relationship integrity
+console.log('\n🔗 Test 4: Relationship Integrity');
+try {
+	const entityDirs = [
+		'tasks', 'stories', 'milestones', 'features', 'decisions', 'documents', 'archive'
+	];
+	const entityMap = new Map(); // id -> { file, relationships }
+	let totalRelationships = 0;
+	let brokenRelationships = [];
+
+	// Build entity map (recursively scan all directories including archives)
+	for (const dir of entityDirs) {
+		const dirPath = join(VAULT_ROOT, dir);
+		if (!existsSync(dirPath)) continue;
+
+		const files = findMarkdownFiles(dirPath);
+
+		for (const filePath of files) {
+			const content = readFileSync(filePath, 'utf-8');
+
+			const idMatch = content.match(/^id:\s*([A-Z]+-\d+)$/m);
+			if (!idMatch) continue;
+
+			const id = idMatch[1];
+
+			// Get relative path from vault root for display
+			const relativePath = filePath.replace(VAULT_ROOT + '/', '');
+
+			// Extract relationships
+			const relationships = {
+				depends_on: [],
+				implements: [],
+				blocks: [],
+				parent: null,
+			};
+
+			// Parse depends_on
+			const dependsMatch = content.match(/^depends_on:\s*\[(.*?)\]/m);
+			if (dependsMatch) {
+				relationships.depends_on = dependsMatch[1].split(',')
+					.map(s => s.trim().replace(/["\[\]]/g, ''))
+					.filter(s => s.match(/^[A-Z]+-\d+$/));
+			}
+
+			// Parse implements
+			const implMatch = content.match(/^implements:\s*\[(.*?)\]/m);
+			if (implMatch) {
+				relationships.implements = implMatch[1].split(',')
+					.map(s => s.trim().replace(/["\[\]]/g, ''))
+					.filter(s => s.match(/^[A-Z]+-\d+$/));
+			}
+
+			// Parse parent
+			const parentMatch = content.match(/^parent:\s*([A-Z]+-\d+)$/m);
+			if (parentMatch) {
+				relationships.parent = parentMatch[1];
+			}
+
+			entityMap.set(id, { file: relativePath, relationships });
+		}
+	}
+
+	// Verify relationships point to existing entities
+	for (const [id, data] of entityMap.entries()) {
+		for (const depId of data.relationships.depends_on) {
+			totalRelationships++;
+			if (!entityMap.has(depId)) {
+				brokenRelationships.push(`${id} depends_on ${depId} (not found)`);
+			}
+		}
+
+		for (const implId of data.relationships.implements) {
+			totalRelationships++;
+			if (!entityMap.has(implId)) {
+				brokenRelationships.push(`${id} implements ${implId} (not found)`);
+			}
+		}
+
+		if (data.relationships.parent) {
+			totalRelationships++;
+			if (!entityMap.has(data.relationships.parent)) {
+				brokenRelationships.push(`${id} parent ${data.relationships.parent} (not found)`);
+			}
+		}
+	}
+
+	if (brokenRelationships.length === 0) {
+		logTest('Relationship integrity', 'PASS',
+			`All ${totalRelationships} relationships point to existing entities`);
+	} else {
+		// Broken relationships are expected in real vaults - reconcile should clean them
+		const percentBroken = (brokenRelationships.length / totalRelationships * 100).toFixed(1);
+
+		if (percentBroken < 5) {
+			logTest('Relationship integrity', 'PASS',
+				`${brokenRelationships.length}/${totalRelationships} broken (${percentBroken}% - acceptable)`);
+			console.log(`   ℹ️  Run "reconcile relationships" command to clean these up`);
+		} else {
+			logTest('Relationship integrity', 'FAIL',
+				`${brokenRelationships.length}/${totalRelationships} broken (${percentBroken}% - too high!)`);
+		}
+
+		// Show first 10 broken relationships
+		const toShow = brokenRelationships.slice(0, 10);
+		toShow.forEach(r => console.log(`   ${r}`));
+		if (brokenRelationships.length > 10) {
+			console.log(`   ... and ${brokenRelationships.length - 10} more`);
+		}
+	}
+} catch (e) {
+	logTest('Relationship integrity', 'FAIL', e.message);
+}
+
 console.log('\n' + '='.repeat(60));
 console.log('📊 Test Summary');
 console.log('='.repeat(60));
@@ -159,6 +294,12 @@ console.log(`✅ Passed:  ${results.passed.length}`);
 console.log(`❌ Failed:  ${results.failed.length}`);
 console.log(`⏭️  Skipped: ${results.skipped.length}`);
 console.log('='.repeat(60));
+
+if (results.failed.length === 0) {
+	console.log('\n🎉 All tests passed! Plugin is ready to use.\n');
+} else {
+	console.log('\n⚠️  Some tests failed. Review the issues above.\n');
+}
 
 process.exit(results.failed.length > 0 ? 1 : 0);
 

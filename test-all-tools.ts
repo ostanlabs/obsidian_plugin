@@ -49,7 +49,7 @@ async function testAllTools() {
   try {
     // Test 1: Schema retrieval
     console.log('1️⃣  Testing get_schema');
-    const entityTypes = schema.getEntityTypes();
+    const entityTypes = DEFAULT_SCHEMA.entityTypes;
     console.log(`   ✅ Schema has ${entityTypes.length} entity types\n`);
 
     // Test 2: File listing

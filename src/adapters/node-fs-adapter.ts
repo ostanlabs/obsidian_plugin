@@ -4,7 +4,7 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import type { FileSystem } from '../entity-core/types.js';
+import type { FileSystem, FileStat, FileEntry } from '../entity-core/types.js';
 
 export class NodeFsAdapter implements FileSystem {
   constructor(private readonly vaultPath: string) {}
@@ -65,6 +65,62 @@ export class NodeFsAdapter implements FileSystem {
   async deleteFolder(folderPath: string): Promise<void> {
     const fullPath = this.resolvePath(folderPath);
     await fs.rm(fullPath, { recursive: true, force: true });
+  }
+
+  async stat(filePath: string): Promise<FileStat> {
+    const fullPath = this.resolvePath(filePath);
+    const stats = await fs.stat(fullPath);
+    return {
+      isDirectory: stats.isDirectory(),
+      size: stats.size,
+      mtimeMs: stats.mtimeMs,
+    };
+  }
+
+  async readDir(folderPath: string): Promise<FileEntry[]> {
+    const fullPath = this.resolvePath(folderPath);
+    try {
+      const entries = await fs.readdir(fullPath, { withFileTypes: true });
+      return entries.map((entry) => ({
+        name: entry.name,
+        path: path.join(folderPath, entry.name),
+        isDirectory: entry.isDirectory(),
+      }));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  async createDir(folderPath: string, options?: { recursive?: boolean }): Promise<void> {
+    const fullPath = this.resolvePath(folderPath);
+    await fs.mkdir(fullPath, { recursive: options?.recursive ?? true });
+  }
+
+  async deleteDir(folderPath: string, options?: { recursive?: boolean }): Promise<void> {
+    const fullPath = this.resolvePath(folderPath);
+    await fs.rm(fullPath, { recursive: options?.recursive ?? true, force: true });
+  }
+
+  async readFiles(paths: string[]): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    for (const filePath of paths) {
+      try {
+        const content = await this.readFile(filePath);
+        result.set(filePath, content);
+      } catch {
+        // Skip files that can't be read
+      }
+    }
+    return result;
+  }
+
+  async writeFiles(files: Map<string, string>): Promise<void> {
+    for (const [filePath, content] of files) {
+      await this.writeFile(filePath, content);
+    }
   }
 
   private resolvePath(relativePath: string): string {

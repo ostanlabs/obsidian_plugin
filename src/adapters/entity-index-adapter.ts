@@ -10,7 +10,22 @@ import type { EntityIndex as CoreEntityIndex } from '../entity-core/types.js';
 import type { EntityIndex as PluginEntityIndex } from '../../util/entityNavigator.js';
 import type { SchemaRegistry } from '../entity-core/schema-registry.js';
 
-export class EntityIndexAdapter implements CoreEntityIndex {
+/**
+ * The subset of the entity-core EntityIndex that is actually consumed by the
+ * engine modules wired in EntityCoreFacade.initializeWithIndex (IDAllocator and
+ * RelationshipGraph only call getAllIds/reserveId/isReserved/findDuplicateIds/
+ * getPathById/buildAdjacency). The adapter genuinely implements exactly this
+ * seam; the remaining EntityIndex storage surface (get/set/delete/...) is never
+ * invoked on the adapter at runtime, so we implement the narrow contract rather
+ * than fabricating unused delegates. Signatures are derived from the canonical
+ * EntityIndex via Pick so they stay in sync.
+ */
+export type EngineIndexSeam = Pick<
+  CoreEntityIndex,
+  'getPathById' | 'getAllIds' | 'findDuplicateIds' | 'buildAdjacency' | 'reserveId' | 'isReserved'
+>;
+
+export class EntityIndexAdapter implements EngineIndexSeam {
   private reservedIds: Set<EntityId> = new Set();
 
   constructor(
@@ -88,31 +103,39 @@ export class EntityIndexAdapter implements CoreEntityIndex {
     direction: 'forward' | 'reverse' = 'forward'
   ): Map<EntityId, EntityId[]> {
     const adjacency = new Map<EntityId, EntityId[]>();
-    
+
     // Get the relationship definition from schema
     const rel = this.schema.getRelationship(relationshipName);
     if (!rel) {
       console.warn(`[EntityIndexAdapter] Unknown relationship: ${relationshipName}`);
       return adjacency;
     }
-    
-    // Determine which field to read based on direction
-    const fieldName = direction === 'forward' ? rel.forwardField : rel.inverseField;
-    
+
+    // Collect all field names for this relationship in the given direction
+    const fieldNames = rel.pairs.map((pair) => direction === 'forward' ? pair.forward : pair.reverse);
+
     // Scan all entries and build adjacency list
     const entries = this.pluginIndex.getAll();
     for (const entry of entries) {
       const sourceId = entry.id as EntityId;
-      
-      // Get the relationship field value (array of target IDs)
-      // Note: plugin's EntityIndexEntry stores relationship arrays as string[]
-      const targetIds = (entry as any)[fieldName] as string[] | undefined;
-      
-      if (targetIds && targetIds.length > 0) {
-        adjacency.set(sourceId, targetIds as EntityId[]);
+      const targets: EntityId[] = [];
+
+      // Check all field names for this relationship
+      for (const fieldName of fieldNames) {
+        // Get the relationship field value (array of target IDs)
+        // Note: plugin's EntityIndexEntry stores relationship arrays as string[]
+        const targetIds = (entry as any)[fieldName] as string[] | undefined;
+
+        if (targetIds && targetIds.length > 0) {
+          targets.push(...targetIds as EntityId[]);
+        }
+      }
+
+      if (targets.length > 0) {
+        adjacency.set(sourceId, targets);
       }
     }
-    
+
     return adjacency;
   }
 

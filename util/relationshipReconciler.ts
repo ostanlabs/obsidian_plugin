@@ -1,11 +1,79 @@
 import { App, TFile, Notice } from "obsidian";
 import { parseAnyFrontmatter, applyFrontmatterUpdates } from "./frontmatter";
+import { sanitizeYamlValue, hasUnsafeYamlChars } from "./yamlSanitizer";
 
 /**
  * Fields that must remain scalar (single string value) rather than an array.
  * When the reconciler adds a value to one of these fields it writes a string, not an array.
  */
 const SCALAR_FIELDS = new Set(["parent"]);
+
+/**
+ * Sanitize entity files before reconciliation to fix YAML-unsafe values.
+ * Replaces colons and other problematic characters in frontmatter string fields.
+ *
+ * This prevents "Nested mappings are not allowed" YAML errors when reconciling.
+ *
+ * @param app - Obsidian App instance
+ * @param entityFiles - Array of entity files to sanitize
+ * @returns Result with count of files sanitized and details
+ */
+export async function sanitizeEntityFilesForYaml(
+	app: App,
+	entityFiles: TFile[]
+): Promise<{
+	totalSanitized: number;
+	details: { file: string; field: string; before: string; after: string }[];
+}> {
+	const result = {
+		totalSanitized: 0,
+		details: [] as { file: string; field: string; before: string; after: string }[],
+	};
+
+	console.log(`[YAML Sanitizer] Checking ${entityFiles.length} files for unsafe YAML values...`);
+
+	for (const file of entityFiles) {
+		try {
+			const content = await app.vault.read(file);
+			const frontmatter = parseAnyFrontmatter(content);
+			if (!frontmatter) continue;
+
+			const updates: Record<string, unknown> = {};
+			let hasChanges = false;
+
+			// String fields that commonly contain colons
+			const stringFields = ['title', 'description', 'goal', 'context', 'rationale'];
+
+			for (const field of stringFields) {
+				const value = frontmatter[field];
+				if (typeof value === 'string' && hasUnsafeYamlChars(value)) {
+					const sanitized = sanitizeYamlValue(value);
+					updates[field] = sanitized;
+					hasChanges = true;
+
+					result.details.push({
+						file: file.path,
+						field,
+						before: value,
+						after: sanitized,
+					});
+
+					console.log(`[YAML Sanitizer] ${file.path}: ${field} "${value}" → "${sanitized}"`);
+				}
+			}
+
+			if (hasChanges) {
+				await applyFrontmatterUpdates(app, file, updates);
+				result.totalSanitized++;
+			}
+		} catch (e) {
+			console.warn(`[YAML Sanitizer] Failed to sanitize ${file.path}:`, e);
+		}
+	}
+
+	console.log(`[YAML Sanitizer] Sanitized ${result.totalSanitized} files`);
+	return result;
+}
 
 /**
  * Relationship pairs that should be bidirectional

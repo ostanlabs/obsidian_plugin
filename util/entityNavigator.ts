@@ -181,6 +181,11 @@ export class EntityIndex {
 		return Array.from(this.index.values()).filter(e => e.type === type);
 	}
 
+	/** Get all entities (needed by entity-core adapter) */
+	getAll(): EntityIndexEntry[] {
+		return Array.from(this.index.values());
+	}
+
 	// =========================================================================
 	// Navigation Methods
 	// =========================================================================

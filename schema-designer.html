@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Schema Relationship Designer</title>
+<style>
+  :root{--bg:#0f1216;--panel:#161b22;--panel2:#1c232d;--line:#2a333f;--text:#e6edf3;--muted:#8b98a6;--accent:#4a90e0;--good:#49b36b;--seq:#4a90e0;--con:#9b59d0}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .app{display:flex;height:100vh;overflow:hidden}
+  .sidebar{width:390px;min-width:390px;height:100%;overflow-y:auto;background:var(--panel);border-right:1px solid var(--line);padding:16px}
+  .stage{flex:1;position:relative;overflow:hidden}
+  h1{font-size:16px;margin:0 0 2px}
+  .sub{color:var(--muted);font-size:12px;margin:0 0 12px}
+  .section{margin:16px 0 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  .btnrow{display:flex;gap:6px;margin:8px 0 4px;flex-wrap:wrap}
+  .btn{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:5px 9px;font-size:12px;cursor:pointer}
+  .btn:hover{border-color:var(--accent)}
+  .btn.primary{background:var(--good);border-color:var(--good);color:#08130c;font-weight:700;padding:9px 12px;width:100%;font-size:13px;margin-top:4px}
+  .applynote{background:rgba(74,144,224,.1);border:1px solid #3a5f88;border-radius:8px;padding:8px 10px;font-size:12px;color:#bcd;margin:8px 0}
+  .applynote code{background:#0b0e12}
+  .group{border:1px solid var(--line);border-radius:9px;margin:8px 0;overflow:hidden;background:var(--panel)}
+  .ghead{display:flex;align-items:center;gap:9px;padding:9px;cursor:pointer;background:var(--panel2)}
+  .ghead .rline{width:26px;border-top-width:3px}
+  .ghead .name{font-weight:600;flex:1}
+  .ghead .cnt{font-size:11px;color:var(--muted)}
+  .roleTag{font-size:9px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;border-radius:4px;padding:1px 5px}
+  .role-containment{background:rgba(155,89,208,.18);color:#c9a3ec;border:1px solid #6b4a86}
+  .role-sequencing{background:rgba(74,144,224,.16);color:#9cc4f0;border:1px solid #3a5f88}
+  .pairs{padding:2px 6px 6px}
+  .pair{display:flex;align-items:center;gap:8px;padding:6px;border-radius:6px;font-size:12px;cursor:pointer}
+  .pair:hover{background:var(--panel2)}.pair.off{opacity:.4}
+  .pair .fromto{flex:1}.pair .fromto b{color:var(--text)}.pair .fld{color:var(--muted)}
+  .anytag{font-size:9px;font-weight:700;color:#8b98a6;border:1px solid var(--line);border-radius:4px;padding:0 4px}
+  input[type=checkbox]{accent-color:var(--accent);cursor:pointer;margin:0}
+  .item{display:flex;align-items:center;gap:9px;padding:7px;border-radius:8px;cursor:pointer;user-select:none}
+  .item:hover{background:var(--panel2)}.item.off{opacity:.42}
+  .swatch{width:14px;height:14px;border-radius:4px;flex:0 0 auto}
+  .chip{display:inline-block;font-size:10px;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 5px;margin-left:4px}
+  code{background:var(--panel2);border-radius:4px;padding:1px 4px;font-size:11px}
+  svg{width:100%;height:100%;display:block}
+  .node circle{cursor:grab}.node.dim,.edge.dim{opacity:.12}
+  .edge path{cursor:pointer}.edge.disabled path{stroke-dasharray:3 4!important;opacity:.16!important}
+  .nlabel{font-size:12px;font-weight:600;fill:var(--text);pointer-events:none}
+  .nprefix{font-size:13px;font-weight:700;fill:#0f1216;pointer-events:none}
+  .elabel{font-size:10px;fill:var(--muted);pointer-events:none}.elabel-bg{fill:var(--bg);opacity:.72}
+  #tooltip{position:absolute;pointer-events:none;background:#0b0e12;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;max-width:280px;opacity:0;transition:opacity .1s;box-shadow:0 6px 20px rgba(0,0,0,.5);z-index:5}
+  #tooltip b{color:#fff}#tooltip .kv{color:var(--muted)}
+  .legend{position:absolute;left:14px;bottom:12px;background:rgba(11,14,18,.85);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:11px;color:var(--muted);max-width:420px}
+  .legend .k{display:inline-flex;align-items:center;gap:5px;margin-right:12px}
+  .legend .ln{width:22px;height:0;border-top-width:3px;display:inline-block}
+  .count{position:absolute;right:14px;top:12px;background:rgba(11,14,18,.85);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--muted)}
+  #toast{position:absolute;left:50%;top:16px;transform:translateX(-50%);background:var(--good);color:#08130c;font-weight:700;padding:8px 16px;border-radius:8px;opacity:0;transition:opacity .2s;z-index:9}
+  #preview{max-height:260px;overflow:auto;background:#0b0e12;border:1px solid var(--line);border-radius:8px;padding:8px;font:11px/1.4 ui-monospace,Menlo,monospace;white-space:pre;color:#bcd;margin-top:8px;display:none}
+  .hint{color:var(--muted);font-size:11px;margin-top:6px}
+  .fallback{max-width:640px;margin:14vh auto 0;padding:28px;background:var(--panel);border:1px solid var(--line);border-radius:12px;text-align:center}
+  .fallback h1{font-size:20px;margin-bottom:10px}.fallback p{color:var(--muted);font-size:14px;line-height:1.6}
+  .fallback code{font-size:13px}
+</style>
+</head>
+<body>
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// CONTRACT: the MCP `get_schema_designer` tool injects the vault's live schema by
+// running  html.replaceAll('"__SCHEMA_PLACEHOLDER__"', JSON.stringify(schema)).
+// So at runtime ACTIVE_SCHEMA becomes the full Schema OBJECT. Keep the next line
+// EXACTLY as-is (the quoted token is what gets replaced).
+const ACTIVE_SCHEMA = "__SCHEMA_PLACEHOLDER__";
+// ─────────────────────────────────────────────────────────────────────────────
+
+(function () {
+  // Fallback: opened as a raw file (token never replaced) → ACTIVE_SCHEMA is still a string.
+  if (typeof ACTIVE_SCHEMA === 'string' || !ACTIVE_SCHEMA ||
+      !Array.isArray(ACTIVE_SCHEMA.entityTypes) || !Array.isArray(ACTIVE_SCHEMA.relationships)) {
+    document.body.innerHTML =
+      '<div class="fallback"><h1>Schema Relationship Designer</h1>' +
+      '<p>This page needs a live schema injected into it. Open it through the ' +
+      '<code>get_schema_designer</code> MCP tool (it substitutes your vault’s active schema), ' +
+      'rather than opening the raw <code>schema-designer.html</code> file directly.</p></div>';
+    return;
+  }
+  main(ACTIVE_SCHEMA);
+})();
+
+function main(SCHEMA) {
+  const SVGNS = 'http://www.w3.org/2000/svg';
+
+  // ── Colour resolution ──────────────────────────────────────────────────────
+  // Obsidian canvas numeric palette (1..6), common colour names, hex passthrough,
+  // else a deterministic fallback palette by index.
+  const OBS = {'1':'#e0544a','2':'#e08a3a','3':'#e0bd3a','4':'#49b36b','5':'#39a8c0','6':'#9b6dff'};
+  const NAMED = {gray:'#8a8f98',grey:'#8a8f98',blue:'#4a90e0',purple:'#9b59d0',violet:'#9b59d0',
+    yellow:'#d9b23a',gold:'#d9b23a',orange:'#e07b3a',red:'#e0544a',green:'#49b36b',
+    cyan:'#39a8c0',teal:'#3ab0a0',pink:'#e06aa8',magenta:'#c65cc6'};
+  const FALLBACK = ['#9b6dff','#e0bd3a','#e08a3a','#49b36b','#39a8c0','#e0544a','#4a90e0','#e06aa8','#3ab0a0','#c65cc6'];
+  function resolveColor(c, i) {
+    if (c === undefined || c === null || c === '') return FALLBACK[i % FALLBACK.length];
+    const s = String(c).trim();
+    if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(s)) return s;
+    if (OBS[s]) return OBS[s];
+    const lc = s.toLowerCase();
+    if (NAMED[lc]) return NAMED[lc];
+    return FALLBACK[i % FALLBACK.length];
+  }
+
+  // ── Nodes: one per entity type, plus synthetic nodes for any pair endpoint that
+  //    isn't a declared entity type ('*' → "Any", or an unknown type name). ──────
+  const ENT = SCHEMA.entityTypes.map((e, i) => ({
+    type: e.type,
+    label: e.label || e.type,
+    prefix: e.idPrefix || String(e.type || '?').slice(0, 3).toUpperCase(),
+    color: resolveColor(e.canvas && e.canvas.color, i),
+  }));
+  const known = new Set(ENT.map(e => e.type));
+  const NODES = ENT.slice();
+  const extraTypes = new Set();
+  let usesAny = false;
+  SCHEMA.relationships.forEach(r => (r.pairs || []).forEach(p => {
+    [p.from, p.to].forEach(t => {
+      if (t === '*' || t === undefined || t === null) { usesAny = usesAny || t === '*'; }
+      else if (!known.has(t)) extraTypes.add(t);
+    });
+  }));
+  [...extraTypes].forEach((t, i) => NODES.push({
+    type: t, label: t, prefix: String(t).slice(0, 3).toUpperCase(), color: FALLBACK[(ENT.length + i) % FALLBACK.length],
+  }));
+  if (usesAny) NODES.push({ type: '*', label: 'Any', prefix: '*', color: '#8b98a6', isAny: true });
+  const nodeById = Object.fromEntries(NODES.map(n => [n.type, n]));
+  function endLabel(t) { return t === '*' ? 'Any' : (nodeById[t] ? nodeById[t].label : t); }
+
+  // ── Relationships (normalised view model). role/style DERIVED from positioning.
+  //    Solid = containment, dashed = sequencing. Default containment if absent. ──
+  const RELS = SCHEMA.relationships.map((r, ri) => {
+    const role = (r.positioning && r.positioning.role) === 'sequencing' ? 'sequencing' : 'containment';
+    const card = r.cardinality ? `${r.cardinality.forward || '?'} → ${r.cardinality.reverse || '?'}` : '';
+    return {
+      ri,
+      name: r.name || ('relationship-' + ri),
+      label: r.label || r.name || ('Relationship ' + ri),
+      role,
+      color: resolveColor(r.canvas && r.canvas.color, ri),
+      card,
+      pairs: (r.pairs || []).map((p, pi) => ({
+        pi, key: ri + '|' + pi,
+        from: p.from, to: p.to, forward: p.forward, reverse: p.reverse,
+      })),
+    };
+  });
+
+  const styleFor = role => role === 'containment' ? '' : '8 6'; // solid vs dashed
+
+  // ── State ───────────────────────────────────────────────────────────────────
+  const pairOn = {};        // key "ri|pi" -> bool
+  RELS.forEach(r => r.pairs.forEach(p => pairOn[p.key] = true));
+  const entOn = {};         // node type -> visible (view filter only)
+  NODES.forEach(n => entOn[n.type] = true);
+  const pos = {};
+  let hoverNode = null;
+
+  const svg = document.getElementById('svg');
+  const tooltip = document.getElementById('tooltip');
+  const toast = document.getElementById('toast');
+  const W = 980, H = 720, CX = W / 2 + 40, CY = H / 2, NR = 34;
+  const R = Math.min(300, Math.max(170, 70 + NODES.length * 22));
+  NODES.forEach((n, i) => {
+    const a = -Math.PI / 2 + i * (2 * Math.PI / NODES.length);
+    pos[n.type] = { x: CX + R * Math.cos(a), y: CY + R * Math.sin(a) };
+  });
+
+  // ── Sidebar ────────────────────────────────────────────────────────────────
+  function buildSidebar() {
+    const rl = document.getElementById('rel-list'); rl.innerHTML = '';
+    RELS.forEach(rel => {
+      const keys = rel.pairs.map(p => p.key);
+      const on = keys.filter(k => pairOn[k]).length, total = keys.length;
+      const g = document.createElement('div'); g.className = 'group';
+      const head = document.createElement('div'); head.className = 'ghead';
+      head.innerHTML =
+        `<input type="checkbox"><span class="rline" style="border-top:3px ${rel.role === 'containment' ? 'solid' : 'dashed'} ${rel.color}"></span>` +
+        `<span class="name">${esc(rel.label)}</span><span class="roleTag role-${rel.role}">${rel.role}</span><span class="cnt">${on}/${total}</span>`;
+      const cb = head.querySelector('input');
+      cb.checked = total > 0 && on === total; cb.indeterminate = on > 0 && on < total;
+      cb.addEventListener('click', e => { e.stopPropagation(); keys.forEach(k => pairOn[k] = e.target.checked); refresh(); });
+      g.appendChild(head);
+      const box = document.createElement('div'); box.className = 'pairs';
+      if (rel.card) { const n = document.createElement('div'); n.className = 'hint'; n.style.padding = '2px 6px'; n.textContent = 'cardinality: ' + rel.card; box.appendChild(n); }
+      rel.pairs.forEach(p => {
+        const row = document.createElement('label'); row.className = 'pair' + (pairOn[p.key] ? '' : ' off');
+        const anyF = p.from === '*' ? '<span class="anytag">any</span> ' : '';
+        const anyT = p.to === '*' ? ' <span class="anytag">any</span>' : '';
+        row.innerHTML =
+          `<input type="checkbox" ${pairOn[p.key] ? 'checked' : ''}>` +
+          `<span class="fromto"><b>${anyF}${esc(endLabel(p.from))}</b> → <b>${esc(endLabel(p.to))}${anyT}</b>` +
+          `<br><span class="fld">${esc(p.forward || '')} · ↩ ${esc(p.reverse || '')}</span></span>`;
+        row.querySelector('input').addEventListener('change', ev => { pairOn[p.key] = ev.target.checked; refresh(); });
+        box.appendChild(row);
+      });
+      g.appendChild(box); rl.appendChild(g);
+    });
+    const el = document.getElementById('ent-list'); el.innerHTML = '';
+    NODES.forEach(n => {
+      const it = document.createElement('label'); it.className = 'item' + (entOn[n.type] ? '' : ' off');
+      it.innerHTML = `<input type="checkbox" ${entOn[n.type] ? 'checked' : ''}><span class="swatch" style="background:${n.color}"></span><span><b>${esc(n.label)}</b> <code>${esc(n.prefix)}${n.isAny ? '' : '-'}</code></span>`;
+      it.querySelector('input').addEventListener('change', ev => { entOn[n.type] = ev.target.checked; refresh(); });
+      el.appendChild(it);
+    });
+  }
+
+  document.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => {
+    const a = b.dataset.act;
+    if (a === 'all-on') Object.keys(pairOn).forEach(k => pairOn[k] = true);
+    if (a === 'all-off') Object.keys(pairOn).forEach(k => pairOn[k] = false);
+    if (a === 'con-only') RELS.forEach(r => r.pairs.forEach(p => pairOn[p.key] = r.role === 'containment'));
+    refresh();
+  }));
+  ['opt-labels', 'opt-hideDisabled'].forEach(id => document.getElementById(id).addEventListener('change', render));
+
+  // ── Graph ────────────────────────────────────────────────────────────────────
+  function computeEdges() {
+    const edges = []; const hide = document.getElementById('opt-hideDisabled').checked;
+    RELS.forEach(rel => rel.pairs.forEach(p => {
+      const from = (p.from === '*' || !nodeById[p.from]) ? (p.from === '*' ? '*' : p.from) : p.from;
+      const to = (p.to === '*' || !nodeById[p.to]) ? (p.to === '*' ? '*' : p.to) : p.to;
+      if (!nodeById[from] || !nodeById[to]) return; // unresolvable endpoint — skip drawing
+      const en = pairOn[p.key]; if (!en && hide) return;
+      if (!entOn[from] || !entOn[to]) return;
+      edges.push({ rel, from, to, fwd: p.forward, rev: p.reverse, enabled: en, key: p.key });
+    }));
+    return edges;
+  }
+  function assignCurves(edges) {
+    const g = {};
+    edges.forEach(e => { const k = [e.from, e.to].sort().join('|'); (g[k] = g[k] || []).push(e); });
+    Object.values(g).forEach(a => { const n = a.length; a.forEach((e, i) => e.curv = (i - (n - 1) / 2) * 30); });
+  }
+  function trim(p, q, d) { const dx = q.x - p.x, dy = q.y - p.y, l = Math.hypot(dx, dy) || 1; return { x: p.x + dx / l * d, y: p.y + dy / l * d }; }
+  function edgeGeom(e) {
+    const a = pos[e.from], b = pos[e.to];
+    if (e.from === e.to) {
+      const p = pos[e.from], o = 54; const s = { x: p.x - 14, y: p.y - NR + 4 }, en = { x: p.x + 14, y: p.y - NR + 4 };
+      return { d: `M ${s.x} ${s.y} C ${p.x - o} ${p.y - NR - o}, ${p.x + o} ${p.y - NR - o}, ${en.x} ${en.y}`, lx: p.x, ly: p.y - NR - o - 4 };
+    }
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, dx = b.x - a.x, dy = b.y - a.y, l = Math.hypot(dx, dy) || 1;
+    const c = { x: mx - dy / l * e.curv, y: my + dx / l * e.curv }; const s = trim(a, c, NR + 2), en = trim(b, c, NR + 11);
+    return { d: `M ${s.x} ${s.y} Q ${c.x} ${c.y} ${en.x} ${en.y}`, lx: (s.x + 2 * c.x + en.x) / 4, ly: (s.y + 2 * c.y + en.y) / 4 };
+  }
+
+  function render() {
+    const edges = computeEdges(); assignCurves(edges);
+    const showLabels = document.getElementById('opt-labels').checked;
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const defs = document.createElementNS(SVGNS, 'defs');
+    [...new Set(RELS.map(r => r.color))].forEach(c => {
+      const m = document.createElementNS(SVGNS, 'marker'); m.setAttribute('id', 'arw-' + c.replace('#', ''));
+      m.setAttribute('viewBox', '0 0 10 10'); m.setAttribute('refX', '9'); m.setAttribute('refY', '5');
+      m.setAttribute('markerWidth', '7'); m.setAttribute('markerHeight', '7'); m.setAttribute('orient', 'auto-start-reverse');
+      const p = document.createElementNS(SVGNS, 'path'); p.setAttribute('d', 'M0,0 L10,5 L0,10 z'); p.setAttribute('fill', c);
+      m.appendChild(p); defs.appendChild(m);
+    });
+    svg.appendChild(defs);
+    const gE = document.createElementNS(SVGNS, 'g'), gL = document.createElementNS(SVGNS, 'g'), gN = document.createElementNS(SVGNS, 'g');
+    svg.appendChild(gE); svg.appendChild(gL); svg.appendChild(gN);
+    edges.forEach(e => {
+      const geo = edgeGeom(e); const g = document.createElementNS(SVGNS, 'g'); g.setAttribute('class', 'edge' + (e.enabled ? '' : ' disabled'));
+      if (hoverNode && e.from !== hoverNode && e.to !== hoverNode) g.classList.add('dim');
+      const path = document.createElementNS(SVGNS, 'path'); path.setAttribute('d', geo.d); path.setAttribute('fill', 'none'); path.setAttribute('stroke', e.rel.color);
+      path.setAttribute('stroke-width', 2.3); path.setAttribute('stroke-dasharray', styleFor(e.rel.role)); path.setAttribute('opacity', .95);
+      if (e.enabled) path.setAttribute('marker-end', 'url(#arw-' + e.rel.color.replace('#', '') + ')');
+      path.addEventListener('mousemove', ev => showTip(ev, e)); path.addEventListener('mouseleave', hideTip);
+      path.addEventListener('click', () => { pairOn[e.key] = !pairOn[e.key]; refresh(); });
+      g.appendChild(path); gE.appendChild(g);
+      if (showLabels && e.fwd) {
+        const t = document.createElementNS(SVGNS, 'text'); t.setAttribute('x', geo.lx); t.setAttribute('y', geo.ly); t.setAttribute('text-anchor', 'middle'); t.setAttribute('class', 'elabel'); t.textContent = e.fwd;
+        const bg = document.createElementNS(SVGNS, 'rect'); bg.setAttribute('class', 'elabel-bg'); gL.appendChild(bg); gL.appendChild(t);
+        const bb = t.getBBox(); bg.setAttribute('x', bb.x - 3); bg.setAttribute('y', bb.y - 1); bg.setAttribute('width', bb.width + 6); bg.setAttribute('height', bb.height + 2); bg.setAttribute('rx', 3);
+      }
+    });
+    NODES.forEach(n => {
+      if (!entOn[n.type]) return; const p = pos[n.type]; const g = document.createElementNS(SVGNS, 'g'); g.setAttribute('class', 'node'); if (hoverNode && hoverNode !== n.type) g.classList.add('dim');
+      const c = document.createElementNS(SVGNS, 'circle'); c.setAttribute('cx', p.x); c.setAttribute('cy', p.y); c.setAttribute('r', NR); c.setAttribute('fill', n.color); c.setAttribute('stroke', '#0f1216'); c.setAttribute('stroke-width', '3');
+      if (n.isAny) c.setAttribute('stroke-dasharray', '4 4');
+      const pre = document.createElementNS(SVGNS, 'text'); pre.setAttribute('x', p.x); pre.setAttribute('y', p.y + 5); pre.setAttribute('text-anchor', 'middle'); pre.setAttribute('class', 'nprefix'); pre.textContent = n.prefix;
+      const lb = document.createElementNS(SVGNS, 'text'); lb.setAttribute('x', p.x); lb.setAttribute('y', p.y + NR + 16); lb.setAttribute('text-anchor', 'middle'); lb.setAttribute('class', 'nlabel'); lb.textContent = n.label;
+      g.appendChild(c); g.appendChild(pre); g.appendChild(lb);
+      g.addEventListener('mouseenter', () => { hoverNode = n.type; render(); }); g.addEventListener('mouseleave', () => { hoverNode = null; render(); });
+      enableDrag(c, n.type); gN.appendChild(g);
+    });
+    const kept = Object.values(pairOn).filter(Boolean).length, tot = Object.keys(pairOn).length;
+    document.getElementById('count').textContent = `keeping ${kept}/${tot} pairs · ${edges.filter(e => e.enabled).length} active edges`;
+    document.getElementById('legend').innerHTML =
+      `<span class="k"><span class="ln" style="border-top:3px solid var(--con)"></span> Containment (solid)</span>` +
+      `<span class="k"><span class="ln" style="border-top:3px dashed var(--seq)"></span> Sequencing (dashed)</span><br>` +
+      `Arrows point <b style="color:var(--text)">from → to</b>. Click an edge/pair to toggle · hover a node to isolate · drag to rearrange.`;
+    updatePreview();
+  }
+
+  function showTip(ev, e) {
+    tooltip.innerHTML =
+      `<b>${esc(e.rel.label)}</b> <span class="roleTag role-${e.rel.role}">${e.rel.role}</span>${e.enabled ? '' : ' <span class="kv">(off)</span>'}<br>` +
+      `<span class="kv">from</span> ${esc(endLabel(e.from))} <span class="kv">→ to</span> ${esc(endLabel(e.to))}<br>` +
+      `<span class="kv">forward:</span> <b>${esc(e.fwd || '')}</b> · <span class="kv">reverse:</span> ${esc(e.rev || '')}<br>` +
+      `<span class="kv">click to ${e.enabled ? 'disable' : 'enable'}</span>`;
+    const r = svg.getBoundingClientRect(); tooltip.style.left = (ev.clientX - r.left + 14) + 'px'; tooltip.style.top = (ev.clientY - r.top + 14) + 'px'; tooltip.style.opacity = 1;
+  }
+  function hideTip() { tooltip.style.opacity = 0; }
+  function enableDrag(circle, type) {
+    circle.addEventListener('mousedown', e => {
+      e.preventDefault(); const rect = svg.getBoundingClientRect(); const sx = W / rect.width, sy = H / rect.height;
+      function mv(ev) { pos[type] = { x: (ev.clientX - rect.left) * sx, y: (ev.clientY - rect.top) * sy }; render(); }
+      function up() { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); }
+      document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+    });
+  }
+
+  // ── EXPORT ───────────────────────────────────────────────────────────────────
+  // Full Schema object = deep copy of ACTIVE_SCHEMA with `relationships` filtered
+  // to only the ENABLED pairs. Relationships with zero enabled pairs are dropped;
+  // every other field (name,label,cardinality,canvas,graph,positioning) and each
+  // kept pair is preserved verbatim, as are entityTypes/settings/workstreams.
+  function buildExport() {
+    const out = JSON.parse(JSON.stringify(SCHEMA)); // deep copy of everything
+    out.relationships = [];
+    SCHEMA.relationships.forEach((rel, ri) => {
+      const keptPairs = (rel.pairs || []).filter((p, pi) => pairOn[ri + '|' + pi]);
+      if (keptPairs.length === 0) return;                 // drop relationships with no enabled pairs
+      const relCopy = JSON.parse(JSON.stringify(rel));    // preserve every field verbatim
+      relCopy.pairs = JSON.parse(JSON.stringify(keptPairs));
+      out.relationships.push(relCopy);
+    });
+    return out;
+  }
+
+  function updatePreview() { const pre = document.getElementById('preview'); if (pre.style.display !== 'none') pre.textContent = JSON.stringify(buildExport(), null, 2); }
+  document.getElementById('previewToggle').addEventListener('click', () => {
+    const pre = document.getElementById('preview'); const show = pre.style.display === 'none'; pre.style.display = show ? 'block' : 'none';
+    document.getElementById('previewToggle').textContent = show ? 'Hide preview' : 'Show preview'; updatePreview();
+  });
+  document.getElementById('copyBtn').addEventListener('click', async () => {
+    const exp = buildExport(); const txt = JSON.stringify(exp, null, 2);
+    try { await navigator.clipboard.writeText(txt); }
+    catch (_) { const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+    const pairs = exp.relationships.reduce((a, r) => a + (r.pairs ? r.pairs.length : 0), 0);
+    toast.textContent = `Copied schema — ${exp.relationships.length} relationships, ${pairs} pairs`;
+    toast.style.opacity = 1; setTimeout(() => toast.style.opacity = 0, 2200);
+  });
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+  function refresh() { buildSidebar(); render(); }
+
+  document.getElementById('meta').textContent =
+    `${SCHEMA.entityTypes.length} entity types · ${SCHEMA.relationships.length} relationships`;
+  refresh();
+}
+</script>
+<div class="app">
+  <aside class="sidebar">
+    <h1>Schema Relationship Designer</h1>
+    <p class="sub"><span id="meta"></span>. <b>Containment</b> builds the tree (where a node sits); <b>Sequencing</b> orders siblings. Toggle relationships per entity pair, then copy the resulting schema.</p>
+    <button class="btn primary" id="copyBtn">&#128203; Copy schema (enabled pairs only)</button>
+    <div class="applynote">Paste into the <code>set_schema</code> MCP tool to apply: <code>set_schema { "schema": &lt;pasted&gt; }</code>. The copied object is your full schema with only the toggled-on pairs kept.</div>
+    <div class="btnrow">
+      <button class="btn" data-act="all-on">All on</button>
+      <button class="btn" data-act="all-off">All off</button>
+      <button class="btn" data-act="con-only">Containment only</button>
+      <button class="btn" id="previewToggle">Show preview</button>
+    </div>
+    <pre id="preview"></pre>
+    <div class="section">Relationships — enable per entity pair</div>
+    <div id="rel-list"></div>
+    <p class="hint">Click a pair (or an edge) to toggle it. Header toggles the whole group. <b style="color:var(--con)">Solid</b> = containment · <b style="color:var(--seq)">dashed</b> = sequencing. A dashed-outline node marked <code>*</code> means "Any".</p>
+    <div class="section">View filter (does not affect export)</div>
+    <div id="ent-list"></div>
+    <label class="item"><input type="checkbox" id="opt-labels" checked><span>Show edge labels</span></label>
+    <label class="item"><input type="checkbox" id="opt-hideDisabled"><span>Hide disabled edges</span></label>
+  </aside>
+  <main class="stage">
+    <div class="count" id="count"></div>
+    <svg id="svg" viewBox="0 0 980 720" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="legend" id="legend"></div>
+    <div id="tooltip"></div>
+    <div id="toast"></div>
+  </main>
+</div>
+</body>
+</html>

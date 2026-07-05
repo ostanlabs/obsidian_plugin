@@ -16,13 +16,18 @@
   ],
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "build": "npm run build:plugin && npm run build:mcp",
+    "build:plugin": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "build:mcp": "esbuild mcp.ts --bundle --outfile=bin/mcp-server.mjs --platform=node --format=esm --loader:.html=text --external:@modelcontextprotocol/sdk --external:@ostanlabs/md-retriever --external:onnxruntime-node --external:@xenova/transformers --external:better-sqlite3 --external:faiss-node --external:yaml --external:zod --external:chokidar",
+    "dev:mcp": "tsx watch mcp.ts",
     "typecheck": "tsc -noEmit -skipLibCheck",
     "version": "node version-bump.mjs && git add manifest.json versions.json",
     "test": "jest",
+    "test:core": "vitest run",
+    "test:core:watch": "vitest",
     "test:watch": "jest --watch",
     "test:integration": "jest --config jest.config.integration.js",
-    "test:all": "npm run test && npm run test:integration",
+    "test:all": "npm run test:core && npm run test && npm run test:integration",
     "lint": "eslint . --ext .ts",
     "format": "prettier --write \"**/*.{ts,tsx,json,md}\""
   },
@@ -44,6 +49,7 @@
     "@typescript-eslint/eslint-plugin": "^6.21.0",
     "@typescript-eslint/parser": "^6.21.0",
     "@typescript-eslint/utils": "^8.50.0",
+    "@vitest/ui": "^3.0.0",
     "builtin-modules": "^3.3.0",
     "esbuild": "^0.20.1",
     "eslint": "^9.39.2",
@@ -53,10 +59,17 @@
     "prettier": "^3.2.5",
     "ts-jest": "^29.1.2",
     "tslib": "^2.6.2",
+    "tsx": "^4.7.0",
     "typescript": "^5.3.3",
-    "typescript-eslint": "^8.50.0"
+    "typescript-eslint": "^8.50.0",
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
   },
   "dependencies": {
-    "@notionhq/client": "^2.2.15"
+    "@modelcontextprotocol/sdk": "^0.5.0",
+    "@notionhq/client": "^2.2.15",
+    "@ostanlabs/md-retriever": "file:../obsidian_mcp/md_retriever",
+    "yaml": "^2.3.4",
+    "zod": "^3.22.4"
   }
 }

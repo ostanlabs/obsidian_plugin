@@ -101,7 +101,7 @@ export function parseEntityFromFrontmatter(
 		affects: parseYamlArray(frontmatterText, 'affects'),
 		implementedBy: parseYamlArray(frontmatterText, 'implemented_by'),
 		implements: parseYamlArray(frontmatterText, 'implements'),
-		documents: parseYamlValue(frontmatterText, 'documents'),
+		documents: parseYamlArray(frontmatterText, 'documents'),
 		supersedes: parseYamlValue(frontmatterText, 'supersedes'),
 		previousVersion: parseYamlValue(frontmatterText, 'previous_version'),
 		filePath,

@@ -1,5 +1,6 @@
 import { App, TFile } from "obsidian";
 import { ItemFrontmatter, FeatureFrontmatter, ItemStatus, ItemPriority, FeatureTier, FeaturePhase, FeatureStatus } from "../types";
+import { sanitizeAllRelationships } from "./sanitizeRelationships";
 
 /**
  * Parsed frontmatter with string index signature for dynamic access
@@ -159,6 +160,9 @@ export function parseAnyFrontmatter(content: string): ParsedFrontmatter | null {
 		return null;
 	}
 
+	// Sanitize relationship fields to remove quotes from entity IDs
+	sanitizeAllRelationships(frontmatter);
+
 	return frontmatter;
 }
 
@@ -248,6 +252,14 @@ export function updateFrontmatter(
 			// Handle arrays (like depends_on) - always include, even if empty
 			if (Array.isArray(value)) {
 				newFrontmatterLines.push(`${key}: ${JSON.stringify(value)}`);
+			} else if (typeof value === 'string') {
+				// Quote strings that contain colons, newlines, or other YAML special chars
+				// to avoid "Nested mappings are not allowed in compact mappings" errors
+				if (value.includes(':') || value.includes('\n') || value.includes('#')) {
+					newFrontmatterLines.push(`${key}: "${value.replace(/"/g, '\\"')}"`);
+				} else {
+					newFrontmatterLines.push(`${key}: ${value}`);
+				}
 			} else {
 				newFrontmatterLines.push(`${key}: ${value}`);
 			}
@@ -304,6 +316,9 @@ export function createWithFrontmatter(body: string, frontmatter: Partial<ItemFro
  * This is the safe, API-compliant replacement for the read→updateFrontmatter→modify pattern.
  * processFrontMatter handles all YAML escaping, comment preservation, and concurrent-write safety.
  *
+ * WARNING: Obsidian's YAML parser has issues with unquoted colons in string values (e.g., "title: Component 3: Config Loader").
+ * To work around this, we skip updates if the existing frontmatter would cause serialization errors.
+ *
  * @param app Obsidian App instance
  * @param file TFile to update
  * @param updates Fields to set/update. Pass null or undefined for a field to delete it.
@@ -313,15 +328,39 @@ export async function applyFrontmatterUpdates(
 	file: TFile,
 	updates: Record<string, unknown>
 ): Promise<void> {
-	await app.fileManager.processFrontMatter(file, (fm) => {
-		for (const [key, value] of Object.entries(updates)) {
-			if (value === undefined || value === null || value === "") {
-				delete fm[key];
-			} else {
-				fm[key] = value;
+	// Sanitize relationship fields before writing to ensure entity IDs are never quoted
+	const sanitizedUpdates = { ...updates };
+	sanitizeAllRelationships(sanitizedUpdates);
+
+	try {
+		await app.fileManager.processFrontMatter(file, (fm) => {
+			for (const [key, value] of Object.entries(sanitizedUpdates)) {
+				if (value === undefined || value === null || value === "") {
+					delete fm[key];
+				} else {
+					fm[key] = value;
+				}
 			}
-		}
-	});
+		});
+	} catch (error) {
+		// If Obsidian's YAML parser fails (e.g., due to unquoted colons), fall back to manual update
+		console.warn(`[applyFrontmatterUpdates] processFrontMatter failed for ${file.path}, using manual update:`, error);
+		await manualFrontmatterUpdate(app, file, sanitizedUpdates);
+	}
+}
+
+/**
+ * Manually update frontmatter by reading, parsing, updating, and writing the file.
+ * This is a fallback for when Obsidian's processFrontMatter fails due to YAML issues.
+ */
+async function manualFrontmatterUpdate(
+	app: App,
+	file: TFile,
+	updates: Record<string, unknown>
+): Promise<void> {
+	const content = await app.vault.read(file);
+	const updated = updateFrontmatter(content, updates);
+	await app.vault.modify(file, updated);
 }
 
 /**

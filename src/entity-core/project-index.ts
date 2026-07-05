@@ -146,3 +146,220 @@ export class ProjectIndex implements EntityIndex {
     this.lastRebuild = Date.now();
   }
 
+  // Helper to add to set-based index
+  private addToSetIndex<K>(map: Map<K, Set<EntityId>>, key: K, id: EntityId): void {
+    let set = map.get(key);
+    if (!set) { set = new Set(); map.set(key, set); }
+    set.add(id);
+  }
+
+  // Helper to remove from set-based index
+  private removeFromSetIndex<K>(map: Map<K, Set<EntityId>>, key: K, id: EntityId): void {
+    const set = map.get(key);
+    if (set) { set.delete(id); if (set.size === 0) map.delete(key); }
+  }
+
+  private addToSecondaryIndexes(metadata: EntityMetadata): void {
+    this.addToSetIndex(this.secondary.by_type, metadata.type, metadata.id);
+    this.addToSetIndex(this.secondary.by_status, metadata.status, metadata.id);
+    this.addToSetIndex(this.secondary.by_workstream, metadata.workstream, metadata.id);
+    if (metadata.parent_id) this.addToSetIndex(this.secondary.by_parent, metadata.parent_id, metadata.id);
+    this.addToSetIndex(this.secondary.by_canvas, metadata.canvas_source, metadata.id);
+    if (metadata.archived) this.secondary.archived.add(metadata.id);
+    if (metadata.in_progress) this.secondary.in_progress.add(metadata.id);
+    if (metadata.priority) this.addToSetIndex(this.secondary.by_priority, metadata.priority, metadata.id);
+  }
+
+  private removeFromSecondaryIndexes(metadata: EntityMetadata): void {
+    this.removeFromSetIndex(this.secondary.by_type, metadata.type, metadata.id);
+    this.removeFromSetIndex(this.secondary.by_status, metadata.status, metadata.id);
+    this.removeFromSetIndex(this.secondary.by_workstream, metadata.workstream, metadata.id);
+    if (metadata.parent_id) this.removeFromSetIndex(this.secondary.by_parent, metadata.parent_id, metadata.id);
+    this.removeFromSetIndex(this.secondary.by_canvas, metadata.canvas_source, metadata.id);
+    this.secondary.archived.delete(metadata.id);
+    this.secondary.in_progress.delete(metadata.id);
+    if (metadata.priority) this.removeFromSetIndex(this.secondary.by_priority, metadata.priority, metadata.id);
+  }
+
+  private removeFromRelationships(id: EntityId): void {
+    // Remove all forward relationships
+    const forwardRels = this.relationships.forward.get(id);
+    if (forwardRels) {
+      for (const [relType, targets] of forwardRels) {
+        for (const target of targets) {
+          const reverseRels = this.relationships.reverse.get(target);
+          if (reverseRels) {
+            const reverseType = this.getReverseRelationType(relType);
+            reverseRels.get(reverseType)?.delete(id);
+          }
+        }
+      }
+      this.relationships.forward.delete(id);
+    }
+    // Remove all reverse relationships
+    const reverseRels = this.relationships.reverse.get(id);
+    if (reverseRels) {
+      for (const [relType, sources] of reverseRels) {
+        for (const source of sources) {
+          const forwardRels = this.relationships.forward.get(source);
+          if (forwardRels) {
+            const forwardType = this.getReverseRelationType(relType);
+            forwardRels.get(forwardType)?.delete(id);
+          }
+        }
+      }
+      this.relationships.reverse.delete(id);
+    }
+  }
+
+  /**
+   * Remove only forward relationships for an entity (relationships where this entity is the source).
+   * This is used when re-indexing an entity's relationships without losing relationships
+   * where this entity is the target (e.g., parent_of relationships from children).
+   *
+   * @param excludeTypes - Relationship types to exclude from removal. Use this to preserve
+   *                       relationships that are "owned" by other entities (e.g., parent_of
+   *                       is owned by children, not parents).
+   */
+  removeForwardRelationships(id: EntityId, excludeTypes?: string[]): void {
+    const forwardRels = this.relationships.forward.get(id);
+    if (forwardRels) {
+      const excludeSet = new Set(excludeTypes || []);
+      for (const [relType, targets] of forwardRels) {
+        // Skip excluded relationship types
+        if (excludeSet.has(relType)) continue;
+
+        for (const target of targets) {
+          const reverseRels = this.relationships.reverse.get(target);
+          if (reverseRels) {
+            const reverseType = this.getReverseRelationType(relType);
+            reverseRels.get(reverseType)?.delete(id);
+          }
+        }
+        forwardRels.delete(relType);
+      }
+      // Only delete the forward map if it's empty
+      if (forwardRels.size === 0) {
+        this.relationships.forward.delete(id);
+      }
+    }
+  }
+
+  private getReverseRelationType(type: RelationshipType): RelationshipType {
+    // Basic inverses - can be extended via schema
+    const reverseMap: Record<string, string> = {
+      'blocks': 'blocked_by', 'blocked_by': 'blocks',
+      'implements': 'implemented_by', 'implemented_by': 'implements',
+      'supersedes': 'superseded_by', 'superseded_by': 'supersedes',
+      'parent_of': 'child_of', 'child_of': 'parent_of',
+      'previous_version': 'next_version', 'next_version': 'previous_version',
+      'affects': 'decided_by', 'decided_by': 'affects',
+      'documents': 'documented_by', 'documented_by': 'documents',
+    };
+    return reverseMap[type] || type;
+  }
+
+  // Secondary Index Query Methods
+  getByType(type: EntityType): EntityMetadata[] {
+    const ids = this.secondary.by_type.get(type);
+    return ids ? Array.from(ids).map(id => this.primary.get(id)!).filter(Boolean) : [];
+  }
+
+  getByStatus(status: string): EntityMetadata[] {
+    const ids = this.secondary.by_status.get(status);
+    return ids ? Array.from(ids).map(id => this.primary.get(id)!).filter(Boolean) : [];
+  }
+
+  getByWorkstream(workstream: string): EntityMetadata[] {
+    const ids = this.secondary.by_workstream.get(workstream);
+    return ids ? Array.from(ids).map(id => this.primary.get(id)!).filter(Boolean) : [];
+  }
+
+  getByParent(parentId: EntityId): EntityMetadata[] {
+    const ids = this.secondary.by_parent.get(parentId);
+    return ids ? Array.from(ids).map(id => this.primary.get(id)!).filter(Boolean) : [];
+  }
+
+  getByCanvas(canvasPath: CanvasPath): EntityMetadata[] {
+    const ids = this.secondary.by_canvas.get(canvasPath);
+    return ids ? Array.from(ids).map(id => this.primary.get(id)!).filter(Boolean) : [];
+  }
+
+  getArchived(): EntityMetadata[] {
+    return Array.from(this.secondary.archived).map(id => this.primary.get(id)!).filter(Boolean);
+  }
+
+  getInProgress(): EntityMetadata[] {
+    return Array.from(this.secondary.in_progress).map(id => this.primary.get(id)!).filter(Boolean);
+  }
+
+  // Relationship Operations
+  addRelationship(from: EntityId, type: RelationshipType, to: EntityId): void {
+    // Add forward relationship
+    let forwardRels = this.relationships.forward.get(from);
+    if (!forwardRels) { forwardRels = new Map(); this.relationships.forward.set(from, forwardRels); }
+    let targets = forwardRels.get(type);
+    if (!targets) { targets = new Set(); forwardRels.set(type, targets); }
+    targets.add(to);
+
+    // Add reverse relationship
+    const reverseType = this.getReverseRelationType(type);
+    let reverseRels = this.relationships.reverse.get(to);
+    if (!reverseRels) { reverseRels = new Map(); this.relationships.reverse.set(to, reverseRels); }
+    let sources = reverseRels.get(reverseType);
+    if (!sources) { sources = new Set(); reverseRels.set(reverseType, sources); }
+    sources.add(from);
+  }
+
+  getRelated(id: EntityId, type: RelationshipType): EntityId[] {
+    const rels = this.relationships.forward.get(id);
+    return rels?.get(type) ? Array.from(rels.get(type)!) : [];
+  }
+
+  getRelatedReverse(id: EntityId, type: RelationshipType): EntityId[] {
+    const rels = this.relationships.reverse.get(id);
+    return rels?.get(type) ? Array.from(rels.get(type)!) : [];
+  }
+
+  // File Mapping Operations
+  getIdByPath(path: VaultPath): EntityId | undefined { return this.files.path_to_id.get(path); }
+  getPathById(id: EntityId): VaultPath | null { return this.files.id_to_path.get(id) ?? null; }
+  getFileMtime(path: VaultPath): number | undefined { return this.files.file_mtimes.get(path); }
+  getAllPaths(): VaultPath[] { return Array.from(this.files.path_to_id.keys()); }
+
+  // Index Maintenance
+  findDuplicateIds(): DuplicateGroup[] {
+    const idToPaths = new Map<EntityId, VaultPath[]>();
+    for (const [path, id] of this.files.path_to_id) {
+      if (!idToPaths.has(id)) idToPaths.set(id, []);
+      idToPaths.get(id)!.push(path);
+    }
+    const duplicates: DuplicateGroup[] = [];
+    for (const [id, paths] of idToPaths) {
+      if (paths.length > 1) duplicates.push({ id, paths });
+    }
+    return duplicates;
+  }
+
+  buildAdjacency(relationshipName: string, direction: 'forward' | 'reverse' = 'forward'): Map<EntityId, EntityId[]> {
+    const adjacency = new Map<EntityId, EntityId[]>();
+    const graph = direction === 'forward' ? this.relationships.forward : this.relationships.reverse;
+
+    for (const [id, rels] of graph) {
+      const targets = rels.get(relationshipName);
+      if (targets && targets.size > 0) {
+        adjacency.set(id, Array.from(targets));
+      }
+    }
+    return adjacency;
+  }
+
+  reserveId(id: EntityId): void {
+    this.reservedIds.add(id);
+  }
+
+  isReserved(id: EntityId): boolean {
+    return this.reservedIds.has(id);
+  }
+}
+

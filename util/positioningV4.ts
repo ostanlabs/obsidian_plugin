@@ -14,6 +14,8 @@
 
 import { App, TFile, Notice } from 'obsidian';
 import { CanvasNode, CanvasData, CanvasEdge } from './canvas';
+import { DEFAULT_SCHEMA } from '../src/entity-core/default-schema.js';
+import { buildRelationshipRules } from '../src/entity-core/schema-derivation.js';
 
 // ============================================================================
 // Types
@@ -85,42 +87,11 @@ export interface RelationshipRule {
 	crossWsPositioning?: boolean; // If true, apply cross-workstream position constraints
 }
 
-export const RELATIONSHIP_RULES: RelationshipRule[] = [
-	// MILESTONE
-	{ sourceType: 'milestone', field: 'workstream', targetType: 'workstream', action: 'containment', direction: 'child' },
-	{ sourceType: 'milestone', field: 'depends_on', targetType: 'milestone', action: 'sequencing', direction: 'after', crossWsPositioning: true },
-	{ sourceType: 'milestone', field: 'blocks', targetType: 'milestone', action: 'sequencing', direction: 'before', crossWsPositioning: true },
-	{ sourceType: 'milestone', field: 'implements', targetType: ['feature', 'document'], action: 'containment', direction: 'parent' },
-
-	// STORY
-	{ sourceType: 'story', field: 'parent', targetType: 'milestone', action: 'containment', direction: 'child' },
-	{ sourceType: 'story', field: 'depends_on', targetType: 'story', action: 'sequencing', direction: 'after', crossWsPositioning: true },
-	{ sourceType: 'story', field: 'blocks', targetType: 'story', action: 'sequencing', direction: 'before', crossWsPositioning: true },
-	{ sourceType: 'story', field: 'implements', targetType: ['feature', 'document'], action: 'containment', direction: 'parent' },
-
-	// TASK (crossWsPositioning: false - edge only, no position constraint)
-	{ sourceType: 'task', field: 'parent', targetType: ['story', 'milestone'], action: 'containment', direction: 'child' },
-	{ sourceType: 'task', field: 'depends_on', targetType: 'task', action: 'sequencing', direction: 'after', crossWsPositioning: false },
-	{ sourceType: 'task', field: 'blocks', targetType: 'task', action: 'sequencing', direction: 'before', crossWsPositioning: false },
-
-	// DECISION
-	{ sourceType: 'decision', field: 'parent', targetType: ['milestone', 'story'], action: 'containment', direction: 'child', priority: 1 },
-	{ sourceType: 'decision', field: 'affects', targetType: ['milestone', 'story', 'task', 'document', 'feature'], action: 'containment', direction: 'child', priority: 2 },
-	{ sourceType: 'decision', field: 'affects', targetType: 'decision', action: 'sequencing', direction: 'before', crossWsPositioning: false },
-	{ sourceType: 'decision', field: 'supersedes', targetType: 'decision', action: 'sequencing', direction: 'before' },
-	{ sourceType: 'decision', field: 'depends_on', targetType: 'decision', action: 'sequencing', direction: 'after', crossWsPositioning: false },
-	{ sourceType: 'decision', field: 'blocks', targetType: 'decision', action: 'sequencing', direction: 'before', crossWsPositioning: false },
-
-	// DOCUMENT
-	{ sourceType: 'document', field: 'parent', targetType: ['milestone', 'story'], action: 'containment', direction: 'child', priority: 1 },
-	{ sourceType: 'document', field: 'implemented_by', targetType: ['milestone', 'story', 'task'], action: 'containment', direction: 'child', priority: 2 },
-	{ sourceType: 'document', field: 'documents', targetType: 'feature', action: 'containment', direction: 'child', priority: 3 },
-	{ sourceType: 'document', field: 'previous_version', targetType: 'document', action: 'sequencing', direction: 'after' },
-
-	// FEATURE
-	{ sourceType: 'feature', field: 'parent', targetType: ['milestone', 'story'], action: 'containment', direction: 'child', priority: 1 },
-	{ sourceType: 'feature', field: 'implemented_by', targetType: ['milestone', 'story', 'task'], action: 'containment', direction: 'child', priority: 2 },
-];
+export const RELATIONSHIP_RULES: RelationshipRule[] =
+	// SINGLE SOURCE OF TRUTH: derived from the schema's relationship `positioning`
+	// metadata (default-schema.ts). The MCP validator derives its allow-list from the
+	// same schema. Do NOT hand-edit rules here — change the schema instead.
+	buildRelationshipRules(DEFAULT_SCHEMA) as RelationshipRule[];
 
 // ============================================================================
 // Entity Categories
@@ -224,6 +195,11 @@ export interface PositioningResult {
 export class PositioningEngineV4 {
 	private config: PositioningConfig;
 
+	// Injectable relationship ruleset (defaults to module-level RELATIONSHIP_RULES).
+	// Wired from the vault/project schema.json so the plugin shares the MCP's single
+	// source of truth. Falls back to RELATIONSHIP_RULES when not provided.
+	private relationshipRules?: RelationshipRule[];
+
 	// Phase 1: Index
 	private entityMap: Map<string, EntityData> = new Map();        // entityId -> data
 	private nodeIdToEntityId: Map<string, string> = new Map();     // nodeId -> entityId
@@ -237,6 +213,9 @@ export class PositioningEngineV4 {
 	private orphanedEntities: ProcessedNode[] = [];
 	private deferredEntities: DeferredEntity[] = [];
 
+	// Track child positioning passes
+	private childPositioningPassCount: number = 0;
+
 	// Phase 5-6: Workstreams
 	private workstreams: Map<string, WorkstreamData> = new Map();
 	private crossWorkstreamBands: CrossWorkstreamBand[] = [];
@@ -249,8 +228,10 @@ export class PositioningEngineV4 {
 	private logger?: (msg: string) => void;
 	private verbose: boolean = false;
 
-	constructor(config: Partial<PositioningConfig> = {}, logger?: (msg: string) => void, verbose: boolean = false) {
-		this.config = { ...DEFAULT_POSITIONING_CONFIG, ...config };
+	constructor(config: Partial<PositioningConfig> & { relationshipRules?: RelationshipRule[] } = {}, logger?: (msg: string) => void, verbose: boolean = false) {
+		const { relationshipRules, ...positioningConfig } = config;
+		this.config = { ...DEFAULT_POSITIONING_CONFIG, ...positioningConfig };
+		this.relationshipRules = relationshipRules;
 		this.logger = logger;
 		this.verbose = verbose;
 	}
@@ -304,7 +285,7 @@ export class PositioningEngineV4 {
 		// Phase 7: Position stories with cross-workstream constraints
 		this.positionStoriesWithCrossWsConstraints();
 
-		// Phase 8: Position children within containers
+		// Phase 8: Position children within containers (first pass: stories, tasks, etc.)
 		this.positionAllChildren();
 
 		// Phase 9: Position floating entities
@@ -316,7 +297,10 @@ export class PositioningEngineV4 {
 		// Phase 11: Position orphans
 		this.positionOrphans();
 
-		// Phase 12: Resolve overlaps
+		// Phase 12: Position children within containers (second pass: children of deferred/orphan parents)
+		this.positionAllChildren();
+
+		// Phase 13: Resolve overlaps
 		this.resolveOverlaps();
 
 		return this.collectResults();
@@ -334,6 +318,7 @@ export class PositioningEngineV4 {
 		this.deferredEntities = [];
 		this.workstreams.clear();
 		this.crossWorkstreamBands = [];
+		this.childPositioningPassCount = 0;
 		this.errors = [];
 		this.warnings = [];
 	}
@@ -501,7 +486,7 @@ export class PositioningEngineV4 {
 		}
 
 		// Find applicable rules for this entity type
-		const applicableRules = RELATIONSHIP_RULES.filter(r => r.sourceType === entity.type);
+		const applicableRules = (this.relationshipRules ?? RELATIONSHIP_RULES).filter(r => r.sourceType === entity.type);
 
 		for (const rule of applicableRules) {
 			const fieldValue = this.getFieldValue(entity, rule.field);
@@ -650,11 +635,21 @@ export class PositioningEngineV4 {
 		this.vlog(`[PositioningV4] === PHASE 3: CATEGORIZE ENTITIES ===`);
 
 		for (const node of this.processedNodes.values()) {
+			// Verbose: Log F-017 before validation
+			if (node.entityId === 'F-017' && this.verbose) {
+				this.vlog(`[F-017 TRACE] Phase 3 BEFORE validation:`);
+				this.vlog(`  containmentParentId: ${node.containmentParentId || 'NONE'}`);
+				this.vlog(`  containmentEdgeTargets: [${node.containmentEdgeTargets.join(', ')}]`);
+			}
+
 			// Validate containment parent exists
 			if (node.containmentParentId && !this.processedNodes.has(node.containmentParentId)) {
 				this.warnings.push(
 					`${node.entityId} references parent ${node.containmentParentId} which is not in the entity set (may be archived). Treating as orphan.`
 				);
+				if (this.verbose && node.entityId === 'F-017') {
+					this.vlog(`[F-017 TRACE] Parent ${node.containmentParentId} not found, clearing containmentParentId`);
+				}
 				node.containmentParentId = undefined;
 			}
 
@@ -664,10 +659,20 @@ export class PositioningEngineV4 {
 					this.warnings.push(
 						`${node.entityId} references containment target ${targetId} which is not in the entity set (may be archived). Removing reference.`
 					);
+					if (this.verbose && node.entityId === 'F-017') {
+						this.vlog(`[F-017 TRACE] Edge target ${targetId} not found, removing`);
+					}
 					return false;
 				}
 				return true;
 			});
+
+			// Verbose: Log F-017 after validation
+			if (node.entityId === 'F-017' && this.verbose) {
+				this.vlog(`[F-017 TRACE] Phase 3 AFTER validation:`);
+				this.vlog(`  containmentParentId: ${node.containmentParentId || 'NONE'}`);
+				this.vlog(`  containmentEdgeTargets: [${node.containmentEdgeTargets.join(', ')}]`);
+			}
 
 			const hasContainment = !!node.containmentParentId || node.containmentEdgeTargets.length > 0;
 			const hasSequencing = node.sequencingBefore.length > 0 || node.sequencingAfter.length > 0;
@@ -687,13 +692,28 @@ export class PositioningEngineV4 {
 				// Check for deferred (multiple containment parents at same priority)
 				const multipleParents = this.hasMultipleContainmentParents(node);
 
+				// Verbose: Log F-017 after hasMultipleContainmentParents
+				if (node.entityId === 'F-017' && this.verbose) {
+					this.vlog(`[F-017 TRACE] After hasMultipleContainmentParents:`);
+					this.vlog(`  multipleParents: ${multipleParents}`);
+					this.vlog(`  containmentParentId: ${node.containmentParentId || 'NONE'}`);
+					this.vlog(`  containmentEdgeTargets: [${node.containmentEdgeTargets.join(', ')}]`);
+				}
+
 				if (multipleParents) {
 					node.category = 'contained';  // Will be handled as deferred
+					const allParents = this.getAllContainmentParents(node);
 					this.deferredEntities.push({
 						node,
-						parentEntityIds: this.getAllContainmentParents(node),
-						parentWorkstreams: this.getWorkstreamsForParents(this.getAllContainmentParents(node)),
+						parentEntityIds: allParents,
+						parentWorkstreams: this.getWorkstreamsForParents(allParents),
 					});
+
+					// Verbose: Log when F-017 is added to deferred
+					if (node.entityId === 'F-017' && this.verbose) {
+						this.vlog(`[F-017 TRACE] Added to deferredEntities:`);
+						this.vlog(`  parentEntityIds: [${allParents.join(', ')}]`);
+					}
 				} else {
 					node.category = 'contained';
 					this.containedEntities.push(node);
@@ -2553,13 +2573,22 @@ export class PositioningEngineV4 {
 	}
 
 	// ========================================================================
-	// Phase 8: Position Children Within Containers
+	// Phase 8 & 12: Position Children Within Containers
+	// Called twice: once after Phase 7 (for regular contained entities)
+	// and again after Phase 11 (for deferred/orphan parents)
 	// ========================================================================
 
 	private positionAllChildren(): void {
-		console.log(`[PositioningV4] Phase 8: Positioning children within containers`);
+		// Determine which pass this is based on call count
+		if (!this.childPositioningPassCount) {
+			this.childPositioningPassCount = 0;
+		}
+		this.childPositioningPassCount++;
+		const passNumber = this.childPositioningPassCount === 1 ? 8 : 12;
+
+		console.log(`[PositioningV4] Phase ${passNumber}: Positioning children within containers (pass ${this.childPositioningPassCount})`);
 		if (this.verbose) {
-			this.vlog(`[PositioningV4] === PHASE 8: POSITION CHILDREN WITHIN CONTAINERS ===`);
+			this.vlog(`[PositioningV4] === PHASE ${passNumber}: POSITION CHILDREN WITHIN CONTAINERS (PASS ${this.childPositioningPassCount}) ===`);
 		}
 
 		// Position children for all nodes that have a position and children
@@ -2567,14 +2596,20 @@ export class PositioningEngineV4 {
 		for (const node of this.processedNodes.values()) {
 			if (node.position && node.children.length > 0) {
 				if (this.verbose) {
-					this.vlog(`[PositioningV4] Phase 8: Processing ${node.type} ${node.entityId} (${node.children.length} children)`);
+					this.vlog(`[PositioningV4] Phase ${passNumber}: Processing ${node.type} ${node.entityId} (${node.children.length} children)`);
 				}
-				this.positionChildrenRecursive(node);
+				this.positionChildrenRecursive(node, passNumber);
+			} else if (!node.position && node.children.length > 0) {
+				// Log nodes with children but no position
+				if (this.verbose) {
+					this.vlog(`[PositioningV4] Phase ${passNumber}: SKIPPING ${node.type} ${node.entityId} (${node.children.length} children) - NO POSITION`);
+					this.vlog(`  category: ${node.category}, containmentParentId: ${node.containmentParentId || 'NONE'}`);
+				}
 			}
 		}
 	}
 
-	private positionChildrenRecursive(parent: ProcessedNode): void {
+	private positionChildrenRecursive(parent: ProcessedNode, passNumber: number = 8): void {
 		// Debug logging for S-083, M-001, S-042
 		if (parent.entityId === 'S-083' || parent.entityId === 'M-001' || parent.entityId === 'S-042') {
 			console.log(`[PositioningV4] DEBUG Phase 8: positionChildrenRecursive called for ${parent.entityId}, children.length=${parent.children.length}, position=${parent.position ? `(${parent.position.x}, ${parent.position.y})` : 'null'}`);
@@ -2777,11 +2812,11 @@ export class PositioningEngineV4 {
 	}
 
 	// ========================================================================
-	// Phase 9: Position Floating Entities
+	// Phase 8: Position Floating Entities (moved before deferred to establish base positions)
 	// ========================================================================
 
 	private positionFloatingEntities(): void {
-		console.log(`[PositioningV4] Phase 9: Positioning floating entities`);
+		console.log(`[PositioningV4] Phase 8: Positioning floating entities`);
 
 		// Position single-workstream floating entities (on top of their workstream)
 		for (const floating of this.floatingSingleWs) {
@@ -2897,11 +2932,18 @@ export class PositioningEngineV4 {
 	}
 
 	// ========================================================================
-	// Phase 10: Position Deferred (Multi-Parent) Entities
+	// Phase 9: Position Deferred (Multi-Parent) Entities
 	// ========================================================================
 
 	private positionDeferredEntities(): void {
-		console.log(`[PositioningV4] Phase 10: Positioning deferred (multi-parent) entities`);
+		console.log(`[PositioningV4] Phase 9: Positioning deferred (multi-parent) entities`);
+		if (this.verbose) {
+			this.vlog(`[PositioningV4] === PHASE 9: POSITION DEFERRED (MULTI-PARENT) ENTITIES ===`);
+			this.vlog(`  Total deferred entities: ${this.deferredEntities.length}`);
+			for (const def of this.deferredEntities) {
+				this.vlog(`  - ${def.node.entityId}: parents=[${def.parentEntityIds.join(', ')}], workstreams=${def.parentWorkstreams.size}`);
+			}
+		}
 
 		// Group by whether they cross workstreams
 		const sameWorkstream: DeferredEntity[] = [];
@@ -2913,6 +2955,10 @@ export class PositioningEngineV4 {
 			} else {
 				crossWorkstream.push(deferred);
 			}
+		}
+
+		if (this.verbose) {
+			this.vlog(`  Same workstream: ${sameWorkstream.length}, Cross workstream: ${crossWorkstream.length}`);
 		}
 
 		// Position same-workstream entities centered above parents
@@ -2927,8 +2973,21 @@ export class PositioningEngineV4 {
 	private positionDeferredSameWorkstream(deferred: DeferredEntity): void {
 		const containerBounds: { minX: number; maxX: number; minY: number }[] = [];
 
+		// Verbose: Log F-017 processing
+		if (deferred.node.entityId === 'F-017' && this.verbose) {
+			this.vlog(`[F-017 TRACE] Phase 10: Processing as deferred same-workstream`);
+			this.vlog(`  Parents to check: [${deferred.parentEntityIds.join(', ')}]`);
+		}
+
 		for (const parentId of deferred.parentEntityIds) {
 			const parent = this.processedNodes.get(parentId);
+
+			// Verbose: Log F-017 parent check
+			if (deferred.node.entityId === 'F-017' && this.verbose) {
+				this.vlog(`[F-017 TRACE]   Checking parent ${parentId}:`);
+				this.vlog(`    exists: ${!!parent}, hasPosition: ${!!parent?.position}, hasContainerSize: ${!!parent?.containerSize}`);
+			}
+
 			if (parent?.position && parent.containerSize) {
 				const containerMinX = parent.position.x + parent.position.width - parent.containerSize.width;
 				const containerMaxX = parent.position.x + parent.position.width;
@@ -2944,6 +3003,9 @@ export class PositioningEngineV4 {
 		}
 
 		if (containerBounds.length === 0) {
+			if (this.verbose && deferred.node.entityId === 'F-017') {
+				this.vlog(`[F-017 TRACE] Phase 10: No parent bounds found, moving to orphans`);
+			}
 			this.orphanedEntities.push(deferred.node);
 			return;
 		}
@@ -3023,13 +3085,13 @@ export class PositioningEngineV4 {
 	}
 
 	// ========================================================================
-	// Phase 11: Position Orphans
+	// Phase 10: Position Orphans
 	// ========================================================================
 
 	private positionOrphans(): void {
 		if (this.orphanedEntities.length === 0) return;
 
-		console.log(`[PositioningV4] Phase 11: Positioning ${this.orphanedEntities.length} orphans`);
+		console.log(`[PositioningV4] Phase 10: Positioning ${this.orphanedEntities.length} orphans`);
 		this.vlog(`[PositioningV4] === PHASE 11: POSITION ORPHANS ===`);
 
 		// Verbose: Check if DEC-043 is in orphan list
@@ -3183,11 +3245,11 @@ export class PositioningEngineV4 {
 	}
 
 	// ========================================================================
-	// Phase 12: Resolve Overlaps
+	// Phase 13: Resolve Overlaps
 	// ========================================================================
 
 	private resolveOverlaps(): void {
-		this.log(`[PositioningV4] Phase 12: Resolving overlaps`);
+		this.log(`[PositioningV4] Phase 13: Resolving overlaps`);
 
 		// Resolve overlaps per container (per milestone or orphan area)
 		// This prevents the algorithm from breaking container layouts

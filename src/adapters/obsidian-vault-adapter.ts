@@ -2,8 +2,8 @@
  * ObsidianVaultAdapter — FileSystem implementation for plugin mode using Obsidian Vault API.
  */
 
-import type { Vault, TFolder, TFile } from 'obsidian';
-import type { FileSystem } from '../entity-core/types.js';
+import { Vault, TFolder, TFile } from 'obsidian';
+import type { FileSystem, FileStat, FileEntry } from '../entity-core/types.js';
 
 export class ObsidianVaultAdapter implements FileSystem {
   constructor(private readonly vault: Vault) {}
@@ -83,12 +83,75 @@ export class ObsidianVaultAdapter implements FileSystem {
     }
   }
 
+  async stat(path: string): Promise<FileStat> {
+    const file = this.vault.getAbstractFileByPath(path);
+    if (!file) {
+      throw new Error(`File not found: ${path}`);
+    }
+
+    if (file instanceof TFile) {
+      return {
+        isDirectory: false,
+        size: file.stat.size,
+        mtimeMs: file.stat.mtime,
+      };
+    } else if (file instanceof TFolder) {
+      return {
+        isDirectory: true,
+        size: 0,
+        mtimeMs: 0,
+      };
+    }
+
+    throw new Error(`Unknown file type: ${path}`);
+  }
+
+  async readDir(folderPath: string): Promise<FileEntry[]> {
+    const folder = this.vault.getAbstractFileByPath(folderPath);
+    if (!folder || !(folder instanceof TFolder)) {
+      return [];
+    }
+
+    return folder.children.map((child) => ({
+      name: child.name,
+      path: child.path,
+      isDirectory: child instanceof TFolder,
+    }));
+  }
+
+  async createDir(path: string, _options?: { recursive?: boolean }): Promise<void> {
+    await this.ensureFolder(path);
+  }
+
+  async deleteDir(path: string, _options?: { recursive?: boolean }): Promise<void> {
+    await this.deleteFolder(path);
+  }
+
+  async readFiles(paths: string[]): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    for (const filePath of paths) {
+      try {
+        const content = await this.readFile(filePath);
+        result.set(filePath, content);
+      } catch {
+        // Skip files that can't be read
+      }
+    }
+    return result;
+  }
+
+  async writeFiles(files: Map<string, string>): Promise<void> {
+    for (const [filePath, content] of files) {
+      await this.writeFile(filePath, content);
+    }
+  }
+
   private async ensureFolder(path: string): Promise<void> {
     const existing = this.vault.getAbstractFileByPath(path);
     if (existing instanceof TFolder) {
       return; // Already exists
     }
-    
+
     // Obsidian's createFolder creates parent folders automatically
     try {
       await this.vault.createFolder(path);

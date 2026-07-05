@@ -25,6 +25,7 @@ import { LinkFeatureModal, LinkFeatureModalResult, FeatureOption } from "./ui/Li
 import { FeatureDetailsView, FEATURE_DETAILS_VIEW_TYPE } from "./ui/FeatureDetailsView";
 import { FeatureCoverageView, FEATURE_COVERAGE_VIEW_TYPE } from "./ui/FeatureCoverageView";
 import { NotionClient } from "./notion/notionClient";
+import { stripQuotes } from "./util/entityParser";
 
 // Result interfaces for internal mapping
 interface ConvertNoteResult {
@@ -42,6 +43,9 @@ import {
 	replaceFeaturePlaceholders,
 } from "./util/template";
 import { parseFrontmatter, parseAnyFrontmatter, parseFrontmatterAndBody, createWithFrontmatter, applyFrontmatterUpdates } from "./util/frontmatter";
+import { EntityCoreFacade } from "./src/entity-core-facade";
+import { EntityIndexAdapter } from "./src/adapters/entity-index-adapter";
+import type { EntityIndex as CoreEntityIndex } from "./src/entity-core/types";
 import {
 	loadCanvasData,
 	saveCanvasData,
@@ -69,7 +73,10 @@ import { generateUniqueFilename, isPluginCreatedNote, generateEntityFilename } f
 import { addNodesToCanvasView, getCanvasView, hasInternalCanvasAPI, inspectCanvasAPI, addEdgesToCanvasView } from "./util/canvasView";
 import { EntityIndex, EntityIndexEntry, getEntityTypeFromId } from "./util/entityNavigator";
 import { PositioningEngineV3, EntityData, PositioningResult, EntityType as PositioningEntityType } from "./util/positioningV3";
-import { PositioningEngineV4, EntityData as EntityDataV4 } from "./util/positioningV4";
+import { PositioningEngineV4, EntityData as EntityDataV4, RelationshipRule, PositioningConfig } from "./util/positioningV4";
+import { loadSchemaOrDefault } from "./src/entity-core/schema-bootstrap.js";
+import { buildRelationshipRules } from "./src/entity-core/schema-derivation.js";
+import { ObsidianVaultAdapter } from "./src/adapters/obsidian-vault-adapter.js";
 import { parseEntityFromFrontmatter, generateNodeIdFromEntityId } from "./util/entityParser";
 import { reconcileRelationships, cleanTransitiveDependencies, detectAndBreakCycles } from "./util/relationshipReconciler";
 
@@ -114,6 +121,8 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	private controlPanelEl: HTMLElement | null = null;
 	// Entity Navigator index
 	private entityIndex: EntityIndex | null = null;
+	// Entity-Core facade (unified engine)
+	private entityCore: EntityCoreFacade | null = null;
 	// Debug logging — replaced with no-op when debugMode is false
 	private _origConsoleDebug = console.debug.bind(console);
 	private _origConsoleLog   = console.log.bind(console);
@@ -183,6 +192,13 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 		// Initialize logger
 		this.logger = new Logger(this.app, "canvas-project-manager");
 		this.logger.info("Plugin loaded");
+
+		// Clear operation log from previous session
+		try {
+			await this.app.vault.adapter.remove('operation-log.txt');
+		} catch (e) {
+			// File doesn't exist, that's fine
+		}
 
 		// Initialize Notion client
 		this.notionClient = new NotionClient(this.settings, this.logger);
@@ -366,7 +382,12 @@ private registerCommands(): void {
 		id: "reposition-canvas-nodes",
 		name: "Project canvas: reposition nodes (v4 algorithm)",
 		callback: async () => {
-			await this.repositionCanvasNodesV4();
+			const operationLog: string[] = [];
+			const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+			const logFileName = `positioning-verbose-${timestamp}.log`;
+			await this.repositionCanvasNodesV4(operationLog, true); // Enable verbose logging
+			await this.app.vault.adapter.write(logFileName, operationLog.join('\n'));
+			new Notice(`📝 Verbose log saved to ${logFileName}`);
 		},
 	});
 
@@ -1196,7 +1217,7 @@ private registerCommands(): void {
 			// Extract entity ID
 			const idMatch = frontmatterText.match(/^id:\s*(.+)$/m);
 			if (idMatch) {
-				const entityId = idMatch[1].trim();
+				const entityId = stripQuotes(idMatch[1].trim());
 				el.setAttribute("data-canvas-pm-entity-id", entityId);
 				applied = true;
 			}
@@ -1204,7 +1225,7 @@ private registerCommands(): void {
 			// Extract type
 			const typeMatch = frontmatterText.match(/^type:\s*(.+)$/m);
 			if (typeMatch) {
-				const entityType = typeMatch[1].trim().toLowerCase();
+				const entityType = stripQuotes(typeMatch[1].trim()).toLowerCase();
 				el.setAttribute("data-canvas-pm-type", entityType);
 				applied = true;
 			}
@@ -1753,15 +1774,26 @@ private registerCommands(): void {
 		const results: Array<{ nodeId: string; entityId: string; title: string }> = [];
 
 		const activeLeaf = this.app.workspace.activeLeaf;
-		if (!activeLeaf) return results;
+		if (!activeLeaf) {
+			console.debug("[Canvas Search] No active leaf");
+			return results;
+		}
 
 		// @ts-ignore - canvas view internals
 		const canvas = activeLeaf.view?.canvas;
-		if (!canvas) return results;
+		if (!canvas) {
+			console.debug("[Canvas Search] No canvas view");
+			return results;
+		}
 
 		// @ts-ignore - canvas.nodes is a Map<string, CanvasNode>
 		const canvasNodes = canvas.nodes as Map<string, unknown> | undefined;
-		if (!canvasNodes) return results;
+		if (!canvasNodes) {
+			console.debug("[Canvas Search] No canvas nodes");
+			return results;
+		}
+
+		console.debug(`[Canvas Search] Scanning ${canvasNodes.size} canvas nodes`);
 
 		for (const [nodeId, canvasNode] of canvasNodes) {
 			// @ts-ignore - get node's DOM element
@@ -1778,6 +1810,7 @@ private registerCommands(): void {
 			results.push({ nodeId, entityId, title });
 		}
 
+		console.debug(`[Canvas Search] Found ${results.length} entities with IDs`);
 		return results;
 	}
 
@@ -2928,7 +2961,7 @@ private registerCommands(): void {
 	): Promise<void> {
 		try {
 			// Generate ID based on entity type
-			const id = generateId(this.app, this.settings, result.type);
+			const id = await this.generateEntityId(result.type);
 
 			// Keep the same file path
 			const newPath = file.path;
@@ -3106,14 +3139,14 @@ private registerCommands(): void {
 				if (existingFile instanceof TFile) {
 					const fileContent = await this.app.vault.read(existingFile);
 					const parsed = parseFrontmatter(fileContent);
-					id = parsed?.id || generateId(this.app, this.settings, result.type);
+					id = parsed?.id || await this.generateEntityId(result.type);
 					console.debug('[Canvas Plugin] Read ID from existing file:', id);
 				} else {
-					id = generateId(this.app, this.settings, result.type);
+					id = await this.generateEntityId(result.type);
 				}
 			} else {
 				// Generate new path (conversion flow) - WI-2: Use type-specific routing
-				id = generateId(this.app, this.settings, result.type);
+				id = await this.generateEntityId(result.type);
 				notePath = await this.determineNotePath(canvasFile, title, id, result.type);
 				console.debug('[Canvas Plugin] Generated new note path:', notePath);
 			}
@@ -4178,47 +4211,59 @@ private registerCommands(): void {
 			console.debug('[Canvas Plugin] Total markdown files in vault:', allFiles.length);
 
 			for (const file of allFiles) {
-				const content = await this.app.vault.read(file);
-				const frontmatter = parseFrontmatter(content);
+				try {
+					const content = await this.app.vault.read(file);
+					const frontmatter = parseFrontmatter(content);
 
-				// Check if this file was created by our plugin
-				const isPluginFile = frontmatter && isPluginCreatedNote(frontmatter);
-				if (isPluginFile) {
-					console.debug('[Canvas Plugin] Found plugin-created file:', file.path);
-					console.debug('[Canvas Plugin] Frontmatter:', {
-						type: frontmatter.type,
-						id: frontmatter.id,
-						canvas_source: frontmatter.canvas_source,
-						created_by_plugin: frontmatter.created_by_plugin
-					});
+					// Check if this file was created by our plugin
+					const isPluginFile = frontmatter && isPluginCreatedNote(frontmatter);
+					if (isPluginFile) {
+						console.debug('[Canvas Plugin] Found plugin-created file:', file.path);
+						console.debug('[Canvas Plugin] Frontmatter:', {
+							type: frontmatter.type,
+							id: frontmatter.id,
+							canvas_source: frontmatter.canvas_source,
+							created_by_plugin: frontmatter.created_by_plugin
+						});
 
-					// Check if file is referenced in canvas_source
-					const canvasSources = Array.isArray(frontmatter.canvas_source)
-						? frontmatter.canvas_source
-						: [frontmatter.canvas_source];
+						// Check if file is referenced in canvas_source
+						const canvasSources = Array.isArray(frontmatter.canvas_source)
+							? frontmatter.canvas_source
+							: [frontmatter.canvas_source];
 
-					console.debug('[Canvas Plugin] Canvas sources for file:', canvasSources);
-					console.debug('[Canvas Plugin] Current canvas path:', canvasFile.path);
+						console.debug('[Canvas Plugin] Canvas sources for file:', canvasSources);
+						console.debug('[Canvas Plugin] Current canvas path:', canvasFile.path);
 
-					// If this note references the current canvas
-					if (canvasSources.includes(canvasFile.path)) {
-						// Check if the note is still in the canvas
-						const isInCanvas = currentFileNodes.has(file.path);
-						console.debug('[Canvas Plugin] Is file still in canvas?', isInCanvas);
+						// If this note references the current canvas
+						if (canvasSources.includes(canvasFile.path)) {
+							// Check if the note is still in the canvas
+							const isInCanvas = currentFileNodes.has(file.path);
+							console.debug('[Canvas Plugin] Is file still in canvas?', isInCanvas);
 
-						if (!isInCanvas) {
-							// File was removed from canvas, delete it
-							console.debug('[Canvas Plugin] Deleting file:', file.path);
-							await this.app.fileManager.trashFile(file);
-							new Notice(`🗑️ Deleted: ${file.basename}`);
-							this.logger?.info("Plugin-created file auto-deleted", {
-								file: file.path,
-								canvas: canvasFile.path,
-							});
+							if (!isInCanvas) {
+								// File was removed from canvas, delete it
+								console.debug('[Canvas Plugin] Deleting file:', file.path);
+								await this.app.fileManager.trashFile(file);
+								new Notice(`🗑️ Deleted: ${file.basename}`);
+								this.logger?.info("Plugin-created file auto-deleted", {
+									file: file.path,
+									canvas: canvasFile.path,
+								});
+							}
+						} else {
+							console.debug('[Canvas Plugin] File does not reference this canvas');
 						}
-					} else {
-						console.debug('[Canvas Plugin] File does not reference this canvas');
 					}
+				} catch (fileError: unknown) {
+					// Handle externally deleted files gracefully
+					const error = fileError as NodeJS.ErrnoException;
+					if (error.code === 'ENOENT') {
+						console.debug('[Canvas Plugin] Skipping externally deleted file:', file.path);
+						// File was deleted outside Obsidian, skip it
+						continue;
+					}
+					// Re-throw other errors
+					console.warn('[Canvas Plugin] Error processing file:', file.path, fileError);
 				}
 			}
 		} catch (error) {
@@ -5004,7 +5049,16 @@ private registerCommands(): void {
 	 */
 	private async populateCanvasFromVault(): Promise<void> {
 		console.group('[Canvas Plugin] populateCanvasFromVault');
-		console.log('=== STAGE 1: INITIALIZATION ===');
+
+		// Create operation log array
+		const operationLog: string[] = [];
+		const log = (msg: string) => {
+			console.log(msg);
+			operationLog.push(msg);
+		};
+
+		log('\n=== POPULATE CANVAS FROM VAULT ===');
+		log('=== STAGE 1: INITIALIZATION ===');
 
 		const canvasFile = this.getActiveCanvasFile();
 		if (!canvasFile) {
@@ -5013,7 +5067,7 @@ private registerCommands(): void {
 			new Notice("Please open a canvas file first");
 			return;
 		}
-		console.log('Canvas file:', canvasFile.path);
+		log(`Canvas file: ${canvasFile.path}`);
 
 		// Get canvas view state
 		const leaves = this.app.workspace.getLeavesOfType("canvas");
@@ -5105,12 +5159,130 @@ private registerCommands(): void {
 			};
 
 			console.log('\n=== STAGE 3: SCAN VAULT FOR ENTITIES ===');
-			// Scan all markdown files (excluding archive folder)
+			operationLog.push('\n=== STAGE 3: SCAN VAULT FOR ENTITIES ===');
+			operationLog.push('[F-046 DEBUG] Starting scan - looking for F-046...');
+
+			// STAGE 3A: Scan archive folder to build set of archived entity IDs
+			log('\n=== STAGE 3A: SCAN ARCHIVE FOLDER ===');
+			const archivedEntityIds = new Set<string>();
+			const archivedFiles = this.app.vault.getMarkdownFiles().filter(f =>
+				f.path.includes('/archive/') || f.path.startsWith('archive/')
+			);
+
+			for (const file of archivedFiles) {
+				try {
+					const content = await this.app.vault.read(file);
+					const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+					if (fmMatch) {
+						const idMatch = fmMatch[1].match(/^id:\s*(.+)$/m);
+						if (idMatch) {
+							const entityId = idMatch[1].trim().replace(/^["']|["']$/g, ''); // Strip quotes
+							archivedEntityIds.add(entityId);
+						}
+					}
+				} catch (e) {
+					log(`Warning: Failed to read archived file ${file.path}: ${e}`);
+				}
+			}
+			log(`Found ${archivedEntityIds.size} archived entities`);
+
+			// STAGE 3B: Scan active files and cascade archive if parent is archived
+			log('\n=== STAGE 3B: SCAN ACTIVE ENTITIES & CASCADE ARCHIVE ===');
 			const allFilesRaw = this.app.vault.getMarkdownFiles();
-			// Check for archive folder - handles both "archive/" at root and "/archive/" in subfolders
-			const allFiles = allFilesRaw.filter(f => !f.path.includes('/archive/') && !f.path.startsWith('archive/'));
+			const allFilesBeforeArchive = allFilesRaw.filter(f => !f.path.includes('/archive/') && !f.path.startsWith('archive/'));
 			console.log('Total markdown files in vault:', allFilesRaw.length);
-			console.log('Files after excluding archive folder:', allFiles.length);
+			console.log('Files after excluding archive folder:', allFilesBeforeArchive.length);
+
+			// Check each active entity for archived parent and cascade archive if needed
+			const cascadedArchives: Array<{entityId: string; type: string; parent: string; file: TFile}> = [];
+
+			for (const file of allFilesBeforeArchive) {
+				try {
+					const content = await this.app.vault.read(file);
+					const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+					if (!fmMatch) continue;
+
+					const fm = fmMatch[1];
+					const entityId = fm.match(/^id:\s*(.+)$/m)?.[1]?.trim().replace(/^["']|["']$/g, '');
+					const entityType = fm.match(/^type:\s*(.+)$/m)?.[1]?.trim().toLowerCase();
+					const parent = fm.match(/^parent:\s*(.+)$/m)?.[1]?.trim().replace(/^["']|["']$/g, '');
+
+					if (parent && archivedEntityIds.has(parent)) {
+						// Parent is archived - cascade archive this entity
+						cascadedArchives.push({
+							entityId: entityId || file.basename,
+							type: entityType || 'unknown',
+							parent,
+							file
+						});
+					}
+				} catch (e) {
+					log(`Warning: Failed to read file ${file.path}: ${e}`);
+				}
+			}
+
+			// Move cascaded entities to archive
+			if (cascadedArchives.length > 0) {
+				log(`\n⚠️  Cascading archive for ${cascadedArchives.length} entities with archived parents:`);
+
+				for (const {entityId, type, parent, file} of cascadedArchives) {
+					try {
+						// Read file content to get target_quarter
+						const content = await this.app.vault.read(file);
+						const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+						let targetQuarter = '2026-Q1'; // Default fallback
+
+						if (fmMatch) {
+							const quarterMatch = fmMatch[1].match(/^target_quarter:\s*(.+)$/m);
+							if (quarterMatch) {
+								targetQuarter = quarterMatch[1].trim().replace(/^["']|["']$/g, '');
+							}
+						}
+
+						// Determine archive path: archive/<quarter>/<type>/<filename>
+						const typeFolder = `${type}s`; // e.g., tasks, stories, decisions
+						const archivePath = `archive/${targetQuarter}/${typeFolder}/${file.name}`;
+
+						// Ensure archive folder structure exists
+						const archiveQuarterFolder = `archive/${targetQuarter}`;
+						const quarterFolderExists = this.app.vault.getAbstractFileByPath(archiveQuarterFolder);
+						if (!quarterFolderExists) {
+							await this.app.vault.createFolder(archiveQuarterFolder);
+						}
+
+						const archiveTypeFolder = `archive/${targetQuarter}/${typeFolder}`;
+						const typeFolderExists = this.app.vault.getAbstractFileByPath(archiveTypeFolder);
+						if (!typeFolderExists) {
+							await this.app.vault.createFolder(archiveTypeFolder);
+						}
+
+						// Move file to archive
+						await this.app.vault.rename(file, archivePath);
+						log(`  ✓ Archived ${entityId} (${type}) → ${archivePath} (parent ${parent} is archived)`);
+
+						// Add to archivedEntityIds set for potential further cascading
+						archivedEntityIds.add(entityId);
+					} catch (e) {
+						log(`  ✗ Failed to archive ${entityId}: ${e}`);
+					}
+				}
+
+				new Notice(`📦 Archived ${cascadedArchives.length} entities with archived parents`);
+			}
+
+			// Re-scan after cascading (exclude newly archived files)
+			const allFiles = this.app.vault.getMarkdownFiles().filter(f =>
+				!f.path.includes('/archive/') && !f.path.startsWith('archive/')
+			);
+			log(`Active files after cascade: ${allFiles.length}`);
+
+			// Check if F-046 file is in the list
+			const f046File = allFiles.find(f => f.path.includes('F-046') || f.path.includes('Docker_Compose_Single_Instance'));
+			if (f046File) {
+				operationLog.push(`[F-046 DEBUG] ✅ F-046 file found in scan: ${f046File.path}`);
+			} else {
+				operationLog.push(`[F-046 DEBUG] ❌ F-046 file NOT found in allFiles list!`);
+			}
 
 			// Entity info including dependencies and relationships
 			interface EntityInfo {
@@ -5126,6 +5298,8 @@ private registerCommands(): void {
 				// New fields from ENTITY_SCHEMAS.md
 				implements: string[];      // DocumentIds this milestone/story implements
 				implementedBy: string[];   // StoryIds/MilestoneIds that implement this document
+				documents: string[];       // FeatureIds this document documents
+				documentedBy: string[];    // DocumentIds that document this feature
 				supersedes?: string;       // DecisionId this decision supersedes
 				previousVersion?: string;  // DocumentId of previous version
 				docType?: string;          // Document type: spec, adr, vision, guide, research
@@ -5214,16 +5388,31 @@ private registerCommands(): void {
 			}
 
 			// Detect and break cycles in milestone dependencies
-			const cycleResult = await detectAndBreakCycles(this.app, allEntityFiles, "milestone");
-			if (cycleResult.cyclesFound > 0) {
-				console.log(`Broke ${cycleResult.cyclesFound} cycles:`, cycleResult.edgesRemoved);
+			const milestoneCycleResult = await detectAndBreakCycles(this.app, allEntityFiles, "milestone");
+			if (milestoneCycleResult.cyclesFound > 0) {
+				console.log(`Broke ${milestoneCycleResult.cyclesFound} milestone cycles:`, milestoneCycleResult.edgesRemoved);
+			}
+
+			// Also break cycles in story dependencies
+			const storyCycleResult = await detectAndBreakCycles(this.app, allEntityFiles, "story");
+			if (storyCycleResult.cyclesFound > 0) {
+				console.log(`Broke ${storyCycleResult.cyclesFound} story cycles:`, storyCycleResult.edgesRemoved);
 			}
 
 			for (const file of allFiles) {
+				// DETAILED LOGGING: Check if this is F-046
+				const isF046 = file.path.includes('F-046') || file.path.includes('Docker_Compose_Single_Instance');
+				if (isF046) {
+					operationLog.push(`\n[F-046 DEBUG] Processing file: ${file.path}`);
+					operationLog.push(`[F-046 DEBUG] File exists on disk: ${file.path}`);
+				}
+
 				// Skip if already on canvas (by file path)
 				if (existingFilePaths.has(file.path)) {
+					if (isF046) operationLog.push(`[F-046 DEBUG] SKIPPED: Already on canvas by file path`);
 					continue;
 				}
+				if (isF046) operationLog.push(`[F-046 DEBUG] Not on canvas by file path - continuing`);
 
 				// Read and parse frontmatter
 				const content = await this.app.vault.read(file);
@@ -5231,15 +5420,28 @@ private registerCommands(): void {
 
 				// Also try to parse V2 style frontmatter
 				const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
-				if (!frontmatterMatch) continue;
+				if (!frontmatterMatch) {
+					if (isF046) operationLog.push(`[F-046 DEBUG] SKIPPED: No frontmatter match`);
+					continue;
+				}
+				if (isF046) operationLog.push(`[F-046 DEBUG] Frontmatter found`);
 
 				const frontmatterText = frontmatterMatch[1];
 				// Use [ \t]* instead of \s* to avoid matching newlines (which would capture the next line's value)
 				const typeMatch = frontmatterText.match(/^type:[ \t]*(.+)$/m);
-				if (!typeMatch) continue;
+				if (!typeMatch) {
+					if (isF046) operationLog.push(`[F-046 DEBUG] SKIPPED: No type match`);
+					continue;
+				}
+				if (isF046) operationLog.push(`[F-046 DEBUG] Type match: ${typeMatch[1]}`);
 
-				const entityType = typeMatch[1].trim().toLowerCase();
-				if (!entityTypes.includes(entityType)) continue;
+				const entityType = stripQuotes(typeMatch[1].trim()).toLowerCase();
+				if (isF046) operationLog.push(`[F-046 DEBUG] Entity type after stripQuotes: '${entityType}'`);
+				if (!entityTypes.includes(entityType)) {
+					if (isF046) operationLog.push(`[F-046 DEBUG] SKIPPED: Entity type '${entityType}' not in allowed list: ${entityTypes.join(', ')}`);
+					continue;
+				}
+				if (isF046) operationLog.push(`[F-046 DEBUG] Entity type validated: ${entityType}`);
 
 
 
@@ -5251,8 +5453,10 @@ private registerCommands(): void {
 					archivedMatch?.[1]?.trim().toLowerCase() === 'true';
 				if (isArchived) {
 					console.log(`Skipping archived entity: ${file.path}`);
+					if (isF046) operationLog.push(`[F-046 DEBUG] SKIPPED: Entity is archived`);
 					continue;
 				}
+				if (isF046) operationLog.push(`[F-046 DEBUG] Not archived (status: ${statusMatch?.[1]?.trim()})`);
 
 				// Extract effort and other metadata
 				// Use [ \t]* instead of \s* to avoid matching newlines
@@ -5262,25 +5466,31 @@ private registerCommands(): void {
 				// For parent, use (.*)$ to allow empty values (just whitespace after colon)
 				const parentMatch = frontmatterText.match(/^parent:[ \t]*(.+)$/m);
 
-				const entityId = idMatch?.[1]?.trim();
+				const entityId = idMatch?.[1] ? stripQuotes(idMatch[1].trim()) : undefined;
+				if (isF046) operationLog.push(`[F-046 DEBUG] Extracted ID: '${entityId}' (raw: '${idMatch?.[1]}', after stripQuotes: '${entityId}')`);
 
 				// Skip if entity ID already exists on canvas
 				if (entityId && existingEntityIds.has(entityId)) {
 					console.log(`Skipping duplicate entity ID (already on canvas): ${entityId} in ${file.path}`);
+					if (isF046) operationLog.push(`[F-046 DEBUG] SKIPPED: Entity ID '${entityId}' already in existingEntityIds`);
 					skippedDuplicates++;
 					continue;
 				}
+				if (isF046) operationLog.push(`[F-046 DEBUG] Entity ID not in existingEntityIds (size: ${existingEntityIds.size})`);
 
 				// Skip if entity ID already seen in this batch
 				if (entityId && batchEntityIds.has(entityId)) {
 					console.log(`Skipping duplicate entity ID (duplicate in vault): ${entityId} in ${file.path}`);
+					if (isF046) operationLog.push(`[F-046 DEBUG] SKIPPED: Entity ID '${entityId}' already in batchEntityIds`);
 					skippedDuplicates++;
 					continue;
 				}
+				if (isF046) operationLog.push(`[F-046 DEBUG] Entity ID not in batchEntityIds (size: ${batchEntityIds.size})`);
 
 				// Track this entity ID
 				if (entityId) {
 					batchEntityIds.add(entityId);
+					if (isF046) operationLog.push(`[F-046 DEBUG] Added '${entityId}' to batchEntityIds`);
 				}
 
 				// Parse depends_on array
@@ -5297,6 +5507,12 @@ private registerCommands(): void {
 
 				// Parse implemented_by array (for documents -> stories/milestones)
 				const implementedBy = parseYamlArray(frontmatterText, 'implemented_by');
+
+				// Parse documents array (for documents -> features)
+				const documents = parseYamlArray(frontmatterText, 'documents');
+
+				// Parse documented_by array (for features -> documents)
+				const documentedBy = parseYamlArray(frontmatterText, 'documented_by');
 
 				// Parse supersedes (for decisions) - use [ \t]* to avoid matching newlines
 				const supersedesMatch = frontmatterText.match(/^supersedes:[ \t]*(.+)$/m);
@@ -5322,10 +5538,17 @@ private registerCommands(): void {
 					affects,
 					implements: implementsArr,
 					implementedBy,
+					documents,
+					documentedBy,
 					supersedes,
 					previousVersion,
 					docType,
 				});
+
+				if (isF046) {
+					operationLog.push(`[F-046 DEBUG] ✅ ADDED TO entitiesToAdd list`);
+					operationLog.push(`[F-046 DEBUG] Final entity info: { id: '${entityId}', type: '${entityType}', title: '${titleMatch?.[1]?.trim() || file.basename}' }`);
+				}
 			}
 
 			if (skippedDuplicates > 0) {
@@ -5333,15 +5556,42 @@ private registerCommands(): void {
 			}
 
 			console.log('Entities found to add:', entitiesToAdd.length);
-			if (entitiesToAdd.length > 0) {
-				console.table(entitiesToAdd.map(e => ({
-					path: e.file.path,
-					type: e.type,
-					id: e.id,
-					parent: e.parent || '-',
-					dependsOn: e.dependsOn.length > 0 ? e.dependsOn.join(', ') : '-'
-				})));
+
+			// Log detailed entity info to BOTH console AND operation log (all entities, all relationships)
+			const logToBoth = (msg: string) => {
+				console.log(msg);
+				log(msg);
+			};
+
+			logToBoth('\n=== ENTITIES TO ADD (DETAILED) ===');
+			for (const e of entitiesToAdd) {
+				const rels: string[] = [];
+				if (e.parent) rels.push(`parent: ${e.parent}`);
+				if (e.dependsOn.length > 0) rels.push(`depends_on: [${e.dependsOn.join(', ')}]`);
+				if (e.affects && e.affects.length > 0) rels.push(`affects: [${e.affects.join(', ')}]`);
+				if (e.implements && e.implements.length > 0) rels.push(`implements: [${e.implements.join(', ')}]`);
+				if (e.implementedBy && e.implementedBy.length > 0) rels.push(`implemented_by: [${e.implementedBy.join(', ')}]`);
+				if (e.supersedes) rels.push(`supersedes: ${e.supersedes}`);
+				if (e.previousVersion) rels.push(`previous_version: ${e.previousVersion}`);
+
+				const relStr = rels.length > 0 ? ` | ${rels.join(' | ')}` : '';
+				logToBoth(`  ${e.id} (${e.type})${relStr}`);
 			}
+
+			// Also show full table in console with ALL relationships (no browser limit enforced)
+			// Note: Browser console may truncate very large tables, but we'll output all rows
+			console.log('\n=== ENTITIES TABLE (ALL RELATIONSHIPS) ===');
+			console.table(entitiesToAdd.map(e => ({
+				id: e.id,
+				type: e.type,
+				parent: e.parent || '-',
+				depends_on: e.dependsOn.length > 0 ? e.dependsOn.join(', ') : '-',
+				affects: e.affects && e.affects.length > 0 ? e.affects.join(', ') : '-',
+				implements: e.implements && e.implements.length > 0 ? e.implements.join(', ') : '-',
+				implemented_by: e.implementedBy && e.implementedBy.length > 0 ? e.implementedBy.join(', ') : '-',
+				supersedes: e.supersedes || '-',
+				previous_version: e.previousVersion || '-',
+			})));
 
 			if (entitiesToAdd.length === 0) {
 				console.log('No entities to add, exiting');
@@ -5382,6 +5632,8 @@ private registerCommands(): void {
 				affects: string[];  // new, replaces enables
 				implements: string[];
 				implementedBy: string[];
+				documents: string[];  // documents -> features (forward)
+				documentedBy: string[];  // features -> documents (reverse)
 				supersedes?: string;
 				previousVersion?: string;
 			}>();
@@ -5552,6 +5804,8 @@ private registerCommands(): void {
 						affects: milestone.affects,
 						implements: milestone.implements,
 						implementedBy: milestone.implementedBy,
+						documents: milestone.documents,
+						documentedBy: milestone.documentedBy,
 						supersedes: milestone.supersedes,
 						previousVersion: milestone.previousVersion,
 					});
@@ -5622,6 +5876,8 @@ private registerCommands(): void {
 							affects: child.affects,
 							implements: child.implements,
 							implementedBy: child.implementedBy,
+							documents: child.documents,
+							documentedBy: child.documentedBy,
 							supersedes: child.supersedes,
 							previousVersion: child.previousVersion,
 						});
@@ -5707,6 +5963,8 @@ private registerCommands(): void {
 							affects: orphan.affects,
 							implements: orphan.implements,
 							implementedBy: orphan.implementedBy,
+							documents: orphan.documents,
+							documentedBy: orphan.documentedBy,
 							supersedes: orphan.supersedes,
 							previousVersion: orphan.previousVersion,
 						});
@@ -5758,6 +6016,8 @@ private registerCommands(): void {
 				affects: string[];  // new, replaces enables
 				implements: string[];
 				implementedBy: string[];
+				documents: string[];  // documents -> features (forward)
+				documentedBy: string[];  // features -> documents (reverse)
 				supersedes?: string;
 				previousVersion?: string;
 				isNew: boolean;
@@ -5836,6 +6096,8 @@ private registerCommands(): void {
 									const affects = parseYamlArrayLocal(frontmatterText, 'affects');
 									const implementsArr = parseYamlArrayLocal(frontmatterText, 'implements');
 									const implementedBy = parseYamlArrayLocal(frontmatterText, 'implemented_by');
+									const documents = parseYamlArrayLocal(frontmatterText, 'documents');
+									const documentedBy = parseYamlArrayLocal(frontmatterText, 'documented_by');
 									const supersedesMatch = frontmatterText.match(/^supersedes:[ \t]*(.+)$/m);
 									const previousVersionMatch = frontmatterText.match(/^previous_version:[ \t]*(.+)$/m);
 
@@ -5848,6 +6110,8 @@ private registerCommands(): void {
 										affects,
 										implements: implementsArr,
 										implementedBy,
+										documents,
+										documentedBy,
 										supersedes: supersedesMatch?.[1]?.trim(),
 										previousVersion: previousVersionMatch?.[1]?.trim(),
 										isNew: false,
@@ -6045,6 +6309,38 @@ private registerCommands(): void {
 					}
 				}
 
+				// Create edges for documents relationships (document -> feature)
+				// Edge goes FROM document TO feature (document documents the feature)
+				for (const featureId of info.documents || []) {
+					const featureNodeId = allEntityToNodeMap.get(featureId);
+					if (featureNodeId) {
+						if (!edgeExists(canvasDataForEdges, sourceNodeId, featureNodeId)) {
+							// Edge: DOC --> Feature (document documents the feature)
+							const edge = createEdge(sourceNodeId, featureNodeId, undefined, 'right', 'left');
+							newEdges.push(edge);
+							if (info.isNew) edgesFromNewNodes++; else edgesFromExistingNodes++;
+						} else {
+							edgesSkipped++;
+						}
+					}
+				}
+
+				// Create edges for documented_by relationships (feature -> document)
+				// Edge goes FROM feature TO document (feature is documented by document)
+				for (const docId of info.documentedBy || []) {
+					const docNodeId = allEntityToNodeMap.get(docId);
+					if (docNodeId) {
+						if (!edgeExists(canvasDataForEdges, docNodeId, sourceNodeId)) {
+							// Edge: DOC --> Feature (avoid duplicate edges, same as documents relationship)
+							const edge = createEdge(docNodeId, sourceNodeId, undefined, 'right', 'left');
+							newEdges.push(edge);
+							if (info.isNew) edgesFromNewNodes++; else edgesFromExistingNodes++;
+						} else {
+							edgesSkipped++;
+						}
+					}
+				}
+
 				// Create edges for supersedes relationships (decision -> superseded decision)
 				if (info.supersedes) {
 					const supersededNodeId = allEntityToNodeMap.get(info.supersedes);
@@ -6138,12 +6434,12 @@ private registerCommands(): void {
 			});
 
 			// Reconcile relationships (clean malformed entries, sync bidirectional relationships)
-			console.log('\n=== STAGE 7: RECONCILE RELATIONSHIPS ===');
-			await this.reconcileAllRelationships();
+			log('\n=== STAGE 7: RECONCILE RELATIONSHIPS ===');
+			await this.reconcileAllRelationships(operationLog);
 
 			// Apply the V4 positioning algorithm
-			console.log('\n=== STAGE 8: REPOSITION NODES (V4) ===');
-			await this.repositionCanvasNodesV4();
+			log('\n=== STAGE 8: REPOSITION NODES (V4) ===');
+			await this.repositionCanvasNodesV4(operationLog);
 
 			// Archive cleanup: move archived files and remove archived nodes
 			console.log('\n=== STAGE 9: ARCHIVE CLEANUP ===');
@@ -6166,7 +6462,13 @@ private registerCommands(): void {
 				new Notice(`🗑️ Removed ${removedNodes} archived nodes from canvas`);
 			}
 
+			// Write operation log to file
+			log('\n=== POPULATE COMPLETE ===');
+			await this.app.vault.adapter.write('operation-log.txt', operationLog.join('\n'));
+
 		} catch (error) {
+			operationLog.push(`\nERROR in populateCanvasFromVault: ${error}`);
+			await this.app.vault.adapter.write('operation-log.txt', operationLog.join('\n'));
 			console.error('ERROR in populateCanvasFromVault:', error);
 			console.groupEnd();
 			this.isUpdatingCanvas = false;
@@ -8392,8 +8694,15 @@ private registerCommands(): void {
 	 * - Cross-workstream positioning for Milestones and Stories
 	 * - Auto-migration of Decision enables/blocks to affects
 	 */
-	private async repositionCanvasNodesV4(): Promise<void> {
+	private async repositionCanvasNodesV4(operationLog?: string[], verbose: boolean = false): Promise<void> {
 		console.group('[Canvas Plugin] repositionCanvasNodesV4');
+
+		const log = (msg: string) => {
+			console.log(msg);
+			if (operationLog) {
+				operationLog.push(msg);
+			}
+		};
 
 		const canvasFile = this.getActiveCanvasFile();
 		if (!canvasFile) {
@@ -8403,12 +8712,15 @@ private registerCommands(): void {
 			return;
 		}
 
+		log('\n=== REPOSITION NODES (V4 Algorithm) ===');
+
 		try {
 			const canvasData = await loadCanvasData(this.app, canvasFile);
-			console.log('Canvas has', canvasData.nodes.length, 'nodes,', canvasData.edges.length, 'edges');
+			log(`Canvas has ${canvasData.nodes.length} nodes, ${canvasData.edges.length} edges`);
 
 			const fileNodes = canvasData.nodes.filter(n => n.type === 'file');
 			if (fileNodes.length === 0) {
+				log("No file nodes on canvas to reposition");
 				new Notice("No file nodes on canvas to reposition");
 				console.groupEnd();
 				return;
@@ -8445,23 +8757,64 @@ private registerCommands(): void {
 				}
 			}
 
-			console.log(`Parsed ${entities.length} entities from canvas nodes`);
+			log(`Parsed ${entities.length} entities from canvas nodes`);
 
 			// ============================================================
 			// STEP 2: Run V4 positioning engine
 			// ============================================================
-			const engine = new PositioningEngineV4();
+			// Wire the positioning ruleset to the vault/project's schema.json so the
+			// plugin shares the SAME single source of truth as the MCP server. Any
+			// failure here falls back to the compiled default rules (never crashes).
+			const engineConfig: Partial<PositioningConfig> & { relationshipRules?: RelationshipRule[] } = {};
+			try {
+				const fs = new ObsidianVaultAdapter(this.app.vault);
+				// Resolve the project folder: walk up from the canvas file to the
+				// nearest ancestor folder that contains a schema.json (this is the
+				// folder the MCP treats as VAULT_PATH). Fall back to the canvas's
+				// own parent folder if none is found.
+				let projectFolderPath = canvasFile.parent?.path ?? '';
+				let foundSchema = false;
+				let cursor = canvasFile.parent;
+				while (cursor) {
+					const candidate = cursor.path ? `${cursor.path}/schema.json` : 'schema.json';
+					if (this.app.vault.getAbstractFileByPath(candidate)) {
+						projectFolderPath = cursor.path;
+						foundSchema = true;
+						break;
+					}
+					cursor = cursor.parent;
+				}
+
+				// READ-ONLY: the plugin never writes schema.json. Bootstrapping/injection
+				// is the MCP server's job (it is configured with the exact project root),
+				// so a miss here can't create a stray file in the wrong folder — we simply
+				// use the compiled default rules until the MCP writes one.
+				const schemaResult = await loadSchemaOrDefault(fs, projectFolderPath);
+				if (schemaResult.errors.length > 0) {
+					console.warn(`[PositioningV4] schema.json invalid at ${schemaResult.path} — using default rules:`, schemaResult.errors);
+					log(`⚠️ schema.json invalid (${schemaResult.errors.length} error(s)) — using default positioning rules`);
+				}
+				engineConfig.relationshipRules = buildRelationshipRules(schemaResult.schema) as RelationshipRule[];
+				log(foundSchema
+					? `Loaded positioning rules from schema.json (project: ${projectFolderPath || '<vault root>'})`
+					: `No schema.json found above the canvas — using default positioning rules (the MCP server writes schema.json at the project root)`);
+			} catch (e) {
+				console.warn('[PositioningV4] Failed to load schema for positioning — using default rules:', e);
+				log(`⚠️ Failed to load schema — using default positioning rules`);
+			}
+
+			const engine = new PositioningEngineV4(engineConfig, log, verbose);
 			const result = engine.calculatePositions(entities);
 
 			// Log errors and warnings
 			if (result.errors.length > 0) {
-				console.error('Positioning errors:', result.errors);
+				log(`Positioning errors: ${result.errors.join(', ')}`);
 				for (const error of result.errors) {
 					new Notice(`⚠️ ${error}`);
 				}
 			}
 			if (result.warnings.length > 0) {
-				console.warn('Positioning warnings:', result.warnings);
+				log(`Positioning warnings: ${result.warnings.join(', ')}`);
 			}
 
 			// ============================================================
@@ -8479,7 +8832,7 @@ private registerCommands(): void {
 				}
 			}
 
-			console.log(`Applied positions to ${repositionedCount} nodes`);
+			log(`Applied positions to ${repositionedCount} nodes`);
 
 			// ============================================================
 			// STEP 4: Update edge sides based on new positions
@@ -8520,7 +8873,7 @@ private registerCommands(): void {
 				}
 			}
 
-			console.log(`Updated edge sides for ${canvasData.edges.length} edges`);
+			log(`Updated edge sides for ${canvasData.edges.length} edges`);
 
 			// ============================================================
 			// STEP 5: Save canvas
@@ -8529,17 +8882,19 @@ private registerCommands(): void {
 			await closeCanvasViews(this.app, canvasFile);
 			await new Promise(resolve => setTimeout(resolve, 100));
 			await saveCanvasData(this.app, canvasFile, canvasData);
-			console.log('Saved canvas with new positions');
+			log('Saved canvas with new positions');
 
 			await new Promise(resolve => setTimeout(resolve, 200));
 			await this.app.workspace.openLinkText(canvasFile.path, '', false);
 
 			this.isUpdatingCanvas = false;
+			log(`=== REPOSITION COMPLETE: ${repositionedCount} nodes repositioned ===\n`);
 			console.groupEnd();
 
 			new Notice(`✅ Repositioned ${repositionedCount} nodes (V4 algorithm)`);
 
 		} catch (error) {
+			log(`ERROR in repositionCanvasNodesV4: ${error}`);
 			console.error('ERROR in repositionCanvasNodesV4:', error);
 			console.groupEnd();
 			this.isUpdatingCanvas = false;
@@ -9178,6 +9533,24 @@ private registerCommands(): void {
 		this.entityIndex = new EntityIndex(this.app, this.settings.entityNavigator);
 		await this.entityIndex.buildIndex();
 
+		// Initialize entity-core facade
+		this.entityCore = new EntityCoreFacade({
+			vault: this.app.vault,
+			vaultPath: (this.app.vault.adapter as any).basePath || '',
+			entitiesFolder: 'entities',
+			archiveFolder: 'archive',
+			canvasFolder: 'projects',
+		});
+
+		// Wire the entity index to entity-core using adapter
+		const indexAdapter = new EntityIndexAdapter(this.entityIndex, this.entityCore.getSchema());
+		// EntityIndexAdapter implements only the engine index seam (the subset of
+		// EntityIndex that IDAllocator/RelationshipGraph actually call). The facade
+		// declares the full EntityIndex parameter type, so cast through the seam.
+		this.entityCore.initializeWithIndex(indexAdapter as unknown as CoreEntityIndex);
+
+		console.log("[Entity-Core] Initialized with facade and index adapter");
+
 		// Watch for file changes to update index
 		this.registerEvent(
 			this.app.metadataCache.on("changed", (file) => {
@@ -9216,6 +9589,22 @@ private registerCommands(): void {
 		}
 
 		return null;
+	}
+
+	/**
+	 * Generate a new entity ID using entity-core.
+	 * Falls back to old generateId if entity-core is not initialized.
+	 */
+	private async generateEntityId(type: EntityType): Promise<string> {
+		if (this.entityCore) {
+			try {
+				return await this.entityCore.allocateId(type as any);
+			} catch (error) {
+				console.warn('[Entity-Core] ID allocation failed, falling back to old generator:', error);
+			}
+		}
+		// Fallback to old generator
+		return generateId(this.app, this.settings, type);
 	}
 
 	/** Get the file from the currently selected canvas node (if any) */
@@ -9420,7 +9809,7 @@ private registerCommands(): void {
 		await this.ensureFolderExists(featuresFolder);
 
 		// Generate feature ID
-		const id = generateId(this.app, this.settings, "feature");
+		const id = await this.generateEntityId("feature");
 		const now = new Date().toISOString();
 
 		// Create frontmatter
@@ -10042,7 +10431,7 @@ private registerCommands(): void {
 		let created = 0;
 		const now = new Date().toISOString();
 		for (const ff of features) {
-			const id = generateId(this.app, this.settings, "feature");
+			const id = await this.generateEntityId("feature");
 			const filename = `${id}_${ff.title.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 50)}.md`;
 			const filePath = `${featuresFolder}/${filename}`;
 
@@ -10248,8 +10637,84 @@ private registerCommands(): void {
 	 * - supersedes ↔ superseded_by
 	 * - previous_version ↔ next_version
 	 */
-	private async reconcileAllRelationships(): Promise<void> {
-		new Notice("Reconciling relationships across vault...");
+	private async sanitizeParentFields(reconcileLog: string[]): Promise<void> {
+		const files = this.app.vault.getMarkdownFiles();
+		let sanitizedCount = 0;
+
+		reconcileLog.push('\n=== SANITIZATION PASS: Fixing malformed parent fields ===');
+
+		for (const file of files) {
+			const cache = this.app.metadataCache.getFileCache(file);
+			if (!cache?.frontmatter) continue;
+
+			const fm = cache.frontmatter;
+			const entityId = fm.id;
+			if (!entityId) continue;
+
+			// Check if parent field is an array
+			const parent = fm.parent;
+			if (!parent || typeof parent === 'string') continue;
+
+			// Parent is malformed (array instead of scalar)
+			if (Array.isArray(parent)) {
+				const logMsg = `${entityId}: Sanitizing parent field from array ${JSON.stringify(parent)} to scalar "${parent[0]}"`;
+				console.warn(`[Reconciler] ${logMsg}`);
+				reconcileLog.push(logMsg);
+
+				// Fix the parent field to be the first value
+				await applyFrontmatterUpdates(this.app, file, {
+					parent: parent[0] || null, // Use first value, or delete if empty
+					updated_at: new Date().toISOString(),
+				});
+
+				sanitizedCount++;
+			}
+		}
+
+		reconcileLog.push(`Sanitized ${sanitizedCount} malformed parent fields\n`);
+		console.warn(`[Reconciler] Sanitized ${sanitizedCount} malformed parent fields`);
+
+		// Wait for metadata cache to update after writes
+		if (sanitizedCount > 0) {
+			await new Promise(resolve => setTimeout(resolve, 500));
+		}
+	}
+
+	private async reconcileAllRelationships(operationLog?: string[]): Promise<void> {
+		console.warn('='.repeat(80));
+		console.warn('[Reconciler] START - Reconciling all relationships');
+		console.warn('='.repeat(80));
+
+		// If no operation log provided, this is standalone
+		const isStandaloneRun = !operationLog;
+		if (isStandaloneRun) {
+			new Notice("Reconciling relationships across vault...");
+		}
+
+		// Use provided log or create new one
+		const reconcileLog: string[] = operationLog || [];
+		reconcileLog.push('='.repeat(80));
+		reconcileLog.push(`[Reconciler] START - ${new Date().toISOString()}`);
+		reconcileLog.push('='.repeat(80));
+
+		// Pre-pass: Sanitize malformed parent fields (arrays → scalar)
+		await this.sanitizeParentFields(reconcileLog);
+
+		// STEP 0: Sanitize YAML values BEFORE reconciliation
+		// This prevents "Nested mappings are not allowed" errors from colons in titles
+		console.log('[Reconciler] Step 0: Sanitizing YAML values...');
+		const allMarkdownFiles = this.app.vault.getMarkdownFiles();
+		const { sanitizeEntityFilesForYaml } = await import("./util/relationshipReconciler");
+		const sanitizeResult = await sanitizeEntityFilesForYaml(this.app, allMarkdownFiles);
+
+		if (sanitizeResult.totalSanitized > 0) {
+			console.log(`[Reconciler] Sanitized ${sanitizeResult.totalSanitized} files with unsafe YAML values`);
+			new Notice(`✨ Sanitized ${sanitizeResult.totalSanitized} files (removed colons from titles)`);
+
+			// Give Obsidian a moment to update its cache after file modifications
+			console.log('[Reconciler] Waiting for vault cache to refresh...');
+			await new Promise(resolve => setTimeout(resolve, 500));
+		}
 
 		// Build maps for all relationships
 		const reverseRels = new Map<string, {
@@ -10354,12 +10819,15 @@ private registerCommands(): void {
 			implements?: string[];
 			documents?: string[];
 			affects?: string[];
+			parent?: string | null;
 		}>();
 
-		// Scan all markdown files
+		// PASS 1: Build complete entityIdToFile map first
+		// This ensures all entities are indexed before we check relationships
 		const allFiles = this.app.vault.getMarkdownFiles();
 		let scannedCount = 0;
 
+		console.warn('[Reconciler] PASS 1: Building entity index...');
 		for (const file of allFiles) {
 			try {
 				const content = await this.app.vault.read(file);
@@ -10371,10 +10839,50 @@ private registerCommands(): void {
 				const idMatch = fm.match(/^id:[ \t]*(.+)$/m);
 				if (!idMatch) continue;
 
-				const entityId = idMatch[1].trim();
+				// Strip quotes from entity ID (handles both "S-208" and S-208)
+				const entityId = idMatch[1].trim().replace(/^["']|["']$/g, '');
 				ensureEntity(entityId);
-				entityIdToFile.set(entityId, file);
+
+				// Prefer active files over archived when building the map (handles duplicate IDs)
+				const isArchived = fm.match(/^archived:[ \t]*(true|yes)/mi);
+				const existing = entityIdToFile.get(entityId);
+				if (!existing) {
+					// No existing entry, add it
+					entityIdToFile.set(entityId, file);
+				} else if (!isArchived) {
+					// This file is active, prefer it over any existing entry
+					const existingContent = await this.app.vault.read(existing);
+					const existingFm = existingContent.match(/^---\n([\s\S]*?)\n---/)?.[1] || '';
+					const existingIsArchived = existingFm.match(/^archived:[ \t]*(true|yes)/mi);
+					if (existingIsArchived) {
+						// Replace archived entry with active one
+						entityIdToFile.set(entityId, file);
+						reconcileLog.push(`Duplicate ID ${entityId}: preferring active ${file.path} over archived ${existing.path}`);
+					}
+				}
 				scannedCount++;
+			} catch (e) {
+				console.error(`[Reconciler] Error scanning file ${file.path}:`, e);
+			}
+		}
+
+		console.warn(`[Reconciler] PASS 1 Complete: Indexed ${entityIdToFile.size} entities from ${scannedCount} files`);
+
+		// PASS 2: Now that all entities are indexed, check and validate relationships
+		console.warn('[Reconciler] PASS 2: Validating relationships...');
+		for (const file of allFiles) {
+			try {
+				const content = await this.app.vault.read(file);
+				const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+				if (!frontmatterMatch) continue;
+
+				const fm = frontmatterMatch[1];
+				// Use [ \t]* instead of \s* to avoid matching newlines
+				const idMatch = fm.match(/^id:[ \t]*(.+)$/m);
+				if (!idMatch) continue;
+
+				// Strip quotes from entity ID
+				const entityId = idMatch[1].trim().replace(/^["']|["']$/g, '');
 
 				// Check if forward relationships need cleaning
 				const forwardCleanup: {
@@ -10382,16 +10890,27 @@ private registerCommands(): void {
 					implements?: string[];
 					documents?: string[];
 					affects?: string[];
+					parent?: string | null;
 				} = {};
 
 				// depends_on -> blocks
 				const dependsOnRaw = parseYamlArrayRaw(fm, 'depends_on');
 				const dependsOn = parseYamlArray(fm, 'depends_on');
-				if (dependsOnRaw.length !== dependsOn.length ||
-					JSON.stringify(dependsOnRaw.sort()) !== JSON.stringify(dependsOn.sort())) {
-					forwardCleanup.depends_on = dependsOn;
+
+				// Remove broken references (entities that don't exist)
+				const validDependsOn = dependsOn.filter(id => entityIdToFile.has(id));
+				const hasBrokenDeps = validDependsOn.length !== dependsOn.length;
+
+				if (dependsOnRaw.length !== validDependsOn.length ||
+					JSON.stringify(dependsOnRaw.sort()) !== JSON.stringify(validDependsOn.sort()) ||
+					hasBrokenDeps) {
+					forwardCleanup.depends_on = validDependsOn;
+					if (hasBrokenDeps) {
+						const broken = dependsOn.filter(id => !entityIdToFile.has(id));
+						console.log(`[Reconciler] ${entityId}: Removing broken depends_on: [${broken.join(', ')}]`);
+					}
 				}
-				for (const depId of dependsOn) {
+				for (const depId of validDependsOn) {
 					const depRels = ensureEntity(depId);
 					if (!depRels.blocks.includes(entityId)) {
 						depRels.blocks.push(entityId);
@@ -10414,21 +10933,42 @@ private registerCommands(): void {
 				// parent -> children - use [ \t]* instead of \s* to avoid matching newlines
 				const parentMatch = fm.match(/^parent:[ \t]*(.+)$/m);
 				if (parentMatch) {
-					const parentId = parentMatch[1].trim();
-					const parentRels = ensureEntity(parentId);
-					if (!parentRels.children.includes(entityId)) {
-						parentRels.children.push(entityId);
+					// Strip quotes from parent ID (handles both "M-064" and M-064)
+					const parentId = parentMatch[1].trim().replace(/^["']|["']$/g, '');
+
+					// WARN about broken parent reference but DO NOT DELETE (too destructive)
+					// Parent may exist but not be indexed yet, or may be recovered by another process
+					if (!entityIdToFile.has(parentId)) {
+						const logMsg = `${entityId}: parent ${parentId} NOT FOUND in entityIdToFile map - WARNING ONLY (not deleting)`;
+						console.warn(`[Reconciler] ${logMsg}`);
+						reconcileLog.push(logMsg);
+						// DO NOT DELETE: forwardCleanup.parent = null;
+					} else {
+						const parentRels = ensureEntity(parentId);
+						if (!parentRels.children.includes(entityId)) {
+							parentRels.children.push(entityId);
+						}
 					}
 				}
 
 				// implements -> implemented_by
 				const implementsRaw = parseYamlArrayRaw(fm, 'implements');
 				const implementsArr = parseYamlArray(fm, 'implements');
-				if (implementsRaw.length !== implementsArr.length ||
-					JSON.stringify(implementsRaw.sort()) !== JSON.stringify(implementsArr.sort())) {
-					forwardCleanup.implements = implementsArr;
+
+				// Remove broken references
+				const validImplements = implementsArr.filter(id => entityIdToFile.has(id));
+				const hasBrokenImpl = validImplements.length !== implementsArr.length;
+
+				if (implementsRaw.length !== validImplements.length ||
+					JSON.stringify(implementsRaw.sort()) !== JSON.stringify(validImplements.sort()) ||
+					hasBrokenImpl) {
+					forwardCleanup.implements = validImplements;
+					if (hasBrokenImpl) {
+						const broken = implementsArr.filter(id => !entityIdToFile.has(id));
+						console.log(`[Reconciler] ${entityId}: Removing broken implements: [${broken.join(', ')}]`);
+					}
 				}
-				for (const featureId of implementsArr) {
+				for (const featureId of validImplements) {
 					const featureRels = ensureEntity(featureId);
 					if (!featureRels.implementedBy.includes(entityId)) {
 						featureRels.implementedBy.push(entityId);
@@ -10438,11 +10978,21 @@ private registerCommands(): void {
 				// documents -> documented_by
 				const documentsRaw = parseYamlArrayRaw(fm, 'documents');
 				const documentsArr = parseYamlArray(fm, 'documents');
-				if (documentsRaw.length !== documentsArr.length ||
-					JSON.stringify(documentsRaw.sort()) !== JSON.stringify(documentsArr.sort())) {
-					forwardCleanup.documents = documentsArr;
+
+				// Remove broken references
+				const validDocuments = documentsArr.filter(id => entityIdToFile.has(id));
+				const hasBrokenDocs = validDocuments.length !== documentsArr.length;
+
+				if (documentsRaw.length !== validDocuments.length ||
+					JSON.stringify(documentsRaw.sort()) !== JSON.stringify(validDocuments.sort()) ||
+					hasBrokenDocs) {
+					forwardCleanup.documents = validDocuments;
+					if (hasBrokenDocs) {
+						const broken = documentsArr.filter(id => !entityIdToFile.has(id));
+						console.log(`[Reconciler] ${entityId}: Removing broken documents: [${broken.join(', ')}]`);
+					}
 				}
-				for (const featureId of documentsArr) {
+				for (const featureId of validDocuments) {
 					const featureRels = ensureEntity(featureId);
 					if (!featureRels.documentedBy.includes(entityId)) {
 						featureRels.documentedBy.push(entityId);
@@ -10452,11 +11002,21 @@ private registerCommands(): void {
 				// affects -> decided_by
 				const affectsRaw = parseYamlArrayRaw(fm, 'affects');
 				const affectsArr = parseYamlArray(fm, 'affects');
-				if (affectsRaw.length !== affectsArr.length ||
-					JSON.stringify(affectsRaw.sort()) !== JSON.stringify(affectsArr.sort())) {
-					forwardCleanup.affects = affectsArr;
+
+				// Remove broken references
+				const validAffects = affectsArr.filter(id => entityIdToFile.has(id));
+				const hasBrokenAffects = validAffects.length !== affectsArr.length;
+
+				if (affectsRaw.length !== validAffects.length ||
+					JSON.stringify(affectsRaw.sort()) !== JSON.stringify(validAffects.sort()) ||
+					hasBrokenAffects) {
+					forwardCleanup.affects = validAffects;
+					if (hasBrokenAffects) {
+						const broken = affectsArr.filter(id => !entityIdToFile.has(id));
+						console.log(`[Reconciler] ${entityId}: Removing broken affects: [${broken.join(', ')}]`);
+					}
 				}
-				for (const featureId of affectsArr) {
+				for (const featureId of validAffects) {
 					const featureRels = ensureEntity(featureId);
 					if (!featureRels.decidedBy.includes(entityId)) {
 						featureRels.decidedBy.push(entityId);
@@ -10467,7 +11027,8 @@ private registerCommands(): void {
 				// Use [ \t]* instead of \s* to avoid matching newlines
 				const supersedesMatch = fm.match(/^supersedes:[ \t]*(.+)$/m);
 				if (supersedesMatch) {
-					const supersededId = supersedesMatch[1].trim();
+					// Strip quotes from supersedes ID
+					const supersededId = supersedesMatch[1].trim().replace(/^["']|["']$/g, '');
 					const supersededRels = ensureEntity(supersededId);
 					supersededRels.supersededBy = entityId;
 				}
@@ -10476,7 +11037,8 @@ private registerCommands(): void {
 				// Use [ \t]* instead of \s* to avoid matching newlines
 				const prevVersionMatch = fm.match(/^previous_version:[ \t]*(.+)$/m);
 				if (prevVersionMatch) {
-					const prevId = prevVersionMatch[1].trim();
+					// Strip quotes from previous_version ID
+					const prevId = prevVersionMatch[1].trim().replace(/^["']|["']$/g, '');
 					const prevRels = ensureEntity(prevId);
 					prevRels.nextVersion = entityId;
 				}
@@ -10489,6 +11051,31 @@ private registerCommands(): void {
 				console.warn('[Canvas Plugin] Failed to read file for reconcile:', file.path, e);
 			}
 		}
+
+		// Diagnostic: Log entity map size
+		const diagMsg1 = `[Reconciler] STEP 1 Complete: Scanned ${scannedCount} files, indexed ${entityIdToFile.size} entities`;
+		console.warn(diagMsg1);
+		reconcileLog.push(diagMsg1);
+
+		// Diagnostic: Check if specific entities are in the map
+		const testEntities = ['M-020', 'M-064', 'S-342', 'S-208', 'M-040', 'M-065', 'M-088'];
+		for (const testId of testEntities) {
+			if (entityIdToFile.has(testId)) {
+				const file = entityIdToFile.get(testId);
+				const diagMsg = `[Reconciler] ✅ ${testId} found in map: ${file?.path}`;
+				console.warn(diagMsg);
+				reconcileLog.push(diagMsg);
+			} else {
+				const diagMsg = `[Reconciler] ❌ ${testId} NOT in map (TRULY MISSING)`;
+				console.warn(diagMsg);
+				reconcileLog.push(diagMsg);
+			}
+		}
+
+		// Additional diagnostic: Explain why we see NOT FOUND warnings
+		const explainMsg = `[Reconciler] NOTE: 'parent NOT FOUND' warnings during scanning are normal - they occur when a child is scanned before its parent. The final map above shows which entities are ACTUALLY missing after all files are scanned.`;
+		console.warn(explainMsg);
+		reconcileLog.push(explainMsg);
 
 		// Now update each entity's file with computed reverse relationships AND forward cleanup
 		let updatedCount = 0;
@@ -10511,6 +11098,11 @@ private registerCommands(): void {
 				const currentImplementedBy = parseYamlArray(fm, 'implemented_by');
 				const currentDocumentedBy = parseYamlArray(fm, 'documented_by');
 				const currentDecidedBy = parseYamlArray(fm, 'decided_by');
+
+				// Check current values for forward relationships (to compare with cleanup)
+				const currentImplements = parseYamlArray(fm, 'implements');
+				const currentDocuments = parseYamlArray(fm, 'documents');
+				const currentAffects = parseYamlArray(fm, 'affects');
 				// Use [ \t]* instead of \s* to avoid matching newlines
 				const supersededByMatch = fm.match(/^superseded_by:[ \t]*(.+)$/m);
 				const currentSupersededBy = supersededByMatch?.[1]?.trim();
@@ -10541,26 +11133,102 @@ private registerCommands(): void {
 						updated_at: new Date().toISOString(),
 					};
 
+					// Debug: log what triggered this update check
+					const triggers = [];
+					if (blocksChanged) triggers.push('blocks');
+					if (dependsOnChanged) triggers.push('dependsOn');
+					if (childrenChanged) triggers.push('children');
+					if (implementedByChanged) triggers.push('implementedBy');
+					if (documentedByChanged) triggers.push('documentedBy');
+					if (decidedByChanged) triggers.push('decidedBy');
+					if (supersededByChanged) triggers.push('supersededBy');
+					if (nextVersionChanged) triggers.push('nextVersion');
+					if (hasForwardCleanup) triggers.push('forwardCleanup');
+
+					// Log to reconcile log (first 10 only)
+					if (updatedCount < 10) {
+						reconcileLog.push(`\nEntity: ${entityId}`);
+						reconcileLog.push(`  Triggers: ${triggers.join(', ')}`);
+						if (forwardCleanup) {
+							reconcileLog.push(`  Forward cleanup keys: ${Object.keys(forwardCleanup).join(', ')}`);
+							for (const [key, value] of Object.entries(forwardCleanup)) {
+								reconcileLog.push(`    ${key}: ${JSON.stringify(value)}`);
+							}
+						}
+					}
+
+					// Forward relationship cleanup (remove malformed entries, duplicates, and broken references)
+					// Only update if the cleaned value is different from current
+					if (forwardCleanup) {
+						if (forwardCleanup.implements !== undefined) {
+							if (JSON.stringify([...currentImplements].sort()) !== JSON.stringify([...forwardCleanup.implements].sort())) {
+								updates.implements = forwardCleanup.implements;
+								console.log(`[Reconciler] ${entityId}.implements: current=[${currentImplements.join(', ')}], cleaned=[${forwardCleanup.implements.join(', ')}]`);
+							}
+						}
+						if (forwardCleanup.documents !== undefined) {
+							if (JSON.stringify([...currentDocuments].sort()) !== JSON.stringify([...forwardCleanup.documents].sort())) {
+								updates.documents = forwardCleanup.documents;
+								console.log(`[Reconciler] ${entityId}.documents: current=[${currentDocuments.join(', ')}], cleaned=[${forwardCleanup.documents.join(', ')}]`);
+							}
+						}
+						if (forwardCleanup.affects !== undefined) {
+							if (JSON.stringify([...currentAffects].sort()) !== JSON.stringify([...forwardCleanup.affects].sort())) {
+								updates.affects = forwardCleanup.affects;
+								console.log(`[Reconciler] ${entityId}.affects: current=[${currentAffects.join(', ')}], cleaned=[${forwardCleanup.affects.join(', ')}]`);
+							}
+						}
+						if (forwardCleanup.parent === null) {
+							// Delete the parent field entirely
+							updates.parent = null;
+						}
+					}
+
 					// Reverse relationship updates
-					if (blocksChanged && rels.blocks.length > 0) {
+					if (blocksChanged) {
 						updates.blocks = rels.blocks;
+						if (rels.blocks.length > 0 || currentBlocks.length > 0) {
+							console.log(`[Reconciler] ${entityId}.blocks: current=[${currentBlocks.join(', ')}], new=[${rels.blocks.join(', ')}]`);
+						}
 					}
-					// Add new depends_on values (merge with existing)
-					if (dependsOnChanged) {
-						updates.depends_on = [...currentDependsOn, ...newDependsOn];
-						console.log(`[Reconciler] Will update ${entityId}.depends_on to [${updates.depends_on}]`);
+
+					// Special handling for depends_on: merge forward cleanup with bidirectional sync
+					if (forwardCleanup?.depends_on !== undefined || dependsOnChanged) {
+						const cleanedDeps = forwardCleanup?.depends_on ?? currentDependsOn;
+						const mergedDeps = [...cleanedDeps, ...newDependsOn];
+						// Remove duplicates
+						const finalDeps = [...new Set(mergedDeps)];
+
+						// Only update if the final result is different from current
+						if (JSON.stringify([...currentDependsOn].sort()) !== JSON.stringify([...finalDeps].sort())) {
+							updates.depends_on = finalDeps;
+							console.log(`[Reconciler] ${entityId}.depends_on: current=[${currentDependsOn.join(', ')}], cleaned=[${cleanedDeps.join(', ')}], new=[${newDependsOn.join(', ')}], final=[${finalDeps.join(', ')}]`);
+						}
 					}
-					if (childrenChanged && rels.children.length > 0) {
+
+					if (childrenChanged) {
 						updates.children = rels.children;
+						if (rels.children.length > 0 || currentChildren.length > 0) {
+							console.log(`[Reconciler] ${entityId}.children: current=[${currentChildren.join(', ')}], new=[${rels.children.join(', ')}]`);
+						}
 					}
-					if (implementedByChanged && rels.implementedBy.length > 0) {
+					if (implementedByChanged) {
 						updates.implemented_by = rels.implementedBy;
+						if (rels.implementedBy.length > 0 || currentImplementedBy.length > 0) {
+							console.log(`[Reconciler] ${entityId}.implemented_by: current=[${currentImplementedBy.join(', ')}], new=[${rels.implementedBy.join(', ')}]`);
+						}
 					}
-					if (documentedByChanged && rels.documentedBy.length > 0) {
+					if (documentedByChanged) {
 						updates.documented_by = rels.documentedBy;
+						if (rels.documentedBy.length > 0 || currentDocumentedBy.length > 0) {
+							console.log(`[Reconciler] ${entityId}.documented_by: current=[${currentDocumentedBy.join(', ')}], new=[${rels.documentedBy.join(', ')}]`);
+						}
 					}
-					if (decidedByChanged && rels.decidedBy.length > 0) {
+					if (decidedByChanged) {
 						updates.decided_by = rels.decidedBy;
+						if (rels.decidedBy.length > 0 || currentDecidedBy.length > 0) {
+							console.log(`[Reconciler] ${entityId}.decided_by: current=[${currentDecidedBy.join(', ')}], new=[${rels.decidedBy.join(', ')}]`);
+						}
 					}
 					if (supersededByChanged && rels.supersededBy) {
 						updates.superseded_by = rels.supersededBy;
@@ -10569,38 +11237,46 @@ private registerCommands(): void {
 						updates.next_version = rels.nextVersion;
 					}
 
-					// Forward relationship cleanup (remove malformed entries and duplicates)
-					if (forwardCleanup) {
-						if (forwardCleanup.depends_on) {
-							updates.depends_on = forwardCleanup.depends_on;
-						}
-						if (forwardCleanup.implements) {
-							updates.implements = forwardCleanup.implements;
-						}
-						if (forwardCleanup.documents) {
-							updates.documents = forwardCleanup.documents;
-						}
-						if (forwardCleanup.affects) {
-							updates.affects = forwardCleanup.affects;
-						}
+					// Only update if we have fields beyond just updated_at
+					const hasActualUpdates = Object.keys(updates).length > 1;
+					if (hasActualUpdates) {
+						await applyFrontmatterUpdates(this.app, file, updates);
+						updatedCount++;
 					}
-
-					await applyFrontmatterUpdates(this.app, file, updates);
-					updatedCount++;
 				}
 			} catch (e) {
 				console.warn('[Canvas Plugin] Failed to update file for reconcile:', file.path, e);
 			}
 		}
 
-		new Notice(`Reconciled ${scannedCount} entities, updated ${updatedCount} files`);
-		console.debug('[Canvas Plugin] Reconcile complete:', { scannedCount, updatedCount });
+		console.warn('='.repeat(80));
+		console.warn(`[Reconciler] COMPLETE - Scanned: ${scannedCount}, Updated: ${updatedCount}`);
+		console.warn('='.repeat(80));
+
+		// Write reconcile log
+		reconcileLog.push('='.repeat(80));
+		reconcileLog.push(`[Reconciler] COMPLETE - Scanned: ${scannedCount}, Updated: ${updatedCount}`);
+		reconcileLog.push('='.repeat(80));
+
+		// Only write to file if standalone run
+		if (isStandaloneRun) {
+			await this.app.vault.adapter.write('operation-log.txt', reconcileLog.join('\n'));
+			new Notice(`Reconciled ${scannedCount} entities, updated ${updatedCount} files`);
+		}
 
 		// Detect and break cycles in milestone dependencies
 		const allEntityFiles = Array.from(entityIdToFile.values());
-		const cycleResult = await detectAndBreakCycles(this.app, allEntityFiles, "milestone");
-		if (cycleResult.cyclesFound > 0) {
-			console.log(`[Canvas Plugin] Broke ${cycleResult.cyclesFound} cycles:`, cycleResult.edgesRemoved);
+		const milestoneCycleResult = await detectAndBreakCycles(this.app, allEntityFiles, "milestone");
+		if (milestoneCycleResult.cyclesFound > 0) {
+			console.log(`[Canvas Plugin] Broke ${milestoneCycleResult.cyclesFound} milestone cycles:`, milestoneCycleResult.edgesRemoved);
+			reconcileLog.push(`Broke ${milestoneCycleResult.cyclesFound} milestone cycles`);
+		}
+
+		// Also break cycles in story dependencies
+		const storyCycleResult = await detectAndBreakCycles(this.app, allEntityFiles, "story");
+		if (storyCycleResult.cyclesFound > 0) {
+			console.log(`[Canvas Plugin] Broke ${storyCycleResult.cyclesFound} story cycles:`, storyCycleResult.edgesRemoved);
+			reconcileLog.push(`Broke ${storyCycleResult.cyclesFound} story cycles`);
 		}
 	}
 
