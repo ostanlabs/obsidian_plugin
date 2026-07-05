@@ -91,12 +91,12 @@ describe('C. EntityValidator', () => {
       expect(hasError(validator.validate(dec), 'invalid_relationship_target', 'affects')).toBe(true);
     });
 
-    it('accepts a decision `affects` pointing at a feature', () => {
+    it('rejects a decision `affects` pointing at a feature (affects is decision→document only)', () => {
       const dec = makeEntity('decision', 'DEC-004', {
         status: 'Decided',
         relationships: { affects: ['F-001'] },
       });
-      expect(hasError(validator.validate(dec), 'invalid_relationship_target')).toBe(false);
+      expect(hasError(validator.validate(dec), 'invalid_relationship_target')).toBe(true);
     });
   });
 

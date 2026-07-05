@@ -1,0 +1,119 @@
+/**
+ * Suite I — schema-derivation. The single-source adapters that turn the schema into
+ * the MCP validator allow-list and the plugin positioning ruleset.
+ */
+import { describe, it, expect } from 'vitest';
+import { DEFAULT_SCHEMA } from '../../src/entity-core/default-schema.js';
+import {
+  buildValidationAllowList,
+  buildRelationshipRules,
+  type DerivedRelationshipRule,
+} from '../../src/entity-core/schema-derivation.js';
+import type { Schema } from '../../src/entity-core/types.js';
+
+const rule = (rules: DerivedRelationshipRule[], sourceType: string, field: string) =>
+  rules.find((r) => r.sourceType === sourceType && r.field === field);
+
+describe('I. buildValidationAllowList (default schema)', () => {
+  const allow = buildValidationAllowList(DEFAULT_SCHEMA);
+
+  it('derives the exact allow-list per entity type', () => {
+    expect(allow.milestone).toEqual({ children: ['story'], depends_on: ['milestone'], blocks: ['milestone'], implements: ['feature'] });
+    expect(allow.story).toEqual({ parent: ['milestone'], children: ['task'], depends_on: ['story'], blocks: ['story'], implements: ['feature'] });
+    expect(allow.task).toEqual({ parent: ['story'], depends_on: ['task'], blocks: ['task'] });
+    expect(allow.decision).toEqual({ affects: ['document'], supersedes: ['decision'], superseded_by: ['decision'] });
+    expect(allow.document).toEqual({ documents: ['feature'], previous_version: ['document'], decided_by: ['decision'], next_version: ['document'] });
+    expect(allow.feature).toEqual({ implemented_by: ['milestone', 'story'], documented_by: ['document'] });
+  });
+
+  it('covers both directions of every pair (forward on from, reverse on to)', () => {
+    // hierarchy story→milestone: story.parent + milestone.children
+    expect(allow.story.parent).toContain('milestone');
+    expect(allow.milestone.children).toContain('story');
+  });
+});
+
+describe('I. buildRelationshipRules (default schema)', () => {
+  const rules = buildRelationshipRules(DEFAULT_SCHEMA);
+
+  it('emits the milestone workstream root rule first', () => {
+    expect(rules[0]).toEqual({ sourceType: 'milestone', field: 'workstream', targetType: 'workstream', action: 'containment', direction: 'child' });
+  });
+
+  it('aggregates feature.implemented_by target types across pairs', () => {
+    const r = rule(rules, 'feature', 'implemented_by')!;
+    expect(r.action).toBe('containment');
+    expect(r.direction).toBe('child');
+    expect(r.priority).toBe(1);
+    expect(new Set(r.targetType as string[])).toEqual(new Set(['milestone', 'story']));
+  });
+
+  it('emits the parent-side mirror rule when emitParentRule is set (implementation)', () => {
+    // milestone.implements → feature (direction parent)
+    const m = rule(rules, 'milestone', 'implements')!;
+    expect(m).toMatchObject({ targetType: 'feature', action: 'containment', direction: 'parent' });
+  });
+
+  it('decision.affects is containment → document (priority 1)', () => {
+    expect(rule(rules, 'decision', 'affects')).toMatchObject({ targetType: 'document', action: 'containment', direction: 'child', priority: 1 });
+  });
+
+  it('sequencing: depends_on=after / blocks=before, crossWs suppressed for task', () => {
+    expect(rule(rules, 'milestone', 'depends_on')).toMatchObject({ action: 'sequencing', direction: 'after', crossWsPositioning: true });
+    expect(rule(rules, 'milestone', 'blocks')).toMatchObject({ direction: 'before', crossWsPositioning: true });
+    expect(rule(rules, 'task', 'depends_on')).toMatchObject({ direction: 'after', crossWsPositioning: false });
+    expect(rule(rules, 'task', 'blocks')).toMatchObject({ direction: 'before', crossWsPositioning: false });
+  });
+
+  it('supersession=before (no reverse rule), versioning=after', () => {
+    expect(rule(rules, 'decision', 'supersedes')).toMatchObject({ action: 'sequencing', direction: 'before' });
+    expect(rule(rules, 'decision', 'superseded_by')).toBeUndefined();
+    expect(rule(rules, 'document', 'previous_version')).toMatchObject({ action: 'sequencing', direction: 'after' });
+    expect(rule(rules, 'document', 'next_version')).toBeUndefined();
+  });
+});
+
+describe('I. derivation on custom / edge schemas', () => {
+  const base = { schemaVersion: 1, settings: {}, entityTypes: [], workstreams: {} } as unknown as Schema;
+
+  it('empty relationships → empty allow-list + only the workstream rule', () => {
+    const s = { ...base, relationships: [] } as Schema;
+    expect(buildValidationAllowList(s)).toEqual({});
+    const rules = buildRelationshipRules(s);
+    expect(rules).toHaveLength(1);
+    expect(rules[0].field).toBe('workstream');
+  });
+
+  it('single containment pair (containerEnd:to) → one child rule, no parent mirror', () => {
+    const s = { ...base, relationships: [{
+      name: 'h', label: 'H',
+      pairs: [{ from: 'task', to: 'story', forward: 'parent', reverse: 'children' }],
+      cardinality: { forward: 'one', reverse: 'many' }, canvas: {}, graph: {},
+      positioning: { role: 'containment', containerEnd: 'to' },
+    }] } as unknown as Schema;
+    const rules = buildRelationshipRules(s).filter((r) => r.field !== 'workstream');
+    expect(rules).toEqual([{ sourceType: 'task', field: 'parent', targetType: 'story', action: 'containment', direction: 'child' }]);
+    expect(buildValidationAllowList(s)).toEqual({ task: { parent: ['story'] }, story: { children: ['task'] } });
+  });
+
+  it('wildcard "*" endpoints are skipped in the allow-list', () => {
+    const s = { ...base, relationships: [{
+      name: 'dep', label: 'Dep',
+      pairs: [{ from: '*', to: '*', forward: 'depends_on', reverse: 'blocks' }],
+      cardinality: { forward: 'many', reverse: 'many' }, canvas: {}, graph: {},
+      positioning: { role: 'sequencing', forwardDirection: 'after', emitReverseRule: true },
+    }] } as unknown as Schema;
+    expect(buildValidationAllowList(s)).toEqual({});
+  });
+
+  it('relationship with no positioning metadata emits no rules', () => {
+    const s = { ...base, relationships: [{
+      name: 'x', label: 'X',
+      pairs: [{ from: 'a', to: 'b', forward: 'f', reverse: 'r' }],
+      cardinality: { forward: 'one', reverse: 'one' }, canvas: {}, graph: {},
+    }] } as unknown as Schema;
+    expect(buildRelationshipRules(s).filter((r) => r.field !== 'workstream')).toEqual([]);
+    // still contributes to the allow-list (validation is pair-driven, not positioning-driven)
+    expect(buildValidationAllowList(s)).toEqual({ a: { f: ['b'] }, b: { r: ['a'] } });
+  });
+});

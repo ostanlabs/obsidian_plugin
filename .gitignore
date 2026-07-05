@@ -133,3 +133,6 @@ main.js.map
 # OS
 .DS_Store
 
+
+# MCP coverage build/output (scripts/coverage-mcp.mjs)
+coverage-tmp/

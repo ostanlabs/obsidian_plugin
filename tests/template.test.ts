@@ -12,7 +12,7 @@ id: {{id}}
 
 # {{title}}
 
-Effort: {{effort}}
+Workstream: {{workstream}}
 Status: {{status}}
 Priority: {{priority}}
 `;
@@ -37,7 +37,7 @@ Priority: {{priority}}
 			expect(result).toContain("title: Test Task");
 			expect(result).toContain("id: T-001");
 			expect(result).toContain("# Test Task");
-			expect(result).toContain("Effort: Engineering");
+			expect(result).toContain("Workstream: Engineering");
 			expect(result).toContain("Status: Not Started");
 			expect(result).toContain("Priority: Medium");
 		});

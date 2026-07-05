@@ -134,12 +134,12 @@ describe('A. SchemaRegistry / default schema', () => {
       }
     });
 
-    it('implementation goes milestone|story → feature|document', () => {
+    it('implementation goes milestone|story → feature', () => {
       const impl = reg.getRelationship('implementation');
       const froms = new Set(impl!.pairs.map((p) => p.from));
       const tos = new Set(impl!.pairs.map((p) => p.to));
       expect(froms).toEqual(new Set(['milestone', 'story']));
-      expect(tos).toEqual(new Set(['feature', 'document']));
+      expect(tos).toEqual(new Set(['feature']));
       for (const p of impl!.pairs) {
         expect(p.forward).toBe('implements');
         expect(p.reverse).toBe('implemented_by');
