@@ -8332,15 +8332,6 @@ private registerCommands(): void {
 	}
 
 	/**
-	 * Reposition canvas nodes using V3 algorithm:
-	 * - Hierarchical container model with children LEFT and ABOVE parent
-	 * - Workstream-based lanes with milestones ordered by dependencies
-	 * - Grid-based child layout minimizing diagonal
-	 * - Multi-parent entity handling (same workstream vs cross-workstream)
-	 * - Orphan positioning in grid below workstreams
-	 */
-
-	/**
 	 * Reposition canvas nodes using V4 algorithm:
 	 * - Ruleset-based relationship processing
 	 * - Entity categories: Contained, Floating, Orphan
