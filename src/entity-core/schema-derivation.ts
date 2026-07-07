@@ -118,15 +118,18 @@ export function buildRelationshipRules(schema: Schema): DerivedRelationshipRule[
     } else { // sequencing
       const fwd = pos.forwardDirection ?? 'after';
       const rev = fwd === 'after' ? 'before' : 'after';
+      // Types excluded from cross-workstream positioning. Absent ⇒ default ['task']
+      // to preserve prior behavior (tasks never get cross-ws constraints).
+      const excluded = pos.crossWsExcludedTypes ?? ['task'];
       for (const p of rel.pairs) {
         rules.push({
           sourceType: p.from, field: p.forward, targetType: p.to, action: 'sequencing', direction: fwd,
-          ...(pos.crossWsPositioning ? { crossWsPositioning: p.from !== 'task' } : {}),
+          ...(pos.crossWsPositioning ? { crossWsPositioning: !excluded.includes(p.from) } : {}),
         });
         if (pos.emitReverseRule) {
           rules.push({
             sourceType: p.to, field: p.reverse, targetType: p.from, action: 'sequencing', direction: rev,
-            ...(pos.crossWsPositioning ? { crossWsPositioning: p.to !== 'task' } : {}),
+            ...(pos.crossWsPositioning ? { crossWsPositioning: !excluded.includes(p.to) } : {}),
           });
         }
       }

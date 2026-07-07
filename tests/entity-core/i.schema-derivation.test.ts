@@ -58,6 +58,14 @@ describe('I. buildRelationshipRules (default schema)', () => {
     expect(rule(rules, 'decision', 'affects')).toMatchObject({ targetType: 'document', action: 'containment', direction: 'child', priority: 1 });
   });
 
+  it('documentation emitParentRule: feature.documented_by → document (direction parent)', () => {
+    expect(rule(rules, 'feature', 'documented_by')).toMatchObject({ targetType: 'document', action: 'containment', direction: 'parent' });
+  });
+
+  it('decision-impact emitParentRule: document.decided_by → decision (direction parent)', () => {
+    expect(rule(rules, 'document', 'decided_by')).toMatchObject({ targetType: 'decision', action: 'containment', direction: 'parent' });
+  });
+
   it('sequencing: depends_on=after / blocks=before, crossWs suppressed for task', () => {
     expect(rule(rules, 'milestone', 'depends_on')).toMatchObject({ action: 'sequencing', direction: 'after', crossWsPositioning: true });
     expect(rule(rules, 'milestone', 'blocks')).toMatchObject({ direction: 'before', crossWsPositioning: true });
@@ -104,6 +112,36 @@ describe('I. derivation on custom / edge schemas', () => {
       positioning: { role: 'sequencing', forwardDirection: 'after', emitReverseRule: true },
     }] } as unknown as Schema;
     expect(buildValidationAllowList(s)).toEqual({});
+  });
+
+  it('crossWsExcludedTypes controls which endpoints get cross-ws positioning (default ["task"])', () => {
+    // Absent field ⇒ default excludes only 'task'
+    const dflt = { ...base, relationships: [{
+      name: 'dep', label: 'Dep',
+      pairs: [
+        { from: 'story', to: 'story', forward: 'depends_on', reverse: 'blocks' },
+        { from: 'task', to: 'task', forward: 'depends_on', reverse: 'blocks' },
+      ],
+      cardinality: { forward: 'many', reverse: 'many' }, canvas: {}, graph: {},
+      positioning: { role: 'sequencing', forwardDirection: 'after', emitReverseRule: true, crossWsPositioning: true },
+    }] } as unknown as Schema;
+    const dr = buildRelationshipRules(dflt);
+    expect(rule(dr, 'story', 'depends_on')).toMatchObject({ crossWsPositioning: true });
+    expect(rule(dr, 'task', 'depends_on')).toMatchObject({ crossWsPositioning: false });
+
+    // Explicit override: exclude 'story' instead of 'task'
+    const custom = { ...base, relationships: [{
+      name: 'dep', label: 'Dep',
+      pairs: [
+        { from: 'story', to: 'story', forward: 'depends_on', reverse: 'blocks' },
+        { from: 'task', to: 'task', forward: 'depends_on', reverse: 'blocks' },
+      ],
+      cardinality: { forward: 'many', reverse: 'many' }, canvas: {}, graph: {},
+      positioning: { role: 'sequencing', forwardDirection: 'after', emitReverseRule: true, crossWsPositioning: true, crossWsExcludedTypes: ['story'] },
+    }] } as unknown as Schema;
+    const cr = buildRelationshipRules(custom);
+    expect(rule(cr, 'story', 'depends_on')).toMatchObject({ crossWsPositioning: false });
+    expect(rule(cr, 'task', 'depends_on')).toMatchObject({ crossWsPositioning: true });
   });
 
   it('relationship with no positioning metadata emits no rules', () => {

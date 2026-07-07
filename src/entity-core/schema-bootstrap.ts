@@ -80,6 +80,10 @@ export function validateSchema(obj: unknown): string[] {
             r.positioning.forwardDirection !== 'before' && r.positioning.forwardDirection !== 'after') {
           errors.push(`relationships[${label}].positioning.forwardDirection must be "before" or "after"`);
         }
+        if (r.positioning.priority !== undefined &&
+            (typeof r.positioning.priority !== 'number' || r.positioning.priority < 0)) {
+          errors.push(`relationships[${label}].positioning.priority must be a non-negative number`);
+        }
       }
     });
   }

@@ -8659,6 +8659,11 @@ private registerCommands(): void {
 					log(`⚠️ schema.json invalid (${schemaResult.errors.length} error(s)) — using default positioning rules`);
 				}
 				engineConfig.relationshipRules = buildRelationshipRules(schemaResult.schema) as RelationshipRule[];
+				// Thread the schema-configured overlap priority order into the engine (if present).
+				const overlapOrder = schemaResult.schema.settings?.overlapPriorityOrder;
+				if (Array.isArray(overlapOrder) && overlapOrder.length > 0) {
+					engineConfig.overlapPriorityOrder = overlapOrder as PositioningConfig['overlapPriorityOrder'];
+				}
 				log(foundSchema
 					? `Loaded positioning rules from schema.json (project: ${projectFolderPath || '<vault root>'})`
 					: `No schema.json found above the canvas — using default positioning rules (the MCP server writes schema.json at the project root)`);

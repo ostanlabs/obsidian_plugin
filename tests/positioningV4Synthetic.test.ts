@@ -112,6 +112,39 @@ describe("PositioningEngineV4 - synthetic inputs", () => {
 		expect(b.errors).toEqual(a.errors);
 	});
 
+	it("positions a full deep chain decision→document→feature→story→milestone", () => {
+		const engine = new PositioningEngineV4();
+		const res = engine.calculatePositions([
+			ent({ entityId: "M-001", type: "milestone" }),
+			ent({ entityId: "S-001", type: "story", parent: "M-001" }),
+			ent({ entityId: "F-001", type: "feature", implementedBy: ["S-001"] }),
+			ent({ entityId: "DOC-001", type: "document", documents: ["F-001"] }),
+			ent({ entityId: "DEC-001", type: "decision", affects: ["DOC-001"] }),
+		]);
+		for (const id of ["M-001", "S-001", "F-001", "DOC-001", "DEC-001"]) {
+			expect(res.positions.get(`node-${id}`)).toBeDefined();
+		}
+	});
+
+	it("positions a deep chain whose TOP feature is an orphan (no implements)", () => {
+		// Mirrors the real-vault bug: an orphan feature at the top of the chain with
+		// documents (multi-target ⇒ deferred) and decisions must not drop out.
+		const engine = new PositioningEngineV4();
+		const res = engine.calculatePositions([
+			ent({ entityId: "F-001", type: "feature", documentedBy: ["DOC-001", "DOC-002"] }),
+			ent({ entityId: "F-002", type: "feature", documentedBy: ["DOC-001", "DOC-002"] }),
+			// Documents documenting BOTH features ⇒ multiple containment parents ⇒ deferred.
+			ent({ entityId: "DOC-001", type: "document", documents: ["F-001", "F-002"], affects: [] }),
+			ent({ entityId: "DOC-002", type: "document", documents: ["F-001", "F-002"] }),
+			// Decisions affecting BOTH documents ⇒ multiple parents ⇒ deferred/cascade.
+			ent({ entityId: "DEC-001", type: "decision", affects: ["DOC-001", "DOC-002"] }),
+			ent({ entityId: "DEC-002", type: "decision", affects: ["DOC-001"] }),
+		]);
+		for (const id of ["F-001", "F-002", "DOC-001", "DOC-002", "DEC-001", "DEC-002"]) {
+			expect(res.positions.get(`node-${id}`)).toBeDefined();
+		}
+	});
+
 	it("migrates decision enables -> affects", () => {
 		const engine = new PositioningEngineV4();
 		const res = engine.calculatePositions([

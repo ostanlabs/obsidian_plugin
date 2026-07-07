@@ -27,6 +27,10 @@ export const DEFAULT_SCHEMA: Schema = {
     idPadding: 3,
     archiveLayout: 'by-type',
     filenamePattern: '{id}_{title}',
+    // Overlap-resolution priority (highest first): higher-priority nodes stay put and
+    // lower-priority nodes are nudged aside when two overlap. Single source of truth for
+    // positioningV4's overlap resolver.
+    overlapPriorityOrder: ['milestone', 'story', 'task', 'decision', 'document', 'feature'],
   },
 
   entityTypes: [
@@ -200,7 +204,7 @@ export const DEFAULT_SCHEMA: Schema = {
       canvas: { color: 'blue', style: 'dashed' },
       graph: { transitiveReduction: true, cyclePrevention: true },
       // sequencing: depends_on => 'after', blocks => 'before'. crossWs suppressed for task.
-      positioning: { role: 'sequencing', forwardDirection: 'after', emitReverseRule: true, crossWsPositioning: true },
+      positioning: { role: 'sequencing', forwardDirection: 'after', emitReverseRule: true, crossWsPositioning: true, crossWsExcludedTypes: ['task'] },
     },
     {
       name: 'implementation',
@@ -224,8 +228,10 @@ export const DEFAULT_SCHEMA: Schema = {
       cardinality: { forward: 'many', reverse: 'many' },
       canvas: { color: 'yellow', style: 'solid' },
       graph: { transitiveReduction: false, cyclePrevention: false },
-      // document (from) sits under the feature (to = container). documented_by does NOT position the feature.
-      positioning: { role: 'containment', containerEnd: 'to', priority: 1 },
+      // document (from) sits under the feature (to = container). The parent rule lets a
+      // feature claim its documents as children (documented_by → document, direction 'parent'),
+      // so features at the top of deep chains keep their documents attached for layout.
+      positioning: { role: 'containment', containerEnd: 'to', priority: 1, emitParentRule: true },
     },
     {
       name: 'decision-impact',
@@ -237,7 +243,9 @@ export const DEFAULT_SCHEMA: Schema = {
       cardinality: { forward: 'many', reverse: 'many' },
       canvas: { color: 'yellow', style: 'dotted' },
       graph: { transitiveReduction: false, cyclePrevention: false },
-      positioning: { role: 'containment', containerEnd: 'to', priority: 1 },
+      // decision (from) sits under the document it affects (to = container). The parent rule
+      // lets a document claim its decisions as children (decided_by → decision, direction 'parent').
+      positioning: { role: 'containment', containerEnd: 'to', priority: 1, emitParentRule: true },
     },
     {
       name: 'supersession',

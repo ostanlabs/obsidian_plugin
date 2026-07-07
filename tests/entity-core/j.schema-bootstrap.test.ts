@@ -54,6 +54,50 @@ describe('J. validateSchema', () => {
     expect(errs.some((e) => /positioning\.role/.test(e))).toBe(true);
   });
 
+  it('flags an invalid positioning.containerEnd', () => {
+    const errs = validateSchema({
+      entityTypes: [{ type: 'milestone' }, { type: 'story' }],
+      relationships: [{
+        name: 'r', pairs: [{ from: 'story', to: 'milestone', forward: 'parent', reverse: 'children' }],
+        positioning: { role: 'containment', containerEnd: 'sideways' },
+      }],
+    });
+    expect(errs.some((e) => /positioning\.containerEnd/.test(e))).toBe(true);
+  });
+
+  it('flags an invalid positioning.forwardDirection', () => {
+    const errs = validateSchema({
+      entityTypes: [{ type: 'milestone' }],
+      relationships: [{
+        name: 'r', pairs: [{ from: 'milestone', to: 'milestone', forward: 'depends_on', reverse: 'blocks' }],
+        positioning: { role: 'sequencing', forwardDirection: 'sideways' },
+      }],
+    });
+    expect(errs.some((e) => /positioning\.forwardDirection/.test(e))).toBe(true);
+  });
+
+  it('flags a negative positioning.priority', () => {
+    const errs = validateSchema({
+      entityTypes: [{ type: 'decision' }, { type: 'document' }],
+      relationships: [{
+        name: 'r', pairs: [{ from: 'decision', to: 'document', forward: 'affects', reverse: 'decided_by' }],
+        positioning: { role: 'containment', containerEnd: 'to', priority: -1 },
+      }],
+    });
+    expect(errs.some((e) => /positioning\.priority/.test(e))).toBe(true);
+  });
+
+  it('accepts a valid positioning block (priority 0)', () => {
+    const errs = validateSchema({
+      entityTypes: [{ type: 'decision' }, { type: 'document' }],
+      relationships: [{
+        name: 'r', pairs: [{ from: 'decision', to: 'document', forward: 'affects', reverse: 'decided_by' }],
+        positioning: { role: 'containment', containerEnd: 'to', priority: 0 },
+      }],
+    });
+    expect(errs.some((e) => /positioning/.test(e))).toBe(false);
+  });
+
   it('flags duplicate entity types', () => {
     const errs = validateSchema({ entityTypes: [{ type: 'x' }, { type: 'x' }], relationships: [] });
     expect(errs.some((e) => /duplicate entity type "x"/.test(e))).toBe(true);

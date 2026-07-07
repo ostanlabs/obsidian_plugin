@@ -122,8 +122,13 @@ export interface RelationshipPositioning {
   forwardDirection?: 'before' | 'after';
   /** Also emit the reverse-field rule (opposite direction) — true for depends_on/blocks. */
   emitReverseRule?: boolean;
-  /** Apply cross-workstream position constraints (suppressed for 'task'). */
+  /** Apply cross-workstream position constraints (suppressed for excluded types). */
   crossWsPositioning?: boolean;
+  /**
+   * Entity types for which cross-workstream positioning is suppressed even when
+   * `crossWsPositioning` is true. Defaults to `['task']` when omitted (back-compat).
+   */
+  crossWsExcludedTypes?: string[];
 }
 
 export interface RelationshipDefinition {
@@ -141,6 +146,12 @@ export interface SchemaSettings {
   idPadding: number;
   archiveLayout: 'by-type' | 'quarterly';
   filenamePattern: string;
+  /**
+   * Type priority order (highest priority first) used by the positioning engine's
+   * overlap resolver: when two nodes overlap, the lower-priority one is moved.
+   * When omitted the engine falls back to its built-in default order.
+   */
+  overlapPriorityOrder?: string[];
 }
 
 export interface WorkstreamsConfig {

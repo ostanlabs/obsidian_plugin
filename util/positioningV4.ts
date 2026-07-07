@@ -31,6 +31,8 @@ export interface PositioningConfig {
 	orphanGap: number;          // Gap between orphan area and workstreams
 	floatingGap: number;        // Gap between floating area and workstream top
 	crossWorkstreamBandMinHeight: number;
+	/** Overlap-resolution type priority (highest first); lower-priority nodes get moved. */
+	overlapPriorityOrder: EntityType[];
 }
 
 export const DEFAULT_POSITIONING_CONFIG: PositioningConfig = {
@@ -48,6 +50,7 @@ export const DEFAULT_POSITIONING_CONFIG: PositioningConfig = {
 	orphanGap: 150,
 	floatingGap: 100,
 	crossWorkstreamBandMinHeight: 110,
+	overlapPriorityOrder: ['milestone', 'story', 'task', 'decision', 'document', 'feature'],
 };
 
 /** Parsed entity data from frontmatter */
@@ -299,6 +302,9 @@ export class PositioningEngineV4 {
 
 		// Phase 12: Position children within containers (second pass: children of deferred/orphan parents)
 		this.positionAllChildren();
+
+		// Phase 12.5: Complete containment for deep chains (safety net honoring containment)
+		this.completeContainmentPositioning();
 
 		// Phase 13: Resolve overlaps
 		this.resolveOverlaps();
@@ -978,19 +984,22 @@ export class PositioningEngineV4 {
 		// Build reverse dependency map: entityId -> entities that depend on it (via blocks)
 		const dependentsMap = this.buildDependentsMap();
 
-		// Find stories, tasks, AND decisions without containment (floating or orphan)
+		// Find non-container entities without containment (floating or orphan). This now
+		// includes documents and features so deep chains (decision→document→feature→…)
+		// can resolve their containment from dependents just like stories/tasks/decisions.
+		const inferableTypes = new Set(['story', 'task', 'decision', 'document', 'feature']);
 		const entitiesWithoutParent = Array.from(this.processedNodes.values())
-			.filter(n => (n.type === 'story' || n.type === 'task' || n.type === 'decision') && !n.containmentParentId);
+			.filter(n => inferableTypes.has(n.type) && !n.containmentParentId);
 
 		if (entitiesWithoutParent.length === 0) {
-			console.log(`[PositioningV4] No stories/tasks/decisions without parent found`);
+			console.log(`[PositioningV4] No inferable entities without parent found`);
 			return;
 		}
 
-		const storiesCount = entitiesWithoutParent.filter(n => n.type === 'story').length;
-		const tasksCount = entitiesWithoutParent.filter(n => n.type === 'task').length;
-		const decisionsCount = entitiesWithoutParent.filter(n => n.type === 'decision').length;
-		console.log(`[PositioningV4] Found ${entitiesWithoutParent.length} entities without parent (${storiesCount} stories, ${tasksCount} tasks, ${decisionsCount} decisions)`);
+		const countByType = (t: string) => entitiesWithoutParent.filter(n => n.type === t).length;
+		console.log(`[PositioningV4] Found ${entitiesWithoutParent.length} entities without parent ` +
+			`(${countByType('story')} stories, ${countByType('task')} tasks, ${countByType('decision')} decisions, ` +
+			`${countByType('document')} documents, ${countByType('feature')} features)`);
 
 		// Verbose: Log DEC-043 state before inference
 		const dec043 = this.processedNodes.get('DEC-043');
@@ -3374,10 +3383,13 @@ export class PositioningEngineV4 {
 		const posA = nodeA.position!;
 		const posB = nodeB.position!;
 
-		// Type priority order (lower index = higher priority = stays fixed)
-		const priorityOrder: EntityType[] = ['milestone', 'story', 'task', 'decision', 'document', 'feature'];
-		const priorityA = priorityOrder.indexOf(nodeA.type);
-		const priorityB = priorityOrder.indexOf(nodeB.type);
+		// Type priority order (lower index = higher priority = stays fixed).
+		// Schema-configurable via settings.overlapPriorityOrder (single source of truth).
+		const priorityOrder: EntityType[] = this.config.overlapPriorityOrder;
+		// Unlisted types sort last (moved first), matching prior behavior for known types.
+		const rank = (t: EntityType) => { const i = priorityOrder.indexOf(t); return i === -1 ? priorityOrder.length : i; };
+		const priorityA = rank(nodeA.type);
+		const priorityB = rank(nodeB.type);
 
 		// Move the lower priority node (higher index), or if same priority, move nodeB
 		const nodeToMove = priorityB >= priorityA ? nodeB : nodeA;
@@ -3395,6 +3407,81 @@ export class PositioningEngineV4 {
 		const pushDirection = posToMove.y >= otherPos.y ? 1 : -1;
 		const minSpacing = 50; // Minimum gap between nodes
 		posToMove.y += pushDirection * (overlapY / 2 + minSpacing / 2);
+	}
+
+	// ========================================================================
+	// Phase 12.5: Complete Containment Positioning (deep-chain safety net)
+	// ========================================================================
+
+	/**
+	 * Ensure every node whose containment resolves to an ALREADY-positioned container
+	 * gets a position, placed to the LEFT of that container (the convention children/
+	 * documents/decisions follow toward their parent).
+	 *
+	 * This closes a real gap in deep containment chains
+	 * (decision → document → feature → story|milestone): intermediate nodes with
+	 * MULTIPLE containment targets are categorized as "deferred" and are never added to
+	 * a parent's `children` array, so — when their container is an orphan feature that is
+	 * only positioned in a later phase, or a cross-workstream deferral hits a missing
+	 * workstream lane — they (and everything they transitively contain) silently drop.
+	 *
+	 * The pass is schema-agnostic: it works off resolved containment edges
+	 * (`containmentParentId` + `containmentEdgeTargets`), not hardcoded entity types, and
+	 * only touches nodes that still lack a position, so already-placed nodes are untouched.
+	 * It iterates to a fixpoint so cascades (a decision under a document under a feature)
+	 * resolve once their container becomes positioned.
+	 */
+	private completeContainmentPositioning(): void {
+		// How many nodes we've already stacked to the left of each container, so
+		// multiple newly-placed siblings don't land on top of each other.
+		const stackCount = new Map<string, number>();
+		let positioned = 0;
+		let changed = true;
+		let iterations = 0;
+		const maxIterations = this.processedNodes.size + 1; // fixpoint guard
+
+		while (changed && iterations < maxIterations) {
+			changed = false;
+			iterations++;
+
+			for (const node of this.processedNodes.values()) {
+				if (node.position) continue;
+
+				// Resolve a positioned container from the primary parent or any edge target.
+				const candidateIds = [node.containmentParentId, ...node.containmentEdgeTargets]
+					.filter((id): id is string => !!id);
+				let container: ProcessedNode | undefined;
+				for (const cid of candidateIds) {
+					const c = this.processedNodes.get(cid);
+					if (c?.position) { container = c; break; }
+				}
+				if (!container) continue;
+
+				const nodeSize = this.config.nodeSizes[node.type];
+				const idx = stackCount.get(container.entityId) ?? 0;
+
+				// Place LEFT of the container, stacking downward from its top edge.
+				node.position = {
+					x: container.position!.x - this.config.childGap - nodeSize.width,
+					y: container.position!.y + idx * (nodeSize.height + this.config.childGap),
+					width: nodeSize.width,
+					height: nodeSize.height,
+				};
+				stackCount.set(container.entityId, idx + 1);
+
+				// Attach for structural consistency (downstream consumers see the containment).
+				if (!container.children.includes(node)) container.children.push(node);
+				node.category = 'contained';
+
+				positioned++;
+				changed = true;
+			}
+		}
+
+		if (positioned > 0) {
+			console.log(`[PositioningV4] Phase 12.5: Completed containment positioning for ` +
+				`${positioned} node(s) in ${iterations} iteration(s)`);
+		}
 	}
 
 	// ========================================================================
