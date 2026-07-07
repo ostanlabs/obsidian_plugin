@@ -16,6 +16,9 @@ import {
 	restoreCanvasViewport,
 	closeCanvasViews,
 	reopenCanvasViews,
+	reloadCanvasViews,
+	reloadCanvasViewsWithViewport,
+	createNode,
 	CanvasData,
 	CanvasNode,
 } from "../util/canvas";
@@ -269,5 +272,205 @@ describe("canvas - close/reopen views", () => {
 			type: "canvas",
 			state: { file: "b.canvas" },
 		});
+	});
+});
+
+describe("canvas - createNode", () => {
+	it("creates a text node with text, color and metadata", () => {
+		const node = createNode("text", 10, 20, 300, 80, {
+			text: "hi",
+			color: "3",
+			metadata: { entityId: "T-001" },
+		});
+		expect(node.type).toBe("text");
+		expect(node.x).toBe(10);
+		expect(node.y).toBe(20);
+		expect(node.width).toBe(300);
+		expect(node.height).toBe(80);
+		expect(node.text).toBe("hi");
+		expect(node.color).toBe("3");
+		expect(node.metadata).toEqual({ entityId: "T-001" });
+		expect(node.file).toBeUndefined();
+		expect(node.id).toBeTruthy();
+	});
+
+	it("creates a file node with defaults and no optional content", () => {
+		const node = createNode("file", 0, 0);
+		expect(node.type).toBe("file");
+		expect(node.width).toBe(400);
+		expect(node.height).toBe(100);
+		expect(node.file).toBeUndefined();
+		expect(node.text).toBeUndefined();
+		expect(node.color).toBeUndefined();
+		expect(node.metadata).toBeUndefined();
+	});
+
+	it("sets file when provided for a file node", () => {
+		const node = createNode("file", 0, 0, 400, 100, { file: "notes/x.md" });
+		expect(node.file).toBe("notes/x.md");
+	});
+});
+
+describe("canvas - saveCanvasData debug filter", () => {
+	it("counts file nodes when serializing (exercises the filter callback)", async () => {
+		let written = "";
+		const app = {
+			vault: { modify: async (_f: any, c: string) => (written = c) },
+		} as any;
+		const data: CanvasData = {
+			nodes: [
+				{ id: "n1", type: "file", x: 0, y: 0, width: 1, height: 1, file: "a.md" },
+				{ id: "n2", type: "text", x: 0, y: 0, width: 1, height: 1, text: "t" },
+			],
+			edges: [],
+		};
+		await saveCanvasData(app, { path: "b.canvas" } as any, data);
+		expect(JSON.parse(written).nodes).toHaveLength(2);
+	});
+});
+
+describe("canvas - getCanvasCenter error handling", () => {
+	it("falls back to randomized origin when the workspace lookup throws", () => {
+		const app = {
+			workspace: {
+				getLeavesOfType: () => {
+					throw new Error("boom");
+				},
+			},
+		} as any;
+		const c = getCanvasCenter(app, { path: "b.canvas" } as any);
+		expect(c.x).toBeGreaterThanOrEqual(-50);
+		expect(c.x).toBeLessThanOrEqual(50);
+		expect(c.y).toBeGreaterThanOrEqual(-50);
+		expect(c.y).toBeLessThanOrEqual(50);
+	});
+
+	it("treats missing x/y/zoom as defaults (0/0/1) when computing the center", () => {
+		const app = {
+			workspace: {
+				getLeavesOfType: () => [
+					{
+						view: {
+							file: { path: "b.canvas" },
+							canvas: {
+								// x, y, zoom intentionally undefined -> exercise ?? defaults
+								wrapperEl: {
+									getBoundingClientRect: () => ({ width: 400, height: 200 }),
+								},
+							},
+						},
+					},
+				],
+			},
+		} as any;
+		const c = getCanvasCenter(app, { path: "b.canvas" } as any);
+		// x=0,y=0,zoom=1 -> center (200,100) +/- 50
+		expect(c.x).toBeGreaterThanOrEqual(150);
+		expect(c.x).toBeLessThanOrEqual(250);
+		expect(c.y).toBeGreaterThanOrEqual(50);
+		expect(c.y).toBeLessThanOrEqual(150);
+	});
+
+	it("falls back when a matching canvas has no wrapperEl", () => {
+		const app = {
+			workspace: {
+				getLeavesOfType: () => [
+					{ view: { file: { path: "b.canvas" }, canvas: { x: 1, y: 1, zoom: 1 } } },
+				],
+			},
+		} as any;
+		const c = getCanvasCenter(app, { path: "b.canvas" } as any);
+		// No wrapperEl -> fall through to randomized origin near 0.
+		expect(c.x).toBeGreaterThanOrEqual(-50);
+		expect(c.x).toBeLessThanOrEqual(50);
+	});
+});
+
+describe("canvas - restoreCanvasViewport extra branches", () => {
+	function makeApp(view: any) {
+		return {
+			workspace: {
+				getLeavesOfType: (t: string) => (t === "canvas" ? [{ view }] : []),
+			},
+		} as any;
+	}
+
+	it("calls requestFrame and markViewportChanged on the direct-property path", async () => {
+		const frames: string[] = [];
+		const canvas: any = {
+			x: 0,
+			y: 0,
+			zoom: 1,
+			requestFrame: () => frames.push("frame"),
+			markViewportChanged: () => frames.push("changed"),
+		};
+		const view = { file: { path: "b.canvas" }, canvas };
+		const ok = await restoreCanvasViewport(
+			makeApp(view),
+			{ path: "b.canvas" } as any,
+			{ x: 3, y: 4, zoom: 5 }
+		);
+		expect(ok).toBe(true);
+		expect(canvas.x).toBe(3);
+		expect(frames).toEqual(["frame", "changed"]);
+	});
+
+	it("catches a throwing setViewport and gives up after retries", async () => {
+		const view = {
+			file: { path: "b.canvas" },
+			canvas: {
+				setViewport: () => {
+					throw new Error("nope");
+				},
+			},
+		};
+		const ok = await restoreCanvasViewport(
+			makeApp(view),
+			{ path: "b.canvas" } as any,
+			{ x: 1, y: 2, zoom: 3 },
+			2,
+			1
+		);
+		expect(ok).toBe(false);
+	});
+});
+
+describe("canvas - reload helpers", () => {
+	it("reloadCanvasViews closes and reopens matching views", async () => {
+		const setStates: any[] = [];
+		const leaf = {
+			view: { file: { path: "b.canvas" }, getViewType: () => "canvas" },
+			setViewState: async (s: any) => setStates.push(s),
+		};
+		const app = {
+			workspace: { getLeavesOfType: () => [leaf] },
+		} as any;
+		await reloadCanvasViews(app, { path: "b.canvas" } as any);
+		// One "empty" (close) then one "canvas" (reopen).
+		expect(setStates.map((s) => s.type)).toEqual(["empty", "canvas"]);
+	});
+
+	it("reloadCanvasViewsWithViewport returns early when no views are open", async () => {
+		const app = {
+			workspace: { getLeavesOfType: () => [] },
+		} as any;
+		// Should resolve without throwing and without touching a viewport.
+		await expect(
+			reloadCanvasViewsWithViewport(app, { path: "b.canvas" } as any)
+		).resolves.toBeUndefined();
+	});
+
+	it("reloadCanvasViewsWithViewport captures, reloads and restores the viewport", async () => {
+		const setStates: any[] = [];
+		const canvas: any = { x: 11, y: 22, zoom: 2 };
+		const leaf = {
+			view: { file: { path: "b.canvas" }, getViewType: () => "canvas", canvas },
+			setViewState: async (s: any) => setStates.push(s),
+		};
+		const app = {
+			workspace: { getLeavesOfType: () => [leaf] },
+		} as any;
+		await reloadCanvasViewsWithViewport(app, { path: "b.canvas" } as any);
+		expect(setStates.map((s) => s.type)).toEqual(["empty", "canvas"]);
 	});
 });

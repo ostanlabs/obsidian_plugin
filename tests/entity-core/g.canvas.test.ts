@@ -51,6 +51,91 @@ describe('G. CanvasManager', () => {
     expect(edge.color).toBe('blue');
   });
 
+  it('throws when the entity path does not encode a known type', () => {
+    expect(() => manager.createNode('X-001', 'notes/loose/X-001.md', { x: 0, y: 0 })).toThrow(
+      /Unable to determine entity type/
+    );
+  });
+
+  it('getTypeFromPath resolves a folder to its type and null otherwise', () => {
+    expect(manager.getTypeFromPath('entities/milestones/M-001_x.md')).toBe('milestone');
+    expect(manager.getTypeFromPath('entities/unknownfolder/Z-001.md')).toBeNull();
+    expect(manager.getTypeFromPath('no/entities/segment.md')).toBeNull();
+  });
+
+  // addNode keys the folder lookup by ID prefix (getEntityType('M')), but the schema
+  // registry is keyed by type NAME ('milestone'). A schema whose type name equals the
+  // prefix makes that lookup consistent so addNode can be exercised end to end.
+  const prefixKeyedSchema = () => {
+    const clone = structuredClone(DEFAULT_SCHEMA);
+    clone.entityTypes[0].type = 'M'; // milestone: rename type to match its idPrefix
+    return clone;
+  };
+
+  it('addNode appends a schema-styled node and persists the canvas', async () => {
+    const fs = new InMemoryFileSystem({
+      '/vault/projects/main.canvas': JSON.stringify({ nodes: [], edges: [] }),
+    });
+    const reg = new SchemaRegistry(prefixKeyedSchema());
+    const mgr = new CanvasManager(reg, fs, new PathResolver(reg, CONFIG));
+
+    await mgr.addNode('projects/main.canvas', 'M-001');
+
+    const canvas = JSON.parse(await fs.readFile('/vault/projects/main.canvas')) as {
+      nodes: CanvasNode[];
+    };
+    expect(canvas.nodes).toHaveLength(1);
+    expect(canvas.nodes[0].file).toBe('entities/milestones/M-001.md');
+    expect(canvas.nodes[0].width).toBe(500);
+    // First node on an empty canvas lands at the origin (calculateNextPosition empty branch).
+    expect(canvas.nodes[0].x).toBe(0);
+    expect(canvas.nodes[0].y).toBe(0);
+  });
+
+  it('addNode offsets a new node past the last one when no position is given', async () => {
+    const fs = new InMemoryFileSystem({
+      '/vault/projects/main.canvas': JSON.stringify({
+        nodes: [{ id: 'n1', type: 'file', file: 'entities/milestones/M-001.md', x: 100, y: 40, width: 500, height: 400 }],
+        edges: [],
+      }),
+    });
+    const reg = new SchemaRegistry(prefixKeyedSchema());
+    const mgr = new CanvasManager(reg, fs, new PathResolver(reg, CONFIG));
+
+    await mgr.addNode('projects/main.canvas', 'M-002');
+
+    const canvas = JSON.parse(await fs.readFile('/vault/projects/main.canvas')) as {
+      nodes: CanvasNode[];
+    };
+    expect(canvas.nodes).toHaveLength(2);
+    // calculateNextPosition: lastNode.x + lastNode.width + 50 = 100 + 500 + 50.
+    expect(canvas.nodes[1].x).toBe(650);
+    expect(canvas.nodes[1].y).toBe(40);
+  });
+
+  it('addNode honours an explicit position', async () => {
+    const fs = new InMemoryFileSystem({
+      '/vault/projects/main.canvas': JSON.stringify({ nodes: [], edges: [] }),
+    });
+    const reg = new SchemaRegistry(prefixKeyedSchema());
+    const mgr = new CanvasManager(reg, fs, new PathResolver(reg, CONFIG));
+
+    await mgr.addNode('projects/main.canvas', 'M-003', { x: 12, y: 34 });
+
+    const canvas = JSON.parse(await fs.readFile('/vault/projects/main.canvas')) as {
+      nodes: CanvasNode[];
+    };
+    expect(canvas.nodes[0].x).toBe(12);
+    expect(canvas.nodes[0].y).toBe(34);
+  });
+
+  it('createEdge falls back to a default style for an unknown relationship', () => {
+    const edge = manager.createEdge('n1', 'n2', 'no-such-relationship');
+    expect(edge.color).toBe('gray');
+    expect(edge.fromSide).toBe('right');
+    expect(edge.toSide).toBe('left');
+  });
+
   it('auto-layout produces no overlapping nodes (invariant)', async () => {
     const fs = new InMemoryFileSystem({
       '/vault/projects/main.canvas': JSON.stringify({

@@ -154,4 +154,103 @@ describe('I. derivation on custom / edge schemas', () => {
     // still contributes to the allow-list (validation is pair-driven, not positioning-driven)
     expect(buildValidationAllowList(s)).toEqual({ a: { f: ['b'] }, b: { r: ['a'] } });
   });
+
+  // D2 (derivation half of the crossWs guarantee — see the REGRESSION-LOCK block below).
+  // Documents that crossWsPositioning is a *derivation-only* flag: when the relationship does
+  // NOT set crossWsPositioning, NO derived rule carries the property at all (absence is
+  // preserved, not defaulted to false). The engine does not consume this flag for layout
+  // (positioningV4 only assigns it onto ProcessedRelationship and never reads it back), so a
+  // layout-level cross-ws-exclusion test is intentionally NOT written here — it would assert a
+  // no-op. If the refactor wires the flag into layout, add the layout test THEN.
+  it('crossWsPositioning is absent (not false) on rules whose relationship omits it', () => {
+    const s = { ...base, relationships: [{
+      name: 'dep', label: 'Dep',
+      pairs: [{ from: 'story', to: 'story', forward: 'depends_on', reverse: 'blocks' }],
+      cardinality: { forward: 'many', reverse: 'many' }, canvas: {}, graph: {},
+      positioning: { role: 'sequencing', forwardDirection: 'after', emitReverseRule: true },
+    }] } as unknown as Schema;
+    const rules = buildRelationshipRules(s).filter((r) => r.field !== 'workstream');
+    for (const r of rules) {
+      expect('crossWsPositioning' in r).toBe(false);
+    }
+  });
+});
+
+// ===========================================================================
+// REGRESSION-LOCK (a) — pin buildRelationshipRules(DEFAULT_SCHEMA) as a whole.
+//
+// The per-rule assertions above catch individual regressions but let a refactor
+// add / drop / duplicate a rule and still pass. These lock the whole output: the
+// exact count, a full order-insensitive set-equality snapshot, priority provenance,
+// and no-reverse / parent-rule suppression at the count level. This is the primary
+// derivation safety net for the upcoming unification refactor.
+// ===========================================================================
+describe('I. REGRESSION-LOCK: buildRelationshipRules(DEFAULT_SCHEMA) whole-output', () => {
+  const rules = buildRelationshipRules(DEFAULT_SCHEMA);
+
+  // Stable, order-insensitive key. Array targetType is sorted+joined so aggregation order
+  // (e.g. implemented_by → [milestone, story]) doesn't matter. undefined priority /
+  // crossWsPositioning collapse to '' so their ABSENCE is part of the locked identity.
+  const key = (r: DerivedRelationshipRule) => {
+    const target = Array.isArray(r.targetType) ? [...r.targetType].sort().join(',') : r.targetType;
+    const pri = r.priority === undefined ? '' : String(r.priority);
+    const xws = r.crossWsPositioning === undefined ? '' : String(r.crossWsPositioning);
+    return [r.sourceType, r.field, target, r.action, r.direction, pri, xws].join('|');
+  };
+
+  // A1 — exact rule count. Catches any added / dropped / duplicated rule.
+  it('A1: derives exactly 18 rules', () => {
+    expect(rules).toHaveLength(18);
+  });
+
+  // A2 — full ruleset snapshot as order-insensitive set equality. Locks the containment vs
+  // sequencing split, every parent mirror (10,11,13,15), every child rule + its priority,
+  // target-type aggregation on implemented_by, the crossWs flags, and that NO extra rule leaks in.
+  it('A2: equals the exact expected 18-rule set', () => {
+    const expected = [
+      'milestone|workstream|workstream|containment|child||',
+      'task|parent|story|containment|child||',
+      'story|parent|milestone|containment|child||',
+      'milestone|depends_on|milestone|sequencing|after||true',
+      'milestone|blocks|milestone|sequencing|before||true',
+      'story|depends_on|story|sequencing|after||true',
+      'story|blocks|story|sequencing|before||true',
+      'task|depends_on|task|sequencing|after||false',
+      'task|blocks|task|sequencing|before||false',
+      'milestone|implements|feature|containment|parent||',
+      'story|implements|feature|containment|parent||',
+      'feature|implemented_by|milestone,story|containment|child|1|',
+      'feature|documented_by|document|containment|parent||',
+      'document|documents|feature|containment|child|1|',
+      'document|decided_by|decision|containment|parent||',
+      'decision|affects|document|containment|child|1|',
+      'decision|supersedes|decision|sequencing|before||',
+      'document|previous_version|document|sequencing|after||',
+    ];
+    const actual = rules.map(key);
+    // no duplicates (set size === array length) and exact set-equality
+    expect(new Set(actual).size).toBe(actual.length);
+    expect(new Set(actual)).toEqual(new Set(expected));
+  });
+
+  // A3 — priority provenance. hierarchy-derived child rules carry NO priority (schema omits it);
+  // implementation / documentation / decision-impact child rules carry priority 1 (schema sets it).
+  it('A3: priority flows from schema positioning.priority', () => {
+    expect(rule(rules, 'task', 'parent')!.priority).toBeUndefined();   // hierarchy
+    expect(rule(rules, 'story', 'parent')!.priority).toBeUndefined();  // hierarchy
+    expect(rule(rules, 'feature', 'implemented_by')!.priority).toBe(1); // implementation
+    expect(rule(rules, 'document', 'documents')!.priority).toBe(1);     // documentation
+    expect(rule(rules, 'decision', 'affects')!.priority).toBe(1);       // decision-impact
+  });
+
+  // A4 — no-reverse / parent-rule suppression at the COUNT level.
+  it('A4: emitReverseRule:false suppresses reverse rules; emitParentRule emits exactly one mirror', () => {
+    // supersession / versioning set emitReverseRule:false → no reverse rule of any kind.
+    expect(rule(rules, 'decision', 'superseded_by')).toBeUndefined();
+    expect(rule(rules, 'document', 'next_version')).toBeUndefined();
+    // exactly one parent mirror per emitParentRule relationship (not zero, not duplicated).
+    expect(rules.filter((r) => r.sourceType === 'document' && r.field === 'decided_by')).toHaveLength(1);
+    expect(rules.filter((r) => r.sourceType === 'feature' && r.field === 'documented_by')).toHaveLength(1);
+    expect(rules.filter((r) => r.field === 'implements' && r.direction === 'parent')).toHaveLength(2); // milestone + story
+  });
 });

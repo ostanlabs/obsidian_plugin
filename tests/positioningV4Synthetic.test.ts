@@ -154,3 +154,107 @@ describe("PositioningEngineV4 - synthetic inputs", () => {
 		expect(res.positions.size).toBeGreaterThan(0);
 	});
 });
+
+// ============================================================================
+// REGRESSION-LOCK (c) — deep-nesting stays at 0 unpositioned (count invariant).
+//
+// The two deep-chain tests above assert every node in a SINGLE chain gets a position. These add
+// a whole-graph COUNT invariant (positions.size === entities.length) over a multi-branch graph
+// that exercises the real bug shape — a document documenting TWO features and a decision
+// affecting TWO documents (⇒ multi-parent deferral + cascade) plus a cross-workstream deferral —
+// so a partial-drop regression is caught even if specific ids shift. This is the CI-safe
+// replacement for the live-vault ≥0.97 ratio check, and directly locks
+// completeContainmentPositioning (positioningV4.ts:3434).
+// ============================================================================
+describe("PositioningEngineV4 - deep-nesting invariant (regression-lock c)", () => {
+	// A multi-branch graph: two milestones in two workstreams, a task dependency chain, a feature
+	// implemented by a story, an orphan-top feature documented by two documents, documents that
+	// document BOTH features (multi-parent ⇒ deferred), a versioning edge, and decisions affecting
+	// BOTH documents / superseding each other (multi-parent cascade + sequencing).
+	const buildGraph = (): EntityData[] => [
+		ent({ entityId: "M-1", type: "milestone", workstream: "engineering" }),
+		ent({ entityId: "M-2", type: "milestone", workstream: "business" }),
+		ent({ entityId: "S-1", type: "story", parent: "M-1", implements: ["F-1"] }),
+		ent({ entityId: "S-2", type: "story", parent: "M-2", implements: ["F-2"] }),
+		ent({ entityId: "T-1", type: "task", parent: "S-1", dependsOn: ["T-2"] }),
+		ent({ entityId: "T-2", type: "task", parent: "S-1" }),
+		ent({ entityId: "F-1", type: "feature", implementedBy: ["S-1"] }),
+		// F-2 is an orphan-top feature (no implements) documented by two documents.
+		ent({ entityId: "F-2", type: "feature", documentedBy: ["DOC-1", "DOC-2"] } as Partial<EntityData> as any),
+		// Documents documenting BOTH features ⇒ multiple containment parents ⇒ deferred.
+		ent({ entityId: "DOC-1", type: "document", documents: ["F-1", "F-2"] }),
+		ent({ entityId: "DOC-2", type: "document", documents: ["F-1", "F-2"], previousVersion: "DOC-1" }),
+		// Decisions affecting BOTH documents ⇒ multiple parents ⇒ cascade; DEC-2 supersedes DEC-1.
+		ent({ entityId: "DEC-1", type: "decision", affects: ["DOC-1", "DOC-2"] }),
+		ent({ entityId: "DEC-2", type: "decision", affects: ["DOC-1"], supersedes: "DEC-1" }),
+	];
+
+	it("C1: positions EVERY node in a multi-branch deep graph (0 unpositioned, no cycle errors)", () => {
+		const entities = buildGraph();
+		const res = new PositioningEngineV4().calculatePositions(entities);
+
+		// 0 unpositioned: every entity got a position.
+		expect(res.positions.size).toBe(entities.length);
+		const missing = entities.filter((e) => !res.positions.has(e.nodeId)).map((e) => e.entityId);
+		expect(missing).toEqual([]);
+
+		// No circular-dependency errors surfaced.
+		expect(res.errors.filter((e) => /circular/i.test(e))).toEqual([]);
+	});
+
+	it("C2: is idempotent on the deep graph (same engine, two runs → identical positions)", () => {
+		const engine = new PositioningEngineV4();
+		const a = engine.calculatePositions(buildGraph());
+		const b = engine.calculatePositions(buildGraph());
+
+		expect(b.positions.size).toBe(a.positions.size);
+		for (const [nodeId, position] of a.positions) {
+			expect(b.positions.get(nodeId)).toEqual(position);
+		}
+		expect(b.errors).toEqual(a.errors);
+	});
+});
+
+// ============================================================================
+// REGRESSION-LOCK (G1) — getFieldValue snake→camel field-name bridge.
+//
+// The engine reads schema rule field names (snake_case) off the EntityData shape (camelCase) via
+// a HARDCODED map in getFieldValue (positioningV4.ts:552-556: depends_on→dependsOn,
+// implemented_by→implementedBy, previous_version→previousVersion). Any schema field whose
+// camelCase form the bridge doesn't map would silently read `undefined` and drop the edge from
+// positioning. These lock that the three bridged fields ARE read correctly by the engine — the
+// most likely silent-break point if the refactor renames fields.
+// ============================================================================
+describe("PositioningEngineV4 - field-name bridge (regression-lock G1)", () => {
+	it("reads `dependsOn` for the depends_on rule (sequencing places dependent to the right)", () => {
+		const res = new PositioningEngineV4().calculatePositions([
+			ent({ entityId: "M-1", type: "milestone" }),
+			ent({ entityId: "S-1", type: "story", parent: "M-1", dependsOn: ["S-2"] }),
+			ent({ entityId: "S-2", type: "story", parent: "M-1" }),
+		]);
+		// depends_on ⇒ 'after' ⇒ the dependent (S-1) sits to the RIGHT of what it depends on (S-2).
+		expect(res.positions.get("node-S-1")!.x).toBeGreaterThan(res.positions.get("node-S-2")!.x);
+	});
+
+	it("reads `previousVersion` for the previous_version rule (both versions positioned)", () => {
+		const res = new PositioningEngineV4().calculatePositions([
+			ent({ entityId: "DOC-1", type: "document" }),
+			ent({ entityId: "DOC-2", type: "document", previousVersion: "DOC-1" }),
+		]);
+		// If the bridge failed, previous_version would read undefined and DOC-2 would not be
+		// sequenced relative to DOC-1; both must still be positioned.
+		expect(res.positions.get("node-DOC-1")).toBeDefined();
+		expect(res.positions.get("node-DOC-2")).toBeDefined();
+	});
+
+	it("reads `implementedBy` for the implemented_by rule (feature contained via its story)", () => {
+		const res = new PositioningEngineV4().calculatePositions([
+			ent({ entityId: "M-1", type: "milestone" }),
+			ent({ entityId: "S-1", type: "story", parent: "M-1" }),
+			ent({ entityId: "F-1", type: "feature", implementedBy: ["S-1"] }),
+		]);
+		// implemented_by ⇒ feature is a child of the story ⇒ placed up-and-left of it.
+		expect(res.positions.get("node-F-1")!.x).toBeLessThan(res.positions.get("node-S-1")!.x);
+		expect(res.positions.get("node-F-1")!.y).toBeLessThan(res.positions.get("node-S-1")!.y);
+	});
+});

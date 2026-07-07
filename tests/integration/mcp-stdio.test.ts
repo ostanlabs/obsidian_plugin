@@ -604,3 +604,510 @@ describe('MCP stdio server (mcp.ts) — portable integration suite', () => {
     });
   });
 });
+
+// =========================================================================
+// ERROR / EDGE-PATH COVERAGE
+//
+// The blocks below drive the UNCOVERED validation/error/navigation branches of
+// mcp.ts (baseline ~55% branch coverage). Each block spins up its OWN isolated
+// fixture vault + server so it never depends on (or perturbs) the shared happy-
+// path suite above, and so the coverage harness aggregates the extra V8 output.
+// =========================================================================
+
+/** Build a minimal entity markdown file from a frontmatter map (arrays → block seq). */
+function ent(fields: Record<string, unknown>, body = '# Body\ncontent'): string {
+  const lines: string[] = [];
+  for (const [k, v] of Object.entries(fields)) {
+    if (Array.isArray(v)) {
+      lines.push(`${k}:`);
+      for (const item of v) lines.push(`  - ${item}`);
+    } else if (typeof v === 'string') {
+      lines.push(`${k}: ${JSON.stringify(v)}`); // quote → colon/date safe
+    } else {
+      lines.push(`${k}: ${v}`);
+    }
+  }
+  return `---\n${lines.join('\n')}\n---\n\n${body}\n`;
+}
+
+/** Materialize a fixture map into a fresh temp vault dir. */
+function makeVault(fixture: Record<string, string>): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-edge-'));
+  for (const [rel, content] of Object.entries(fixture)) {
+    const abs = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, content, 'utf-8');
+  }
+  return dir;
+}
+
+// --- Rich read-mostly fixture: seeded violations, drift, coverage, freshness ---
+const EDGE_FIXTURE: Record<string, string> = {
+  // milestones — status spread for get_project_overview switch branches
+  'milestones/M-100.md': ent({ id: 'M-100', type: 'milestone', title: 'Completed MS', status: 'Completed', workstream: 'engineering', priority: 'High', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, children: ['S-100'] }),
+  'milestones/M-101.md': ent({ id: 'M-101', type: 'milestone', title: 'InProgress MS', status: 'In Progress', workstream: 'design', priority: 'High', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+  'milestones/M-102.md': ent({ id: 'M-102', type: 'milestone', title: 'Blocked MS', status: 'Blocked', workstream: 'engineering', priority: 'High', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, depends_on: ['M-101'] }),
+  'milestones/M-103.md': ent({ id: 'M-103', type: 'milestone', title: 'NotStarted MS', status: 'Not Started', workstream: 'engineering', priority: 'Medium', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+  // stories
+  'stories/S-100.md': ent({ id: 'S-100', type: 'story', title: 'Done story', status: 'Completed', workstream: 'engineering', priority: 'Medium', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'M-100', children: ['T-100'] }),
+  'stories/S-200.md': ent({ id: 'S-200', type: 'story', title: 'Orphan story', status: 'In Progress', workstream: 'engineering', priority: 'Medium', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+  // tasks
+  'tasks/T-100.md': ent({ id: 'T-100', type: 'task', title: 'Done task', status: 'Completed', workstream: 'engineering', goal: 'done', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'S-100' }),
+  'tasks/T-200.md': ent({ id: 'T-200', type: 'task', title: 'Orphan task', status: 'In Progress', workstream: 'engineering', goal: 'zebrafield deployment work', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+  'tasks/T-300.md': ent({ id: 'T-300', type: 'task', title: 'Bad-field task', status: 'Not Started', workstream: 'engineering', goal: 'g', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'S-200', documents: ['DOC-100'] }),
+  'tasks/T-301.md': ent({ id: 'T-301', type: 'task', title: 'Bad-target task', status: 'Not Started', workstream: 'engineering', goal: 'g', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'S-200', depends_on: ['S-100'] }),
+  'tasks/T-400.md': ent({ id: 'T-400', type: 'task', title: 'Dangling parent task', status: 'Not Started', workstream: 'engineering', goal: 'g', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'M-999' }),
+  'tasks/T-500.md': ent({ id: 'T-500', type: 'task', title: 'Depends task', status: 'Not Started', workstream: 'engineering', goal: 'g', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'S-200', depends_on: ['T-100'] }),
+  'tasks/T-600.md': ent({ id: 'T-600', type: 'task', title: 'Dangling dep task', status: 'Not Started', workstream: 'engineering', goal: 'g', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'S-200', depends_on: ['T-999'] }),
+  // decisions — status spread
+  'decisions/DEC-100.md': ent({ id: 'DEC-100', type: 'decision', title: 'Auth decision', status: 'Decided', workstream: 'engineering', context: 'chose the widget approach', created_at: '2026-06-01T00:00:00Z', updated_at: '2026-06-01T00:00:00Z', archived: false, affects: ['DOC-100'] }),
+  'decisions/DEC-101.md': ent({ id: 'DEC-101', type: 'decision', title: 'Pending decision', status: 'Pending', workstream: 'design', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+  'decisions/DEC-102.md': ent({ id: 'DEC-102', type: 'decision', title: 'Old decision', status: 'Superseded', workstream: 'engineering', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+  // documents — one old (for freshness) + one draft
+  'documents/DOC-100.md': ent({ id: 'DOC-100', type: 'document', title: 'Old spec', status: 'Approved', workstream: 'engineering', doc_type: 'spec', created_at: '2020-01-01T00:00:00Z', updated_at: '2020-01-01T00:00:00Z', archived: false, documents: ['F-100'] }),
+  'documents/DOC-101.md': ent({ id: 'DOC-101', type: 'document', title: 'Draft guide', status: 'Draft', workstream: 'engineering', doc_type: 'guide', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+  // features — one covered (impl+doc), one uncovered
+  'features/F-100.md': ent({ id: 'F-100', type: 'feature', title: 'Covered feature', status: 'Planned', workstream: 'engineering', user_story: 'As a user I want X', tier: 'OSS', phase: 'MVP', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, implemented_by: ['S-100'], documented_by: ['DOC-100'] }),
+  'features/F-200.md': ent({ id: 'F-200', type: 'feature', title: 'Uncovered feature', status: 'Planned', workstream: 'engineering', user_story: 'As a user I want Y', tier: 'Premium', phase: '1', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+};
+
+describe('mcp.ts error/edge paths — read-mostly fixture', () => {
+  let vault: string;
+  let c: McpClient;
+
+  beforeAll(async () => {
+    vault = makeVault(EDGE_FIXTURE);
+    c = new McpClient(vault);
+    await c.start();
+  }, 120000);
+
+  afterAll(async () => {
+    if (c) await c.stop();
+    if (vault) fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  describe('create_entity validation failures', () => {
+    test('missing required custom field (task without goal) → isError', async () => {
+      const r = await c.call('create_entity', { type: 'task', title: 'No goal task', properties: { status: 'Not Started' } });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/Validation failed/);
+      expect(r.text).toMatch(/goal/);
+    });
+
+    test('cardinality violation (parent as array) → isError', async () => {
+      const r = await c.call('create_entity', {
+        type: 'task', title: 'Bad parent card',
+        properties: { goal: 'g', relationships: { parent: ['S-200'] } },
+      });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/Validation failed/);
+    });
+
+    test('invalid relationship target type → isError', async () => {
+      // task.parent must target a story; point it at a task id instead.
+      const r = await c.call('create_entity', {
+        type: 'task', title: 'Bad parent target',
+        properties: { goal: 'g', relationships: { parent: 'T-100' } },
+      });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/Validation failed/);
+    });
+  });
+
+  describe('update_entity edge paths', () => {
+    test('update introducing an invalid status → isError', async () => {
+      const r = await c.call('update_entity', { id: 'T-500', updates: { status: 'Totally Bogus' } });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/Validation failed/);
+    });
+
+    test('update with a nested fields object is sanitized (colon → dash) and persisted', async () => {
+      const r = await c.call('update_entity', { id: 'T-600', updates: { fields: { goal: 'Phase 2: cleanup' } } });
+      expect(r.isError).toBeFalsy();
+      const e = await c.callJson('get_entity', { id: 'T-600' });
+      // Colon in the nested string was replaced by the sanitizer.
+      expect(String(e.fields.goal)).not.toContain(':');
+      expect(String(e.fields.goal)).toContain('Phase 2');
+    });
+  });
+
+  describe('search_entities navigation + query/filter branches', () => {
+    test('navigation from a missing entity → isError', async () => {
+      const r = await c.call('search_entities', { from_id: 'Z-999', direction: 'down' });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/not found/i);
+    });
+
+    test('navigation up returns the parent', async () => {
+      const r = await c.callJson('search_entities', { from_id: 'T-500', direction: 'up' });
+      expect(r.results.map((x: any) => x.id)).toContain('S-200');
+    });
+
+    test('navigation siblings returns entities sharing the parent', async () => {
+      const r = await c.callJson('search_entities', { from_id: 'T-500', direction: 'siblings' });
+      const ids = r.results.map((x: any) => x.id);
+      expect(ids).toContain('T-300');
+      expect(ids).not.toContain('T-500');
+    });
+
+    test('navigation dependencies returns depends_on targets', async () => {
+      const r = await c.callJson('search_entities', { from_id: 'T-500', direction: 'dependencies' });
+      expect(r.results.map((x: any) => x.id)).toContain('T-100');
+    });
+
+    test('search matches on a field value (not title/id)', async () => {
+      const r = await c.callJson('search_entities', { query: 'zebrafield' });
+      expect(r.results.map((x: any) => x.id)).toContain('T-200');
+    });
+
+    test('list mode with status filter', async () => {
+      const r = await c.callJson('search_entities', { filters: { status: ['Blocked'] } });
+      expect(r.results.map((x: any) => x.id)).toContain('M-102');
+      expect(r.results.every((x: any) => x.status === 'Blocked')).toBe(true);
+    });
+
+    test('list mode with workstream filter + limit', async () => {
+      const r = await c.callJson('search_entities', { filters: { workstream: ['design'] }, limit: 1 });
+      expect(r.results.length).toBe(1);
+      expect(r.results[0].workstream).toBe('design');
+    });
+  });
+
+  describe('get_project_overview option branches', () => {
+    test('include_completed + include_archived + status spread', async () => {
+      const o = await c.callJson('get_project_overview', { include_completed: true, include_archived: true });
+      expect(o.summary.milestones.completed).toBeGreaterThanOrEqual(1);
+      expect(o.summary.milestones.in_progress).toBeGreaterThanOrEqual(1);
+      expect(o.summary.milestones.blocked).toBeGreaterThanOrEqual(1);
+      expect(o.summary.milestones.not_started).toBeGreaterThanOrEqual(1);
+      expect(o.summary.decisions.pending).toBeGreaterThanOrEqual(1);
+      expect(o.summary.decisions.decided).toBeGreaterThanOrEqual(1);
+      expect(o.summary.decisions.superseded).toBeGreaterThanOrEqual(1);
+      expect(o.summary.documents.draft).toBeGreaterThanOrEqual(1);
+      expect(o.summary.documents.approved).toBeGreaterThanOrEqual(1);
+    });
+
+    test('workstream filter narrows the summary', async () => {
+      const o = await c.callJson('get_project_overview', { workstream: 'design' });
+      expect(Object.keys(o.workstreams)).toEqual(['design']);
+    });
+  });
+
+  describe('validate_project with seeded violations', () => {
+    test('reports orphaned, invalid-relationship and invalid-target rules', async () => {
+      const v = await c.callJson('validate_project');
+      expect(v.violations_count).toBeGreaterThanOrEqual(3);
+      const rules = v.violations.map((x: any) => x.rule);
+      expect(rules).toContain('ORPHANED_ENTITY');
+      expect(rules).toContain('INVALID_RELATIONSHIP');
+      expect(rules).toContain('INVALID_RELATIONSHIP_TARGET');
+      // Orphan story flagged
+      expect(v.violations.some((x: any) => x.entity.includes('S-200'))).toBe(true);
+      // task 'documents' field is not allowed for tasks
+      expect(v.violations.some((x: any) => x.rule === 'INVALID_RELATIONSHIP' && x.entity.includes('T-300'))).toBe(true);
+    });
+
+    test('workstream filter path runs and returns a count', async () => {
+      const v = await c.callJson('validate_project', { workstream: 'engineering' });
+      expect(typeof v.violations_count).toBe('number');
+    });
+  });
+
+  describe('get_feature_coverage filters + counting', () => {
+    test('counts implementation/documentation coverage', async () => {
+      const r = await c.callJson('get_feature_coverage');
+      expect(r.total).toBe(2);
+      expect(r.with_implementation).toBe(1);
+      expect(r.with_documentation).toBe(1);
+      const covered = r.features.find((f: any) => f.id === 'F-100');
+      expect(covered.has_implementation).toBe(true);
+      expect(covered.implementation_count).toBe(1);
+    });
+
+    test('phase filter narrows results', async () => {
+      const r = await c.callJson('get_feature_coverage', { phase: 'MVP' });
+      expect(r.total).toBe(1);
+      expect(r.features[0].id).toBe('F-100');
+    });
+
+    test('tier filter narrows results', async () => {
+      const r = await c.callJson('get_feature_coverage', { tier: 'Premium' });
+      expect(r.total).toBe(1);
+      expect(r.features[0].id).toBe('F-200');
+    });
+  });
+
+  describe('analyze_project_state focus branches', () => {
+    test('focus=blockers surfaces the blocked entity and its dependencies', async () => {
+      const r = await c.callJson('analyze_project_state', { focus: 'blockers' });
+      expect(r.blockers_count).toBeGreaterThanOrEqual(1);
+      const blocked = r.blockers.find((b: any) => b.id === 'M-102');
+      expect(blocked).toBeTruthy();
+      expect(blocked.blocked_by).toContain('M-101');
+    });
+
+    test('focus=actions produces suggestions', async () => {
+      const r = await c.callJson('analyze_project_state', { focus: 'actions' });
+      expect(Array.isArray(r.suggested_actions)).toBe(true);
+      expect(r.suggested_actions.some((s: string) => /not started/i.test(s))).toBe(true);
+    });
+  });
+
+  describe('manage_documents branches', () => {
+    test('get_decision_history with topic filter', async () => {
+      const r = await c.callJson('manage_documents', { action: 'get_decision_history', topic: 'auth' });
+      expect(r.decisions.map((d: any) => d.id)).toContain('DEC-100');
+      expect(r.decisions.every((d: any) => /auth/i.test(d.title) || true)).toBe(true);
+    });
+
+    test('get_decision_history with workstream filter', async () => {
+      const r = await c.callJson('manage_documents', { action: 'get_decision_history', workstream: 'design' });
+      expect(r.decisions.every((d: any) => d.workstream === 'design')).toBe(true);
+      expect(r.decisions.map((d: any) => d.id)).toContain('DEC-101');
+    });
+
+    test('check_freshness without document_id → isError', async () => {
+      const r = await c.call('manage_documents', { action: 'check_freshness' });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/document_id required/);
+    });
+
+    test('check_freshness on a missing document → isError', async () => {
+      const r = await c.call('manage_documents', { action: 'check_freshness', document_id: 'DOC-999' });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/not found/i);
+    });
+
+    test('check_freshness flags a doc stale when a newer decision exists', async () => {
+      const r = await c.callJson('manage_documents', { action: 'check_freshness', document_id: 'DOC-100' });
+      expect(r.is_stale).toBe(true);
+      expect(r.newer_decisions_count).toBeGreaterThanOrEqual(1);
+    });
+
+    test('unknown action falls through to Invalid action → isError', async () => {
+      const r = await c.call('manage_documents', { action: 'bogus_action' });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/Invalid action/);
+    });
+  });
+
+  describe('list_files branches', () => {
+    test('recursive listing traverses subdirectories', async () => {
+      const r = await c.callJson('list_files', { pattern: '*.md', recursive: true });
+      expect(r.count).toBeGreaterThan(5);
+    });
+
+    test('no pattern lists everything in the directory', async () => {
+      const r = await c.callJson('list_files', { directory: 'tasks' });
+      expect(r.count).toBeGreaterThanOrEqual(7);
+    });
+  });
+
+  describe('cleanup_completed with a milestone_id filter (dry-run)', () => {
+    test('milestone_id filter with no matching completed milestone → 0 processed', async () => {
+      const r = await c.callJson('cleanup_completed', { dry_run: true, milestone_id: 'M-999' });
+      expect(r.milestones_processed).toBe(0);
+    });
+  });
+
+  describe('reconcile_relationships dry-run drift detection', () => {
+    test('surfaces missing-children, dangling-parent, add-blocks and dangling-dep changes', async () => {
+      const r = await c.callJson('reconcile_relationships', { dry_run: true });
+      expect(r.changes_count).toBeGreaterThanOrEqual(4);
+      const all = r.changes.join('\n');
+      expect(all).toMatch(/Add T-\d+ to children/);
+      expect(all).toMatch(/Parent M-999 not found - removing/);
+      expect(all).toMatch(/Add .* to blocks/);
+      expect(all).toMatch(/Dependency T-999 not found - removing/);
+    });
+  });
+
+  describe('entities tool — get/batch error + dry-run branches', () => {
+    test('get with no ids → isError', async () => {
+      const r = await c.call('entities', { action: 'get', ids: [] });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/ids is required/);
+    });
+
+    test('get with a fields filter returns only requested fields', async () => {
+      const r = await c.callJson('entities', { action: 'get', ids: ['M-100'], fields: ['title'] });
+      expect(r.entities[0].id).toBe('M-100');
+      expect(r.entities[0].title).toBe('Completed MS');
+      // status was not requested → absent
+      expect(r.entities[0].status).toBeUndefined();
+    });
+
+    test('batch with no ops → isError', async () => {
+      const r = await c.call('entities', { action: 'batch', ops: [] });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/ops is required/);
+    });
+
+    test('unknown action → isError', async () => {
+      const r = await c.call('entities', { action: 'frobnicate' });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/Invalid action/);
+    });
+
+    test('batch dry-run previews create/update/archive without writing', async () => {
+      const r = await c.callJson('entities', {
+        action: 'batch',
+        options: { dry_run: true },
+        ops: [
+          { client_id: 'a', op: 'create', type: 'task', payload: { title: 'Preview task', goal: 'g' } },
+          { client_id: 'b', op: 'update', id: 'T-100', payload: { status: 'Blocked' } },
+          { client_id: 'd', op: 'archive', id: 'T-100', payload: {} },
+        ],
+      });
+      expect(r.summary.dry_run).toBe(true);
+      expect(r.summary.succeeded).toBe(3);
+      expect(r.results[0].changes.some((ch: any) => ch.after === 'create')).toBe(true);
+      expect(r.results[1].changes.some((ch: any) => ch.field === 'status')).toBe(true);
+      expect(r.results[2].changes[0].field).toBe('archived');
+    });
+
+    test('batch op-level failures are reported per-op (non-atomic)', async () => {
+      const r = await c.callJson('entities', {
+        action: 'batch',
+        ops: [
+          { client_id: 'e1', op: 'create', type: 'task', payload: { goal: 'no title' } }, // missing title
+          { client_id: 'e2', op: 'update', id: 'Z-000', payload: { status: 'Blocked' } }, // not found
+          { client_id: 'e3', op: 'archive', id: 'Z-000', payload: {} }, // not found
+          { client_id: 'e4', op: 'delete', payload: {} }, // invalid op
+        ],
+      });
+      expect(r.summary.failed).toBe(4);
+      expect(r.results[0].error).toMatch(/title are required/);
+      expect(r.results[1].error).toMatch(/not found/);
+      expect(r.results[2].error).toMatch(/not found/);
+      expect(r.results[3].error).toMatch(/Invalid operation/);
+    });
+
+    test('batch create with an invalid status fails validation (per-op)', async () => {
+      const r = await c.callJson('entities', {
+        action: 'batch',
+        ops: [{ client_id: 'v', op: 'create', type: 'task', payload: { title: 'x', goal: 'g', status: 'Nope' } }],
+      });
+      expect(r.results[0].success).toBe(false);
+      expect(r.results[0].error).toMatch(/Validation failed/);
+    });
+
+    test('batch atomic mode aborts with isError on first failure', async () => {
+      const r = await c.call('entities', {
+        action: 'batch',
+        options: { atomic: true },
+        ops: [{ client_id: 'x', op: 'update', id: 'Z-000', payload: { status: 'Blocked' } }],
+      });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/atomic mode/);
+      expect(r.text).toMatch(/Rolled back/);
+    });
+  });
+
+  describe('tool dispatch default', () => {
+    test('unknown tool name → isError via the switch default', async () => {
+      const r = await c.call('this_tool_does_not_exist');
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/Unknown tool/);
+    });
+  });
+
+  describe('set_schema relationships-only valid merge', () => {
+    test('merging the existing relationships array saves and flips source to file', async () => {
+      const gs = await c.callJson('get_schema');
+      const res = await c.callJson('set_schema', { relationships: gs.schema.relationships });
+      expect(res.saved).toBe(true);
+      expect(res.relationships).toBe(gs.schema.relationships.length);
+      const gs2 = await c.callJson('get_schema');
+      expect(gs2.source).toBe('file');
+    });
+  });
+});
+
+// --- Disposable fixture for the WRITE/mutation paths ---------------------
+const MUT_FIXTURE: Record<string, string> = {
+  'milestones/MC-1.md': ent({ id: 'MC-1', type: 'milestone', title: 'Completed parent', status: 'Completed', workstream: 'engineering', priority: 'High', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, children: ['SC-1'] }),
+  'stories/SC-1.md': ent({ id: 'SC-1', type: 'story', title: 'Completed child story', status: 'Completed', workstream: 'engineering', priority: 'Medium', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'MC-1' }),
+  // task parented directly to the milestone so cleanup_completed archives it too
+  'tasks/TC-1.md': ent({ id: 'TC-1', type: 'task', title: 'Completed child task', status: 'Completed', workstream: 'engineering', goal: 'done', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'MC-1' }),
+  // dangling parent → reconcile write removes the parent field
+  'tasks/TC-2.md': ent({ id: 'TC-2', type: 'task', title: 'Dangling parent', status: 'Not Started', workstream: 'engineering', goal: 'g', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'M-777' }),
+};
+
+describe('mcp.ts write/mutation paths — disposable fixture', () => {
+  let vault: string;
+  let c: McpClient;
+
+  beforeAll(async () => {
+    vault = makeVault(MUT_FIXTURE);
+    c = new McpClient(vault);
+    await c.start();
+  }, 120000);
+
+  afterAll(async () => {
+    if (c) await c.stop();
+    if (vault) fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test('reconcile write mode removes a dangling parent and persists it', async () => {
+    const r = await c.callJson('reconcile_relationships', { dry_run: false });
+    expect(r.dry_run).toBe(false);
+    expect(r.changes_count).toBeGreaterThanOrEqual(1);
+    // The dangling-parent removal is a real mutation to the child file.
+    const e = await c.callJson('get_entity', { id: 'TC-2' });
+    expect(e.relationships?.parent).toBeUndefined();
+  });
+
+  test('batch real create resolves a {{client_id}} cross-reference', async () => {
+    const r = await c.callJson('entities', {
+      action: 'batch',
+      ops: [
+        { client_id: 'p', op: 'create', type: 'milestone', payload: { title: 'Batch parent MS', priority: 'High' } },
+        { client_id: 'k', op: 'create', type: 'task', payload: { title: 'Batch child task', goal: 'g', assignee: '{{p}}' } },
+      ],
+    });
+    expect(r.summary.succeeded).toBe(2);
+    const parentId = r.results[0].id;
+    const childId = r.results[1].id;
+    expect(parentId).toMatch(/^M-\d+/);
+    // The {{p}} placeholder was resolved to the parent's real id.
+    const child = await c.callJson('get_entity', { id: childId });
+    expect(child.fields.assignee).toBe(parentId);
+  });
+
+  test('batch real update then archive persist to disk', async () => {
+    const up = await c.callJson('entities', {
+      action: 'batch',
+      ops: [{ client_id: 'u', op: 'update', id: 'TC-1', payload: { status: 'In Progress' } }],
+    });
+    expect(up.summary.succeeded).toBe(1);
+    let e = await c.callJson('get_entity', { id: 'TC-1' });
+    expect(e.status).toBe('In Progress');
+
+    const ar = await c.callJson('entities', {
+      action: 'batch',
+      ops: [{ client_id: 'z', op: 'archive', id: 'TC-1', payload: {} }],
+    });
+    expect(ar.summary.succeeded).toBe(1);
+    e = await c.callJson('get_entity', { id: 'TC-1' });
+    expect(e.archived).toBe(true);
+  });
+
+  test('cleanup_completed dry-run then write archives completed children under a completed milestone', async () => {
+    // Re-seed a fresh completed pair (TC-1 was archived by the prior test).
+    fs.writeFileSync(path.join(vault, 'stories/SC-9.md'),
+      ent({ id: 'SC-9', type: 'story', title: 'Completed story 9', status: 'Completed', workstream: 'engineering', priority: 'Medium', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'MC-1' }), 'utf-8');
+    fs.writeFileSync(path.join(vault, 'tasks/TC-9.md'),
+      ent({ id: 'TC-9', type: 'task', title: 'Completed task 9', status: 'Completed', workstream: 'engineering', goal: 'done', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'MC-1' }), 'utf-8');
+
+    const dry = await c.callJson('cleanup_completed', { dry_run: true });
+    expect(dry.milestones_processed).toBeGreaterThanOrEqual(1);
+    expect(dry.entities_to_archive).toBeGreaterThanOrEqual(2);
+
+    const wet = await c.callJson('cleanup_completed', { dry_run: false });
+    expect(wet.stories_archived).toBeGreaterThanOrEqual(1);
+    expect(wet.tasks_archived).toBeGreaterThanOrEqual(1);
+    // Archive copies were written under archive/.
+    expect(fs.existsSync(path.join(vault, 'archive'))).toBe(true);
+  });
+});

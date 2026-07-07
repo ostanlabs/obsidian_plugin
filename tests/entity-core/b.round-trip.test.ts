@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { SchemaRegistry, EntitySerializer, EntityParser, DEFAULT_SCHEMA } from '../../src/entity-core/index.js';
+import { SchemaRegistry, EntitySerializer, EntityParser, ParseError, DEFAULT_SCHEMA } from '../../src/entity-core/index.js';
 import type { RuntimeEntity } from '../../src/entity-core/types.js';
 import { makeEntity } from './harness/entity-factory.js';
 
@@ -120,5 +120,46 @@ describe('B. Serializer ⇄ Parser round-trip', () => {
     const once = serializer.serialize(e);
     const twice = serializer.serialize(parser.parse(once, e.vault_path));
     expect(twice).toBe(once);
+  });
+});
+
+describe('B. Parser error & edge paths', () => {
+  let parser: EntityParser;
+  beforeEach(() => {
+    parser = new EntityParser(new SchemaRegistry(DEFAULT_SCHEMA));
+  });
+
+  it('ParseError carries the name and message', () => {
+    const err = new ParseError('bad');
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe('ParseError');
+    expect(err.message).toBe('bad');
+  });
+
+  it('throws when the id field is missing or not a string', () => {
+    expect(() => parser.parse('---\ntype: milestone\n---\n', 'entities/milestones/x.md' as any)).toThrow(
+      /Missing or invalid id/
+    );
+    expect(() => parser.parse('---\nid: 123\ntype: milestone\n---\n', 'entities/milestones/x.md' as any)).toThrow(
+      /Missing or invalid id/
+    );
+  });
+
+  it('throws when the type field is missing or not a string', () => {
+    expect(() => parser.parse('---\nid: M-001\n---\n', 'entities/milestones/x.md' as any)).toThrow(
+      /Missing or invalid type/
+    );
+  });
+
+  it('treats content without frontmatter as empty frontmatter (then fails id check)', () => {
+    // No leading `---` block -> extractFrontmatter returns {} -> id check throws.
+    expect(() => parser.parse('# Just a body, no frontmatter', 'notes/x.md' as any)).toThrow(
+      /Missing or invalid id/
+    );
+  });
+
+  it('throws a ParseError for malformed YAML frontmatter', () => {
+    const bad = '---\nid: M-001\ntype: milestone\n: ::bad yaml:::\n\t- broken\n---\nbody';
+    expect(() => parser.parse(bad, 'entities/milestones/x.md' as any)).toThrow(ParseError);
   });
 });
