@@ -1,4 +1,4 @@
-import { getColorForEffort, resolveEffortColor, resolveNodeColor } from "../util/nodeColor";
+import { getColorForEffort, resolveEffortColor, resolveNodeColor, applyEffortColorOverride } from "../util/nodeColor";
 
 describe("nodeColor", () => {
 	describe("getColorForEffort", () => {
@@ -48,6 +48,21 @@ describe("nodeColor", () => {
 		it("returns undefined when not in progress and effort is absent/unknown", () => {
 			expect(resolveNodeColor(undefined, false, cfg)).toBeUndefined();
 			expect(resolveNodeColor("Nope", undefined, cfg)).toBeUndefined();
+		});
+	});
+
+	describe("applyEffortColorOverride (override-only, no palette fallback)", () => {
+		const map = { Engineering: "9" };
+		it("returns the override when the effort has one", () => {
+			expect(applyEffortColorOverride("3", "Engineering", map)).toBe("9");
+		});
+		it("keeps the base colour when there is no override for the effort", () => {
+			expect(applyEffortColorOverride("3", "Design", map)).toBe("3"); // NOT palette-resolved
+			expect(applyEffortColorOverride("3", undefined, map)).toBe("3");
+			expect(applyEffortColorOverride("3", "Engineering", undefined)).toBe("3");
+		});
+		it("passes through an undefined base colour when no override applies", () => {
+			expect(applyEffortColorOverride(undefined, "Design", map)).toBeUndefined();
 		});
 	});
 });

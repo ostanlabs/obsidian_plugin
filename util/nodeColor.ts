@@ -38,6 +38,20 @@ export interface NodeColorConfig {
   effortColorMap?: Record<string, string>;
 }
 
+/**
+ * Apply an explicit per-effort colour override on top of a base colour.
+ * NOTE: override-only — no built-in palette fallback (mirrors the canvas
+ * node-creation sites where an entity already has a type-based base colour).
+ */
+export function applyEffortColorOverride(
+  baseColor: string | undefined,
+  effort: string | undefined,
+  effortColorMap?: Record<string, string>,
+): string | undefined {
+  if (effort && effortColorMap?.[effort]) return effortColorMap[effort];
+  return baseColor;
+}
+
 /** node colour: the in-progress colour while in progress, otherwise effort-based. */
 export function resolveNodeColor(
   effort: string | undefined,

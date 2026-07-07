@@ -68,7 +68,9 @@ import {
 	edgeExists,
 	findNodeByEntityId,
 } from "./util/canvas";
-import { resolveEffortColor as resolveEffortColorFn, resolveNodeColor as resolveNodeColorFn } from "./util/nodeColor";
+import { resolveEffortColor as resolveEffortColorFn, resolveNodeColor as resolveNodeColorFn, applyEffortColorOverride } from "./util/nodeColor";
+import { normalizeWorkstream } from "./util/workstream";
+import { DEFAULT_SCHEMA } from "./src/entity-core/default-schema.js";
 import { generateUniqueFilename, isPluginCreatedNote, generateEntityFilename } from "./util/fileNaming";
 import { addNodesToCanvasView, getCanvasView, hasInternalCanvasAPI, inspectCanvasAPI, addEdgesToCanvasView } from "./util/canvasView";
 import { EntityIndex, EntityIndexEntry, getEntityTypeFromId } from "./util/entityNavigator";
@@ -1249,7 +1251,8 @@ private registerCommands(): void {
 			// Extract workstream
 			const workstreamMatch = frontmatterText.match(/^workstream:\s*(.+)$/m);
 			if (workstreamMatch) {
-				const workstream = workstreamMatch[1].trim().toLowerCase();
+				// Normalise via the schema's alias map (ops→infra, eng→engineering, …)
+				const workstream = normalizeWorkstream(workstreamMatch[1], DEFAULT_SCHEMA.workstreams.normalization) ?? "";
 				el.setAttribute("data-canvas-pm-workstream", workstream);
 				applied = true;
 			}
@@ -1289,7 +1292,7 @@ private registerCommands(): void {
 
 		// Workstream
 		if (metadata.workstream) {
-			el.setAttribute("data-canvas-pm-workstream", String(metadata.workstream).toLowerCase());
+			el.setAttribute("data-canvas-pm-workstream", normalizeWorkstream(String(metadata.workstream), DEFAULT_SCHEMA.workstreams.normalization) ?? "");
 		}
 	}
 
@@ -5843,10 +5846,7 @@ private registerCommands(): void {
 					const size = nodeSizes[child.type] || { width: nodeWidth, height: nodeHeight };
 					const color = entityColors[child.type];
 
-					let nodeColor = color;
-					if (child.effort && this.settings.effortColorMap[child.effort]) {
-						nodeColor = this.settings.effortColorMap[child.effort];
-					}
+					const nodeColor = applyEffortColorOverride(color, child.effort, this.settings.effortColorMap);
 
 					const node = createNode(
 						"file",
@@ -5930,10 +5930,7 @@ private registerCommands(): void {
 					const size = nodeSizes[orphan.type] || { width: nodeWidth, height: nodeHeight };
 					const color = entityColors[orphan.type];
 
-					let nodeColor = color;
-					if (orphan.effort && this.settings.effortColorMap[orphan.effort]) {
-						nodeColor = this.settings.effortColorMap[orphan.effort];
-					}
+					const nodeColor = applyEffortColorOverride(color, orphan.effort, this.settings.effortColorMap);
 
 					const node = createNode(
 						"file",
