@@ -158,6 +158,66 @@ function main(SCHEMA) {
   const pos = {};
   let hoverNode = null;
 
+  // ── Editable positioning metadata per relationship (ri -> normalized object) ──
+  const relPos = {}, relPosDirty = {};
+  RELS.forEach(rel => { relPos[rel.ri] = normalizePos(SCHEMA.relationships[rel.ri].positioning); });
+  function normalizePos(p) {
+    p = p || {};
+    return {
+      role: p.role === 'sequencing' ? 'sequencing' : 'containment',
+      containerEnd: p.containerEnd === 'from' ? 'from' : 'to',
+      priority: (typeof p.priority === 'number') ? p.priority : undefined,
+      emitParentRule: !!p.emitParentRule,
+      forwardDirection: p.forwardDirection === 'before' ? 'before' : 'after',
+      emitReverseRule: !!p.emitReverseRule,
+      crossWsPositioning: !!p.crossWsPositioning,
+      crossWsExcludedTypes: Array.isArray(p.crossWsExcludedTypes) ? p.crossWsExcludedTypes.slice() : [],
+    };
+  }
+  // Emit only the role-relevant fields, matching the schema's positioning conventions.
+  function cleanPos(P) {
+    if (P.role === 'sequencing') {
+      const o = { role: 'sequencing', forwardDirection: P.forwardDirection };
+      if (P.emitReverseRule) o.emitReverseRule = true;
+      if (P.crossWsPositioning) o.crossWsPositioning = true;
+      if (P.crossWsExcludedTypes && P.crossWsExcludedTypes.length) o.crossWsExcludedTypes = P.crossWsExcludedTypes.slice();
+      return o;
+    }
+    const o = { role: 'containment', containerEnd: P.containerEnd };
+    if (typeof P.priority === 'number' && !isNaN(P.priority)) o.priority = P.priority;
+    if (P.emitParentRule) o.emitParentRule = true;
+    return o;
+  }
+  // Per-relationship positioning editor (role + role-conditional fields).
+  function buildPosEditor(rel) {
+    const ri = rel.ri, P = relPos[ri];
+    const box = document.createElement('div');
+    box.style.cssText = 'padding:5px 7px;margin:2px 0 7px;border-top:1px dashed #2a3038;display:flex;flex-wrap:wrap;gap:5px 10px;align-items:center';
+    let html = '<span class="kv" style="width:100%;opacity:.65">positioning</span>' +
+      `<label class="kv">role <select data-f="role"><option value="containment"${P.role === 'containment' ? ' selected' : ''}>containment</option><option value="sequencing"${P.role === 'sequencing' ? ' selected' : ''}>sequencing</option></select></label>`;
+    if (P.role === 'containment') {
+      html += `<label class="kv">container <select data-f="containerEnd"><option value="to"${P.containerEnd === 'to' ? ' selected' : ''}>to</option><option value="from"${P.containerEnd === 'from' ? ' selected' : ''}>from</option></select></label>` +
+        `<label class="kv">priority <input data-f="priority" type="number" style="width:42px" value="${P.priority == null ? '' : P.priority}"></label>` +
+        `<label class="kv"><input data-f="emitParentRule" type="checkbox"${P.emitParentRule ? ' checked' : ''}> parent rule</label>`;
+    } else {
+      html += `<label class="kv">order <select data-f="forwardDirection"><option value="after"${P.forwardDirection === 'after' ? ' selected' : ''}>after</option><option value="before"${P.forwardDirection === 'before' ? ' selected' : ''}>before</option></select></label>` +
+        `<label class="kv"><input data-f="emitReverseRule" type="checkbox"${P.emitReverseRule ? ' checked' : ''}> reverse rule</label>` +
+        `<label class="kv"><input data-f="crossWsPositioning" type="checkbox"${P.crossWsPositioning ? ' checked' : ''}> cross-ws</label>` +
+        `<label class="kv" style="width:100%">exclude <input data-f="crossWsExcludedTypes" type="text" style="width:130px" value="${esc(P.crossWsExcludedTypes.join(','))}" placeholder="task,…"></label>`;
+    }
+    box.innerHTML = html;
+    box.querySelectorAll('[data-f]').forEach(inp => inp.addEventListener('change', () => {
+      const f = inp.dataset.f; relPosDirty[ri] = true;
+      if (f === 'role') { P.role = inp.value; rel.role = inp.value; refresh(); return; }
+      if (f === 'priority') P.priority = inp.value === '' ? undefined : Number(inp.value);
+      else if (f === 'crossWsExcludedTypes') P.crossWsExcludedTypes = inp.value.split(',').map(s => s.trim()).filter(Boolean);
+      else if (inp.type === 'checkbox') P[f] = inp.checked;
+      else P[f] = inp.value;
+      updatePreview();
+    }));
+    return box;
+  }
+
   const svg = document.getElementById('svg');
   const tooltip = document.getElementById('tooltip');
   const toast = document.getElementById('toast');
@@ -196,7 +256,9 @@ function main(SCHEMA) {
         row.querySelector('input').addEventListener('change', ev => { pairOn[p.key] = ev.target.checked; refresh(); });
         box.appendChild(row);
       });
-      g.appendChild(box); rl.appendChild(g);
+      g.appendChild(box);
+      g.appendChild(buildPosEditor(rel));
+      rl.appendChild(g);
     });
     const el = document.getElementById('ent-list'); el.innerHTML = '';
     NODES.forEach(n => {
@@ -326,6 +388,8 @@ function main(SCHEMA) {
       if (keptPairs.length === 0) return;                 // drop relationships with no enabled pairs
       const relCopy = JSON.parse(JSON.stringify(rel));    // preserve every field verbatim
       relCopy.pairs = JSON.parse(JSON.stringify(keptPairs));
+      // Apply edited positioning (or re-serialize the original if it had one).
+      if (relPosDirty[ri] || SCHEMA.relationships[ri].positioning) relCopy.positioning = cleanPos(relPos[ri]);
       out.relationships.push(relCopy);
     });
     return out;
@@ -356,7 +420,7 @@ function main(SCHEMA) {
 <div class="app">
   <aside class="sidebar">
     <h1>Schema Relationship Designer</h1>
-    <p class="sub"><span id="meta"></span>. <b>Containment</b> builds the tree (where a node sits); <b>Sequencing</b> orders siblings. Toggle relationships per entity pair, then copy the resulting schema.</p>
+    <p class="sub"><span id="meta"></span>. <b>Containment</b> builds the tree (where a node sits); <b>Sequencing</b> orders siblings. Toggle relationships per entity pair <b>and edit each relationship's positioning</b>, then copy the resulting schema.</p>
     <button class="btn primary" id="copyBtn">&#128203; Copy schema (enabled pairs only)</button>
     <div class="applynote">Paste into the <code>set_schema</code> MCP tool to apply: <code>set_schema { "schema": &lt;pasted&gt; }</code>. The copied object is your full schema with only the toggled-on pairs kept.</div>
     <div class="btnrow">
