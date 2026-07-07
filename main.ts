@@ -71,6 +71,9 @@ import {
 import { resolveEffortColor as resolveEffortColorFn, resolveNodeColor as resolveNodeColorFn, applyEffortColorOverride } from "./util/nodeColor";
 import { normalizeWorkstream } from "./util/workstream";
 import { DEFAULT_SCHEMA } from "./src/entity-core/default-schema.js";
+import { normalizeStatus as normalizeStatusFn, normalizePriority as normalizePriorityFn } from "./util/normalize";
+import { buildCanvasMetadata as buildCanvasMetadataFn } from "./util/canvasMetadata";
+import { mapNotionStatusToLocal as mapNotionStatusToLocalFn, notionBlocksToMarkdown as notionBlocksToMarkdownFn, richTextToPlain as richTextToPlainFn, buildMarkdownContent as buildMarkdownContentFn } from "./util/notionMarkdown";
 import { generateUniqueFilename, isPluginCreatedNote, generateEntityFilename } from "./util/fileNaming";
 import { addNodesToCanvasView, getCanvasView, hasInternalCanvasAPI, inspectCanvasAPI, addEdgesToCanvasView } from "./util/canvasView";
 import { EntityIndex, EntityIndexEntry, getEntityTypeFromId } from "./util/entityNavigator";
@@ -3357,87 +3360,16 @@ private registerCommands(): void {
 	 * WI-1: Type-aware status normalization for Decision/Document entities
 	 */
 	private normalizeStatus(status?: string, entityType?: string): ItemStatus | import("./types").DecisionStatus | import("./types").DocumentStatus {
-		if (!status) {
-			// Default status depends on entity type
-			if (entityType === 'decision') return "Pending";
-			if (entityType === 'document') return "Draft";
-			return "Not Started";
-		}
-
-		const trimmed = status.trim();
-		const lower = trimmed.toLowerCase();
-
-		// Decision-specific statuses (preserve MCP v2 spec values)
-		if (entityType === 'decision') {
-			const decisionAllowed: import("./types").DecisionStatus[] = ["Pending", "Decided", "Superseded"];
-			if (decisionAllowed.includes(trimmed as import("./types").DecisionStatus)) {
-				return trimmed as import("./types").DecisionStatus;
-			}
-			// Map common variants
-			if (lower === 'pending' || lower === 'open') return "Pending";
-			if (lower === 'decided' || lower === 'approved' || lower === 'done') return "Decided";
-			if (lower === 'superseded' || lower === 'deprecated') return "Superseded";
-			return "Pending"; // Default for decisions
-		}
-
-		// Document-specific statuses (preserve MCP v2 spec values)
-		if (entityType === 'document') {
-			const documentAllowed: import("./types").DocumentStatus[] = ["Draft", "Review", "Approved", "Superseded"];
-			if (documentAllowed.includes(trimmed as import("./types").DocumentStatus)) {
-				return trimmed as import("./types").DocumentStatus;
-			}
-			// Map common variants
-			if (lower === 'draft') return "Draft";
-			if (lower === 'review' || lower === 'in review') return "Review";
-			if (lower === 'approved' || lower === 'done' || lower === 'published') return "Approved";
-			if (lower === 'superseded' || lower === 'deprecated' || lower === 'obsolete') return "Superseded";
-			return "Draft"; // Default for documents
-		}
-
-		// Standard task/milestone/story status mapping
-		const map: Record<string, ItemStatus> = {
-			todo: "Not Started",
-			"not started": "Not Started",
-			in_progress: "In Progress",
-			"in progress": "In Progress",
-			done: "Completed",
-			completed: "Completed",
-			blocked: "Blocked",
-		};
-
-		if (map[lower]) return map[lower];
-
-		// If already a valid ItemStatus value, return as-is
-		const allowed: ItemStatus[] = ["Not Started", "In Progress", "Completed", "Blocked"];
-		if (allowed.includes(trimmed as ItemStatus)) {
-			return trimmed as ItemStatus;
-		}
-
-		return "Not Started";
+		// Delegates to the pure util/normalize module (Phase 5 extraction).
+		return normalizeStatusFn(status, entityType);
 	}
 
 	/**
 	 * Normalize priority values to v2.1 human-readable set
 	 */
 	private normalizePriority(priority?: string): ItemPriority {
-		const map: Record<string, ItemPriority> = {
-			low: "Low",
-			medium: "Medium",
-			high: "High",
-			critical: "Critical",
-		};
-
-		if (!priority) return "Medium";
-		const trimmed = priority.trim();
-		const lower = trimmed.toLowerCase();
-		if (map[lower]) return map[lower];
-
-		const allowed: ItemPriority[] = ["Low", "Medium", "High", "Critical"];
-		if (allowed.includes(trimmed as ItemPriority)) {
-			return trimmed as ItemPriority;
-		}
-
-		return "Medium";
+		// Delegates to the pure util/normalize module (Phase 5 extraction).
+		return normalizePriorityFn(priority);
 	}
 
 	private resolveEffortColor(effort?: string): string | undefined {
@@ -3466,19 +3398,12 @@ private registerCommands(): void {
 		options?: { alias?: string },
 		effortColor?: string
 	): CanvasNode["metadata"] {
-		const metadata: CanvasNode["metadata"] = {
-			plugin: "canvas-project-manager",
-			alias: options?.alias ?? title,
-			shape: "entity",
+		// Delegates to the pure util/canvasMetadata module (Phase 5 extraction).
+		return buildCanvasMetadataFn(type, title, {
+			alias: options?.alias,
 			showId: this.settings.showIdInCanvas,
-		};
-
-		const resolvedEffortColor = effortColor ?? this.resolveEffortColor(effort);
-		if (resolvedEffortColor) {
-			metadata.effortColor = resolvedEffortColor;
-		}
-
-		return metadata;
+			effortColor: effortColor ?? this.resolveEffortColor(effort),
+		});
 	}
 
 	/**
@@ -4453,91 +4378,32 @@ private registerCommands(): void {
 	 * Map Notion status to local status
 	 */
 	private mapNotionStatusToLocal(notionStatus: string): ItemStatus {
-		const map: Record<string, ItemStatus> = {
-			"todo": "Not Started",
-			"in_progress": "In Progress",
-			"done": "Completed",
-			"blocked": "Blocked",
-		};
-		return map[notionStatus] || "Not Started";
+		// Delegates to the pure util/notionMarkdown module (Phase 5 extraction).
+		return mapNotionStatusToLocalFn(notionStatus);
 	}
 
 	/**
 	 * Convert Notion blocks to markdown
 	 */
 	private notionBlocksToMarkdown(blocks: NotionBlock[]): string {
-		const lines: string[] = [];
-
-		for (const block of blocks) {
-			switch (block.type) {
-				case "heading_1":
-					lines.push(`# ${this.richTextToPlain(block.heading_1?.rich_text || [])}`);
-					break;
-				case "heading_2":
-					lines.push(`## ${this.richTextToPlain(block.heading_2?.rich_text || [])}`);
-					break;
-				case "heading_3":
-					lines.push(`### ${this.richTextToPlain(block.heading_3?.rich_text || [])}`);
-					break;
-				case "paragraph":
-					lines.push(this.richTextToPlain(block.paragraph?.rich_text || []));
-					break;
-				case "bulleted_list_item":
-					lines.push(`- ${this.richTextToPlain(block.bulleted_list_item?.rich_text || [])}`);
-					break;
-				case "numbered_list_item":
-					lines.push(`1. ${this.richTextToPlain(block.numbered_list_item?.rich_text || [])}`);
-					break;
-				case "to_do": {
-					const checked = block.to_do?.checked ? "x" : " ";
-					lines.push(`- [${checked}] ${this.richTextToPlain(block.to_do?.rich_text || [])}`);
-					break;
-				}
-				case "divider":
-					lines.push("---");
-					break;
-				default:
-					// Skip unsupported block types
-					break;
-			}
-		}
-
-		return lines.join("\n");
+		// Delegates to the pure util/notionMarkdown module (Phase 5 extraction).
+		return notionBlocksToMarkdownFn(blocks);
 	}
 
 	/**
 	 * Convert Notion rich text to plain text
 	 */
 	private richTextToPlain(richText: NotionRichText[]): string {
-		if (!richText || !Array.isArray(richText)) return "";
-		return richText.map(rt => rt.plain_text || "").join("");
+		// Delegates to the pure util/notionMarkdown module (Phase 5 extraction).
+		return richTextToPlainFn(richText);
 	}
 
 	/**
 	 * Build markdown content from frontmatter and body
 	 */
 	private buildMarkdownContent(frontmatter: ItemFrontmatter, body: string): string {
-		const yaml = [
-			"---",
-			`type: ${frontmatter.type}`,
-			`title: "${frontmatter.title.replace(/"/g, '\\"')}"`,
-			`effort: ${frontmatter.effort}`,
-			`id: ${frontmatter.id}`,
-			`status: "${frontmatter.status}"`,
-			`priority: ${frontmatter.priority}`,
-			`inProgress: ${frontmatter.inProgress ?? false}`,
-			frontmatter.time_estimate !== undefined ? `time_estimate: ${frontmatter.time_estimate}` : null,
-			frontmatter.depends_on?.length ? `depends_on: [${frontmatter.depends_on.map(d => `"${d}"`).join(", ")}]` : null,
-			`created_by_plugin: ${frontmatter.created_by_plugin ?? true}`,
-			`created_at: ${frontmatter.created_at ?? frontmatter.created ?? ''}`,
-			`updated_at: ${frontmatter.updated_at ?? frontmatter.updated ?? ''}`,
-			`canvas_source: "${frontmatter.canvas_source}"`,
-			`vault_path: "${frontmatter.vault_path}"`,
-			frontmatter.notion_page_id ? `notion_page_id: "${frontmatter.notion_page_id}"` : null,
-			"---",
-		].filter(line => line !== null).join("\n");
-
-		return `${yaml}\n\n${body}`;
+		// Delegates to the pure util/notionMarkdown module (Phase 5 extraction).
+		return buildMarkdownContentFn(frontmatter, body);
 	}
 
 	/**
