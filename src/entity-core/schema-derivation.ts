@@ -16,6 +16,23 @@ import type { Schema } from './types.js';
 // Validation allow-list  (field → allowed target entity types, per entity type)
 // ---------------------------------------------------------------------------
 
+/**
+ * Map each relationship field to its inverse (forward↔reverse), derived from the
+ * schema. Used by ProjectIndex to store reverse edges under the correct field name
+ * — replacing a previously hardcoded map that had drifted from the schema
+ * (e.g. `blocks↔blocked_by`, `parent_of↔child_of`).
+ */
+export function buildReverseRelationMap(schema: Schema): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const rel of schema.relationships) {
+    for (const p of rel.pairs) {
+      map[p.forward] = p.reverse;
+      map[p.reverse] = p.forward;
+    }
+  }
+  return map;
+}
+
 /** For each entity type: the relationship fields it MAY carry and the target types allowed. */
 export function buildValidationAllowList(schema: Schema): Record<string, Record<string, string[]>> {
   const allow: Record<string, Record<string, string[]>> = {};

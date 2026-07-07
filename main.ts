@@ -53,7 +53,6 @@ import {
 	convertTextNodeToFile,
 	createNode,
 	getCanvasCenter,
-	getColorForEffort,
 	addNode,
 	removeNode,
 	reloadCanvasViews,
@@ -69,6 +68,7 @@ import {
 	edgeExists,
 	findNodeByEntityId,
 } from "./util/canvas";
+import { resolveEffortColor as resolveEffortColorFn, resolveNodeColor as resolveNodeColorFn } from "./util/nodeColor";
 import { generateUniqueFilename, isPluginCreatedNote, generateEntityFilename } from "./util/fileNaming";
 import { addNodesToCanvasView, getCanvasView, hasInternalCanvasAPI, inspectCanvasAPI, addEdgesToCanvasView } from "./util/canvasView";
 import { EntityIndex, EntityIndexEntry, getEntityTypeFromId } from "./util/entityNavigator";
@@ -3438,19 +3438,19 @@ private registerCommands(): void {
 	}
 
 	private resolveEffortColor(effort?: string): string | undefined {
-		if (!effort) return undefined;
-		const colorFromSettings = this.settings.effortColorMap?.[effort];
-		return colorFromSettings || getColorForEffort(effort);
+		// Delegates to the pure util/nodeColor module (Phase 5 extraction pilot).
+		return resolveEffortColorFn(effort, this.settings.effortColorMap);
 	}
 
 	/**
 	 * Resolve node color - red if inProgress, otherwise effort-based
 	 */
 	private resolveNodeColor(effort?: string, inProgress?: boolean): string | undefined {
-		if (inProgress) {
-			return this.settings.inProgressColor; // Red when in progress
-		}
-		return this.resolveEffortColor(effort);
+		// Delegates to the pure util/nodeColor module (Phase 5 extraction pilot).
+		return resolveNodeColorFn(effort, inProgress, {
+			inProgressColor: this.settings.inProgressColor,
+			effortColorMap: this.settings.effortColorMap,
+		});
 	}
 
 	/**

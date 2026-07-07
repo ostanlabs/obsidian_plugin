@@ -205,18 +205,9 @@ export function getCanvasCenter(app: App, canvasFile?: TFile): { x: number; y: n
 /**
  * Get color for effort avenue (matching visual grammar)
  */
-export function getColorForEffort(effort: string): string | undefined {
-	const colorMap: { [key: string]: string } = {
-		Business: "6", // purple
-		Infra: "4", // orange
-		Engineering: "3", // blue
-		Research: "2", // green
-		Design: "1", // red
-		Marketing: "5", // yellow
-	};
-
-	return colorMap[effort];
-}
+// getColorForEffort moved to the pure util/nodeColor module; re-exported here for
+// back-compat with existing importers.
+export { getColorForEffort } from "./nodeColor";
 
 /**
  * Update a node in canvas data

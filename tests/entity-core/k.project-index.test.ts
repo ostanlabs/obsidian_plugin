@@ -191,22 +191,26 @@ describe('K. ProjectIndex', () => {
   });
 
   describe('relationships (forward + reverse inverse)', () => {
-    // NOTE: ProjectIndex.getReverseRelationType has its OWN hardcoded inverse map
-    // (blocks↔blocked_by, implements↔implemented_by, parent_of↔child_of, ...).
-    // `depends_on` is NOT in that map, so it acts as its own identity inverse.
-    it('addRelationship records forward and mapped-reverse edges', () => {
+    // NOTE: getReverseRelationType is now derived from the schema (buildReverseRelationMap):
+    // depends_on↔blocks, parent↔children, implements↔implemented_by, affects↔decided_by, …
+    // A field absent from the schema map acts as its own identity inverse.
+    it('addRelationship records forward and schema-mapped reverse edges', () => {
       index.addRelationship('S-002', 'blocks', 'S-001');
       expect(index.getRelated('S-002', 'blocks')).toEqual(['S-001']);
-      expect(index.getRelatedReverse('S-001', 'blocked_by')).toEqual(['S-002']);
+      // schema inverse of `blocks` is `depends_on`
+      expect(index.getRelatedReverse('S-001', 'depends_on')).toEqual(['S-002']);
     });
 
-    it('uses the identity inverse for relationship types absent from the map', () => {
+    it('uses the schema inverse for known pairs and identity for unknown fields', () => {
+      // unknown field → identity inverse
       index.addRelationship('X-1', 'custom_rel', 'X-2');
-      expect(index.getRelated('X-1', 'custom_rel')).toEqual(['X-2']);
       expect(index.getRelatedReverse('X-2', 'custom_rel')).toEqual(['X-1']);
-      // depends_on is likewise an identity inverse here.
+      // depends_on↔blocks (schema pair): reverse of depends_on is stored under `blocks`
       index.addRelationship('S-001', 'depends_on', 'S-002');
-      expect(index.getRelatedReverse('S-002', 'depends_on')).toEqual(['S-001']);
+      expect(index.getRelatedReverse('S-002', 'blocks')).toEqual(['S-001']);
+      // parent↔children (schema pair)
+      index.addRelationship('T-001', 'parent', 'S-009');
+      expect(index.getRelatedReverse('S-009', 'children')).toEqual(['T-001']);
     });
 
     it('supports multiple targets on the same relationship', () => {
@@ -219,11 +223,11 @@ describe('K. ProjectIndex', () => {
       index.set(meta({ id: 'S-002', type: 'story' }));
       index.set(meta({ id: 'S-001', type: 'story' }));
       index.addRelationship('S-002', 'blocks', 'S-001');
-      expect(index.getRelatedReverse('S-001', 'blocked_by')).toEqual(['S-002']);
+      expect(index.getRelatedReverse('S-001', 'depends_on')).toEqual(['S-002']);
 
       index.delete('S-002');
       // S-001 should no longer list S-002 as a blocker
-      expect(index.getRelatedReverse('S-001', 'blocked_by')).toEqual([]);
+      expect(index.getRelatedReverse('S-001', 'depends_on')).toEqual([]);
     });
 
     it('deleting the target cleans up the source forward edge', () => {
@@ -240,11 +244,11 @@ describe('K. ProjectIndex', () => {
     it('removes forward edges and their reverse mappings', () => {
       index.addRelationship('S-001', 'blocks', 'S-002');
       index.addRelationship('S-001', 'implements', 'F-001');
-      expect(index.getRelatedReverse('S-002', 'blocked_by')).toEqual(['S-001']);
+      expect(index.getRelatedReverse('S-002', 'depends_on')).toEqual(['S-001']);
       index.removeForwardRelationships('S-001');
       expect(index.getRelated('S-001', 'blocks')).toEqual([]);
       expect(index.getRelated('S-001', 'implements')).toEqual([]);
-      expect(index.getRelatedReverse('S-002', 'blocked_by')).toEqual([]);
+      expect(index.getRelatedReverse('S-002', 'depends_on')).toEqual([]);
       expect(index.getRelatedReverse('F-001', 'implemented_by')).toEqual([]);
     });
 
@@ -274,8 +278,8 @@ describe('K. ProjectIndex', () => {
 
     it('builds a reverse adjacency map', () => {
       index.addRelationship('S-002', 'blocks', 'S-001');
-      // reverse graph is keyed by target with the inverse relationship name
-      const adj = index.buildAdjacency('blocked_by', 'reverse');
+      // reverse graph is keyed by target with the schema inverse (blocks → depends_on)
+      const adj = index.buildAdjacency('depends_on', 'reverse');
       expect(adj.get('S-001')).toEqual(['S-002']);
     });
   });

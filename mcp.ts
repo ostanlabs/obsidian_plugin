@@ -14,7 +14,7 @@ import {
 import { NodeFsAdapter } from './src/adapters/node-fs-adapter.js';
 import { SchemaRegistry } from './src/entity-core/schema-registry.js';
 import { DEFAULT_SCHEMA } from './src/entity-core/default-schema.js';
-import { buildValidationAllowList } from './src/entity-core/schema-derivation.js';
+import { buildValidationAllowList, buildReverseRelationMap } from './src/entity-core/schema-derivation.js';
 import { loadOrBootstrapSchema, serializeSchema, validateSchema, SCHEMA_FILENAME } from './src/entity-core/schema-bootstrap.js';
 import type { Schema } from './src/entity-core/types.js';
 // Bundled as a raw string via esbuild `--loader:.html=text`. get_schema_designer
@@ -63,6 +63,8 @@ function applySchema(s: Schema): void {
   serializer = new EntitySerializer(schema);
   validator = new EntityValidator(schema);
   VALIDATION_ALLOWLIST = buildValidationAllowList(s);
+  // Keep the index's reverse relationship map in sync with the active schema.
+  index.setReverseRelationMap(buildReverseRelationMap(s));
   activeSchema = s;
 }
 

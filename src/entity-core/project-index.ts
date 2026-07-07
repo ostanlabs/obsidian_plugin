@@ -16,6 +16,8 @@ import {
   EntityIndex,
   DuplicateGroup,
 } from './types.js';
+import { DEFAULT_SCHEMA } from './default-schema.js';
+import { buildReverseRelationMap } from './schema-derivation.js';
 
 // =============================================================================
 // Secondary Index Types
@@ -66,11 +68,23 @@ export class ProjectIndex implements EntityIndex {
   private _version: number = 0;
   private lastRebuild: number = 0;
   private reservedIds: Set<EntityId> = new Set();
+  /** field → inverse field, derived from the active schema (single source of truth). */
+  private reverseRelMap: Record<string, string>;
 
-  constructor() {
+  constructor(reverseRelationMap?: Record<string, string>) {
     this.secondary = this.createEmptySecondaryIndexes();
     this.relationships = this.createEmptyRelationshipGraph();
     this.files = this.createEmptyFileMappings();
+    this.reverseRelMap = reverseRelationMap ?? buildReverseRelationMap(DEFAULT_SCHEMA);
+  }
+
+  /**
+   * Replace the field→inverse map (e.g. after loading a custom schema.json), so the
+   * reverse relationship graph stays consistent with the active schema. Call before
+   * (re)building the index.
+   */
+  setReverseRelationMap(map: Record<string, string>): void {
+    this.reverseRelMap = map;
   }
 
   private createEmptySecondaryIndexes(): SecondaryIndexes {
@@ -246,17 +260,9 @@ export class ProjectIndex implements EntityIndex {
   }
 
   private getReverseRelationType(type: RelationshipType): RelationshipType {
-    // Basic inverses - can be extended via schema
-    const reverseMap: Record<string, string> = {
-      'blocks': 'blocked_by', 'blocked_by': 'blocks',
-      'implements': 'implemented_by', 'implemented_by': 'implements',
-      'supersedes': 'superseded_by', 'superseded_by': 'supersedes',
-      'parent_of': 'child_of', 'child_of': 'parent_of',
-      'previous_version': 'next_version', 'next_version': 'previous_version',
-      'affects': 'decided_by', 'decided_by': 'affects',
-      'documents': 'documented_by', 'documented_by': 'documents',
-    };
-    return reverseMap[type] || type;
+    // Inverse is derived from the active schema (see buildReverseRelationMap).
+    // Unknown fields act as their own identity inverse.
+    return this.reverseRelMap[type] || type;
   }
 
   // Secondary Index Query Methods
