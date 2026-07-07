@@ -74,6 +74,7 @@ import { DEFAULT_SCHEMA } from "./src/entity-core/default-schema.js";
 import { normalizeStatus as normalizeStatusFn, normalizePriority as normalizePriorityFn } from "./util/normalize";
 import { buildCanvasMetadata as buildCanvasMetadataFn } from "./util/canvasMetadata";
 import { mapNotionStatusToLocal as mapNotionStatusToLocalFn, notionBlocksToMarkdown as notionBlocksToMarkdownFn, richTextToPlain as richTextToPlainFn, buildMarkdownContent as buildMarkdownContentFn } from "./util/notionMarkdown";
+import { parseFutureFeatures as parseFutureFeaturesFn, mapCategoryToPhase as mapCategoryToPhaseFn, titleSimilarity as titleSimilarityFn } from "./util/featureParsing";
 import { generateUniqueFilename, isPluginCreatedNote, generateEntityFilename } from "./util/fileNaming";
 import { addNodesToCanvasView, getCanvasView, hasInternalCanvasAPI, inspectCanvasAPI, addEdgesToCanvasView } from "./util/canvasView";
 import { EntityIndex, EntityIndexEntry, getEntityTypeFromId } from "./util/entityNavigator";
@@ -10338,60 +10339,16 @@ private registerCommands(): void {
 		category?: string;
 		status?: string;
 	}> {
-		const features: Array<{
-			title: string;
-			description?: string;
-			category?: string;
-			status?: string;
-		}> = [];
-
-		const lines = content.split("\n");
-		let currentCategory = "";
-
-		for (const line of lines) {
-			// Category headers (## or ###)
-			const categoryMatch = line.match(/^#{2,3}\s+(.+)/);
-			if (categoryMatch) {
-				currentCategory = categoryMatch[1].trim();
-				continue;
-			}
-
-			// Feature items (- [ ] or - [x] or just -)
-			const featureMatch = line.match(/^[-*]\s+\[?[x ]?\]?\s*(.+)/i);
-			if (featureMatch) {
-				const featureText = featureMatch[1].trim();
-				// Skip if it's a sub-item (indented)
-				if (line.match(/^\s{2,}/)) continue;
-
-				// Parse status from checkbox
-				const isChecked = line.includes("[x]") || line.includes("[X]");
-				const status = isChecked ? "Complete" : "Planned";
-
-				features.push({
-					title: featureText,
-					category: currentCategory,
-					status,
-				});
-			}
-		}
-
-		return features;
+		// Delegates to the pure util/featureParsing module (Phase 5 extraction).
+		return parseFutureFeaturesFn(content);
 	}
 
 	/**
 	 * Map category string to feature phase
 	 */
 	private mapCategoryToPhase(category: string): FeaturePhase {
-		const lower = category.toLowerCase();
-		if (lower.includes("mvp") || lower.includes("core")) return "MVP";
-		if (lower.includes("phase 0") || lower.includes("p0")) return "0";
-		if (lower.includes("phase 1") || lower.includes("p1")) return "1";
-		if (lower.includes("phase 2") || lower.includes("p2")) return "2";
-		if (lower.includes("phase 3") || lower.includes("p3")) return "3";
-		if (lower.includes("phase 4") || lower.includes("p4")) return "4";
-		if (lower.includes("phase 5") || lower.includes("p5")) return "5";
-		if (lower.includes("future") || lower.includes("later")) return "5";
-		return "MVP";
+		// Delegates to the pure util/featureParsing module (Phase 5 extraction).
+		return mapCategoryToPhaseFn(category);
 	}
 
 	/**
@@ -10453,13 +10410,8 @@ private registerCommands(): void {
 	 * Simple title similarity check
 	 */
 	private titleSimilarity(a: string, b: string): number {
-		const aWords = new Set(a.toLowerCase().split(/\s+/));
-		const bWords = new Set(b.toLowerCase().split(/\s+/));
-		let matches = 0;
-		for (const word of aWords) {
-			if (word.length > 2 && bWords.has(word)) matches++;
-		}
-		return matches / Math.max(aWords.size, bWords.size);
+		// Delegates to the pure util/featureParsing module (Phase 5 extraction).
+		return titleSimilarityFn(a, b);
 	}
 
 	/**
