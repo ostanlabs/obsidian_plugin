@@ -37,6 +37,14 @@ export class TFile extends TAbstractFile {
 		this.extension = dot >= 0 ? this.name.slice(dot + 1) : "";
 		this.basename = dot >= 0 ? this.name.slice(0, dot) : this.name;
 	}
+	/**
+	 * Containing folder, mirroring obsidian's TFile.parent. A top-level file's
+	 * parent is the (empty-path) root folder, never null — matching obsidian.
+	 */
+	get parent(): TFolder {
+		const slash = this.path.lastIndexOf("/");
+		return new TFolder(slash >= 0 ? this.path.slice(0, slash) : "");
+	}
 }
 
 export class TFolder extends TAbstractFile {
@@ -144,10 +152,103 @@ export class MetadataCache {
 	}
 }
 
+/**
+ * Parse a single YAML frontmatter scalar/array value the way the plugin's own
+ * parser does, so processFrontMatter round-trips faithfully.
+ */
+function parseFmScalar(raw: string): unknown {
+	const v = raw.trim();
+	if (v === "") return "";
+	if (v.startsWith("[") && v.endsWith("]")) {
+		try {
+			const parsed = JSON.parse(v);
+			if (Array.isArray(parsed)) return parsed;
+		} catch {
+			const inner = v.slice(1, -1).trim();
+			if (inner === "") return [];
+			return inner
+				.split(",")
+				.map((s) => s.trim().replace(/^['"]|['"]$/g, ""))
+				.filter((s) => s.length > 0);
+		}
+	}
+	if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+		return v.slice(1, -1);
+	}
+	if (v === "true") return true;
+	if (v === "false") return false;
+	if (/^-?\d+(\.\d+)?$/.test(v)) return parseFloat(v);
+	return v;
+}
+
+/** Parse a `---`-delimited frontmatter block into an ordered object + trailing body. */
+function parseFrontmatterBlock(content: string): { fm: Record<string, unknown>; body: string } {
+	const match = content.match(/^---\n([\s\S]*?)\n---\n?/);
+	if (!match) return { fm: {}, body: content };
+	const lines = match[1].split("\n");
+	const fm: Record<string, unknown> = {};
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		const colon = line.indexOf(":");
+		if (colon === -1) continue;
+		const key = line.slice(0, colon).trim();
+		if (!key) continue;
+		const rest = line.slice(colon + 1).trim();
+		// Multiline YAML array: `key:` followed by `  - item` lines.
+		if (rest === "" && /^[ \t]*-[ \t]*/.test(lines[i + 1] ?? "")) {
+			const items: string[] = [];
+			while (i + 1 < lines.length && /^[ \t]*-[ \t]*/.test(lines[i + 1])) {
+				items.push(lines[++i].replace(/^[ \t]*-[ \t]*/, "").trim().replace(/^['"]|['"]$/g, ""));
+			}
+			fm[key] = items;
+		} else {
+			fm[key] = parseFmScalar(rest);
+		}
+	}
+	return { fm, body: content.slice(match[0].length) };
+}
+
+/** Serialize an ordered frontmatter object back into a `---` block. Arrays as JSON. */
+function serializeFrontmatterBlock(fm: Record<string, unknown>, body: string): string {
+	const lines = ["---"];
+	for (const [key, value] of Object.entries(fm)) {
+		if (value === undefined) continue;
+		if (Array.isArray(value)) lines.push(`${key}: ${JSON.stringify(value)}`);
+		else if (value === "" || value === null) lines.push(`${key}:`);
+		else lines.push(`${key}: ${String(value)}`);
+	}
+	lines.push("---");
+	return lines.join("\n") + (body.startsWith("\n") ? body : "\n" + body);
+}
+
+/**
+ * In-memory `app.fileManager`. Faithful to the obsidian surface the plugin uses:
+ * processFrontMatter (read → mutate object → write back), renameFile, trashFile.
+ */
+export class FileManager {
+	constructor(private vault: Vault) {}
+
+	async processFrontMatter(file: TFile | { path: string }, fn: (fm: Record<string, unknown>) => void): Promise<void> {
+		const content = await this.vault.read(file);
+		const { fm, body } = parseFrontmatterBlock(content);
+		fn(fm);
+		await this.vault.modify(file, serializeFrontmatterBlock(fm, body));
+	}
+
+	async renameFile(file: TFile | { path: string }, newPath: string): Promise<void> {
+		await this.vault.rename(file, newPath);
+	}
+
+	async trashFile(file: TFile | { path: string }): Promise<void> {
+		this.vault._files.delete(normalizePath(file.path));
+	}
+}
+
 export class App {
 	vault = new Vault();
 	workspace = new Workspace();
 	metadataCache = new MetadataCache();
+	fileManager = new FileManager(this.vault);
 }
 
 export class Plugin {
