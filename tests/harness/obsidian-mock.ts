@@ -131,8 +131,28 @@ export class Vault {
 	}
 }
 
+/** A single fake workspace leaf; openFile records the file it was asked to open. */
+export class MockLeaf {
+	openedFile: TFile | { path: string } | null = null;
+	async openFile(file: TFile | { path: string }): Promise<void> {
+		this.openedFile = file;
+	}
+}
+
 export class Workspace {
+	/** Settable active file so flows gated on getActiveFile()/getActiveCanvasFile() are reachable. */
+	_activeFile: TFile | null = null;
+	/** Every leaf handed out via getLeaf(), so tests can assert what was opened. */
+	leaves: MockLeaf[] = [];
 	getActiveFile(): TFile | null {
+		return this._activeFile;
+	}
+	getLeaf(..._args: unknown[]): MockLeaf {
+		const leaf = new MockLeaf();
+		this.leaves.push(leaf);
+		return leaf;
+	}
+	getActiveViewOfType(): unknown {
 		return null;
 	}
 	getLeavesOfType(): unknown[] {
@@ -144,8 +164,20 @@ export class Workspace {
 }
 
 export class MetadataCache {
-	getFileCache(): unknown {
-		return null;
+	constructor(private vault?: Vault) {}
+	/**
+	 * Return the parsed frontmatter for a file the way obsidian's metadataCache does:
+	 * `{ frontmatter: {...} }` when the file has a `---` block, else `null`. Backed by
+	 * the in-memory vault so idGenerator scans / sanitizeParentFields / reconcile flows
+	 * that read cache.frontmatter behave against seeded content.
+	 */
+	getFileCache(file?: TFile | { path: string }): { frontmatter?: Record<string, unknown> } | null {
+		if (!this.vault || !file) return null;
+		const content = this.vault._files.get(normalizePath(file.path));
+		if (content === undefined) return null;
+		const { fm } = parseFrontmatterBlock(content);
+		if (Object.keys(fm).length === 0) return null;
+		return { frontmatter: fm };
 	}
 	on(): { unload: () => void } {
 		return { unload: () => {} };
@@ -247,7 +279,7 @@ export class FileManager {
 export class App {
 	vault = new Vault();
 	workspace = new Workspace();
-	metadataCache = new MetadataCache();
+	metadataCache = new MetadataCache(this.vault);
 	fileManager = new FileManager(this.vault);
 }
 
