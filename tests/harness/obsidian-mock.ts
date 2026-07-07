@@ -31,6 +31,12 @@ export class TAbstractFile {
 export class TFile extends TAbstractFile {
 	extension: string;
 	basename: string;
+	/**
+	 * File metadata mirroring obsidian's TFile.stat. Populated by the Vault when a
+	 * TFile is produced from a real in-memory file (size from content length,
+	 * mtime/ctime from the vault's write clock); a bare `new TFile()` gets zeros.
+	 */
+	stat: { size: number; mtime: number; ctime: number } = { size: 0, mtime: 0, ctime: 0 };
 	constructor(path: string) {
 		super(path);
 		const dot = this.name.lastIndexOf(".");
@@ -66,7 +72,9 @@ class MockAdapter {
 		return this.vault._files.has(p) || this.vault._folders.has(p);
 	}
 	async write(path: string, content: string): Promise<void> {
-		this.vault._files.set(normalizePath(path), content);
+		const p = normalizePath(path);
+		this.vault._files.set(p, content);
+		this.vault._mtimes.set(p, Date.now());
 	}
 	async read(path: string): Promise<string> {
 		const p = normalizePath(path);
@@ -84,14 +92,48 @@ class MockAdapter {
 export class Vault {
 	_files = new Map<string, string>();
 	_folders = new Set<string>();
+	/** Write clock, so TFile.stat.mtime reflects the last write to a path. */
+	_mtimes = new Map<string, number>();
 	adapter = new MockAdapter(this);
 	configDir = ".obsidian";
 
 	getAbstractFileByPath(path: string): TAbstractFile | null {
 		const p = normalizePath(path);
-		if (this._files.has(p)) return new TFile(p);
-		if (this._folders.has(p)) return new TFolder(p);
+		if (this._files.has(p)) return this._makeFile(p);
+		if (this._folders.has(p)) return this._makeFolder(p);
 		return null;
+	}
+
+	/** Build a TFile with stat backed by the in-memory content + write clock. */
+	private _makeFile(p: string): TFile {
+		const f = new TFile(p);
+		const content = this._files.get(p) ?? "";
+		const mtime = this._mtimes.get(p) ?? 0;
+		f.stat = { size: content.length, mtime, ctime: mtime };
+		return f;
+	}
+
+	/** Build a TFolder whose `children` are its DIRECT files/subfolders. */
+	private _makeFolder(p: string): TFolder {
+		const folder = new TFolder(p);
+		folder.children = this._childrenOf(p);
+		return folder;
+	}
+
+	private _childrenOf(folderPath: string): TAbstractFile[] {
+		const children: TAbstractFile[] = [];
+		const prefix = folderPath === "" ? "" : folderPath + "/";
+		for (const fp of this._files.keys()) {
+			if (!fp.startsWith(prefix)) continue;
+			const rest = fp.slice(prefix.length);
+			if (rest.length > 0 && !rest.includes("/")) children.push(this._makeFile(fp));
+		}
+		for (const dp of this._folders.keys()) {
+			if (!dp.startsWith(prefix)) continue;
+			const rest = dp.slice(prefix.length);
+			if (rest.length > 0 && !rest.includes("/")) children.push(this._makeFolder(dp));
+		}
+		return children;
 	}
 	async read(file: TFile | { path: string }): Promise<string> {
 		return this.adapter.read(file.path);
@@ -102,15 +144,45 @@ export class Vault {
 	async create(path: string, content: string): Promise<TFile> {
 		const p = normalizePath(path);
 		this._files.set(p, content);
-		return new TFile(p);
+		this._mtimes.set(p, Date.now());
+		return this._makeFile(p);
 	}
 	async modify(file: TFile | { path: string }, content: string): Promise<void> {
-		this._files.set(normalizePath(file.path), content);
+		const p = normalizePath(file.path);
+		this._files.set(p, content);
+		this._mtimes.set(p, Date.now());
 	}
 	async createFolder(path: string): Promise<TFolder> {
 		const p = normalizePath(path);
 		this._folders.add(p);
 		return new TFolder(p);
+	}
+	/**
+	 * Remove a file, or a folder (recursively when `recursive` is true), mirroring
+	 * obsidian's Vault.delete. Used by the entity-core ObsidianVaultAdapter's
+	 * deleteFile/deleteFolder. Deleting a missing path is a silent no-op.
+	 */
+	async delete(file: TAbstractFile | { path: string }, recursive = false): Promise<void> {
+		const p = normalizePath(file.path);
+		if (this._files.has(p)) {
+			this._files.delete(p);
+			this._mtimes.delete(p);
+			return;
+		}
+		if (this._folders.has(p)) {
+			this._folders.delete(p);
+			if (recursive) {
+				for (const fp of [...this._files.keys()]) {
+					if (fp.startsWith(p + "/")) {
+						this._files.delete(fp);
+						this._mtimes.delete(fp);
+					}
+				}
+				for (const dp of [...this._folders.keys()]) {
+					if (dp.startsWith(p + "/")) this._folders.delete(dp);
+				}
+			}
+		}
 	}
 	async rename(file: TFile | { path: string }, newPath: string): Promise<void> {
 		const p = normalizePath(file.path);
@@ -118,6 +190,8 @@ export class Vault {
 		if (this._files.has(p)) {
 			this._files.set(np, this._files.get(p)!);
 			this._files.delete(p);
+			this._mtimes.set(np, this._mtimes.get(p) ?? Date.now());
+			this._mtimes.delete(p);
 		}
 	}
 	getMarkdownFiles(): TFile[] {
