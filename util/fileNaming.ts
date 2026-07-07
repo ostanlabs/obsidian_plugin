@@ -1,5 +1,6 @@
 import { App, normalizePath } from "obsidian";
 import { ItemFrontmatter } from "../types";
+import { sanitizeTitleForFilename } from "../src/entity-core/path-resolver";
 
 /**
  * Convert a string to snake_case
@@ -29,12 +30,12 @@ export function sanitizeFilename(filename: string): string {
 }
 
 /**
- * WI-3: Generate filename in format <ID>_<title>.md
- * ID-prefixed so files are self-identifying, aligned with MCP
+ * Generate filename in format <ID>_<slug>.md, where <slug> is the canonical
+ * snake_case sanitization shared with the MCP path-resolver
+ * (sanitizeTitleForFilename) — so the plugin and MCP produce identical filenames.
  */
 export function generateEntityFilename(id: string, title: string): string {
-	const sanitized = sanitizeFilename(title).substring(0, 100);
-	return `${id}_${sanitized}.md`;
+	return `${id}_${sanitizeTitleForFilename(title)}.md`;
 }
 
 /**

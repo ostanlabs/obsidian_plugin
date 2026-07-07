@@ -15,6 +15,19 @@ import {
 import type { SchemaRegistry } from './schema-registry.js';
 import { getEntityTypeFromId } from './id-allocator.js';
 
+/**
+ * Canonical entity-title → filename slug (snake_case, lowercase). Single source of
+ * truth for filename sanitization shared by the MCP path-resolver AND the plugin
+ * (util/fileNaming), so both produce identical `<id>_<slug>.md` names.
+ */
+export function sanitizeTitleForFilename(title: string): string {
+  return title
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, ''); // Remove leading/trailing underscores
+}
+
 export interface PathResolverConfig {
   vaultPath: string;
   entitiesFolder: string; // e.g. "entities"
@@ -102,11 +115,7 @@ export class PathResolver {
   }
 
   private sanitizeForFilename(title: string): string {
-    return title
-      .toLowerCase()
-      .trim()
-      .replace(/[^a-z0-9]+/g, '_')
-      .replace(/^_+|_+$/g, ''); // Remove leading/trailing underscores
+    return sanitizeTitleForFilename(title);
   }
 
   toVaultPath(absolutePath: string): VaultPath {

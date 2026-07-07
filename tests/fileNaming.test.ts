@@ -50,19 +50,19 @@ describe("fileNaming", () => {
 	});
 
 	describe("generateEntityFilename", () => {
-		it("produces <ID>_<title>.md", () => {
+		// Unified with the MCP path-resolver: snake_case, lowercase slug.
+		it("produces <ID>_<snake_case-title>.md", () => {
 			expect(generateEntityFilename("M-001", "Kickoff Plan")).toBe(
-				"M-001_Kickoff Plan.md"
+				"M-001_kickoff_plan.md"
 			);
 		});
-		it("sanitizes the title portion", () => {
-			expect(generateEntityFilename("T-9", "a/b:c")).toBe("T-9_a-b-c.md");
+		it("sanitizes the title portion to snake_case", () => {
+			expect(generateEntityFilename("T-9", "a/b:c")).toBe("T-9_a_b_c.md");
+			expect(generateEntityFilename("F-1", "OAuth 2.0 / SSO!")).toBe("F-1_oauth_2_0_sso.md");
 		});
-		it("truncates very long titles to 100 chars", () => {
+		it("does not truncate (parity with MCP path-resolver)", () => {
 			const longTitle = "x".repeat(200);
-			const name = generateEntityFilename("S-1", longTitle);
-			// "S-1_" + 100 x's + ".md"
-			expect(name).toBe(`S-1_${"x".repeat(100)}.md`);
+			expect(generateEntityFilename("S-1", longTitle)).toBe(`S-1_${"x".repeat(200)}.md`);
 		});
 	});
 
