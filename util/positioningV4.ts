@@ -3035,16 +3035,46 @@ export class PositioningEngineV4 {
 			this.vlog(`  Same workstream: ${sameWorkstream.length}, Cross workstream: ${crossWorkstream.length}`);
 		}
 
-		// Position same-workstream entities centered above parents
-		for (const deferred of sameWorkstream) {
-			this.positionDeferredSameWorkstream(deferred);
+		// Position same-workstream entities centered above parents.
+		//
+		// Fixpoint loop, NOT a single pass: a deferred entity's parents can
+		// themselves be deferred (decision → affects two documents, each of
+		// which documents two features). In a single pass, whichever chained
+		// deferred happened to be processed before its parents had positions
+		// was silently orphaned (the DEC-031 bug: 36 of 38 orphan-band
+		// decisions in the live vault had positioned parents). Re-running the
+		// unresolved remainder until no progress lets chains settle level by
+		// level; genuinely unresolvable entities (parents never positioned)
+		// still fall through to the orphan grid.
+		let pending = sameWorkstream;
+		while (pending.length > 0) {
+			const unresolved: DeferredEntity[] = [];
+			for (const deferred of pending) {
+				if (!this.positionDeferredSameWorkstream(deferred)) {
+					unresolved.push(deferred);
+				}
+			}
+			if (unresolved.length === pending.length) {
+				// No progress this round — the rest can never resolve.
+				for (const deferred of unresolved) {
+					this.orphanedEntities.push(deferred.node);
+				}
+				break;
+			}
+			pending = unresolved;
 		}
 
 		// Position cross-workstream entities in bands between workstreams
 		this.positionDeferredCrossWorkstream(crossWorkstream);
 	}
 
-	private positionDeferredSameWorkstream(deferred: DeferredEntity): void {
+	/**
+	 * Try to position a deferred (multi-parent) entity centered above its
+	 * parents. Returns false when NO parent has a position yet — the caller's
+	 * fixpoint loop retries it after other deferred entities (its potential
+	 * parents) have settled, and orphans it only when no progress is possible.
+	 */
+	private positionDeferredSameWorkstream(deferred: DeferredEntity): boolean {
 		const containerBounds: { minX: number; maxX: number; minY: number }[] = [];
 
 		// Verbose: Log F-017 processing
@@ -3078,10 +3108,9 @@ export class PositioningEngineV4 {
 
 		if (containerBounds.length === 0) {
 			if (this.verbose && deferred.node.entityId === 'F-017') {
-				this.vlog(`[F-017 TRACE] Phase 10: No parent bounds found, moving to orphans`);
+				this.vlog(`[F-017 TRACE] Phase 10: No parent bounds found yet, deferring to next fixpoint round`);
 			}
-			this.orphanedEntities.push(deferred.node);
-			return;
+			return false;
 		}
 
 		const minX = Math.min(...containerBounds.map(b => b.minX));
@@ -3096,6 +3125,7 @@ export class PositioningEngineV4 {
 			width: nodeSize.width,
 			height: nodeSize.height,
 		};
+		return true;
 	}
 
 	private positionDeferredCrossWorkstream(entities: DeferredEntity[]): void {

@@ -258,3 +258,55 @@ describe("PositioningEngineV4 - field-name bridge (regression-lock G1)", () => {
 		expect(res.positions.get("node-F-1")!.y).toBeLessThan(res.positions.get("node-S-1")!.y);
 	});
 });
+
+describe("PositioningEngineV4 - chained deferred entities (regression-lock: DEC-031 orphan bug)", () => {
+	// A decision affecting TWO documents is deferred (multi-parent). If those
+	// documents are THEMSELVES deferred (each documents two features), Phase 10's
+	// single-pass resolution used to orphan the decision whenever it was
+	// processed before its parents had positions — 36 of 38 orphan-band
+	// decisions in the live vault had positioned parents. The fix resolves
+	// deferred entities to a fixpoint, so chained deferreds settle in order.
+	function chainedGraph(): EntityData[] {
+		return [
+			// Decision FIRST in input order — this is the order that triggered the bug.
+			ent({ entityId: "DEC-1", type: "decision", affects: ["DOC-1", "DOC-2"] }),
+			ent({ entityId: "DOC-1", type: "document", documents: ["F-1", "F-2"] }),
+			ent({ entityId: "DOC-2", type: "document", documents: ["F-1", "F-2"] }),
+			ent({ entityId: "M-1", type: "milestone" }),
+			ent({ entityId: "F-1", type: "feature", implementedBy: ["M-1"] }),
+			ent({ entityId: "F-2", type: "feature", implementedBy: ["M-1"] }),
+		];
+	}
+
+	it("positions a deferred decision whose deferred document parents resolve later in the pass", () => {
+		const res = new PositioningEngineV4().calculatePositions(chainedGraph());
+		const dec = res.positions.get("node-DEC-1")!;
+		const doc1 = res.positions.get("node-DOC-1")!;
+		const doc2 = res.positions.get("node-DOC-2")!;
+		expect(dec).toBeDefined();
+		expect(doc1).toBeDefined();
+		// The decision must sit with its document parents (deferred placement is
+		// "centered above parents"), NOT in the orphan grid far below the lanes.
+		const parentsTop = Math.min(doc1.y, doc2.y);
+		expect(dec.y).toBeLessThan(parentsTop);
+		const span = { min: Math.min(doc1.x, doc2.x) - 500, max: Math.max(doc1.x, doc2.x) + 900 };
+		expect(dec.x).toBeGreaterThan(span.min);
+		expect(dec.x).toBeLessThan(span.max);
+	});
+
+	it("still orphans a deferred entity whose parents can never resolve (fixpoint terminates)", () => {
+		// Two decisions deferring on each other's documents that don't exist as
+		// containers: DEC-A affects docs that are never positioned (dangling in
+		// the entity set but with no anchors at all → orphan grid). The loop must
+		// terminate and place everything somewhere.
+		const res = new PositioningEngineV4().calculatePositions([
+			ent({ entityId: "DEC-A", type: "decision", affects: ["DOC-X", "DOC-Y"] }),
+			ent({ entityId: "DOC-X", type: "document", documents: ["F-GONE", "F-GONE2"] }),
+			ent({ entityId: "DOC-Y", type: "document", documents: ["F-GONE", "F-GONE2"] }),
+		]);
+		// All three exist somewhere on the canvas (orphan grid counts) — no hang, no loss.
+		expect(res.positions.get("node-DEC-A")).toBeDefined();
+		expect(res.positions.get("node-DOC-X")).toBeDefined();
+		expect(res.positions.get("node-DOC-Y")).toBeDefined();
+	});
+});
