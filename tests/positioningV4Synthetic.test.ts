@@ -294,6 +294,30 @@ describe("PositioningEngineV4 - chained deferred entities (regression-lock: DEC-
 		expect(dec.x).toBeLessThan(span.max);
 	});
 
+	it("positions a same-ws deferred decision whose parents are CROSS-ws deferred documents (DEC-232 bug)", () => {
+		// DEC-232 shape: the decision is same-workstream deferred, but its parent
+		// documents are cross-workstream deferred (their feature parents live in
+		// different lanes). The same-ws fixpoint used to run to exhaustion BEFORE
+		// the cross-ws pass placed the documents, orphaning the decision.
+		const res = new PositioningEngineV4().calculatePositions([
+			ent({ entityId: "DEC-1", type: "decision", affects: ["DOC-1", "DOC-2"] }),
+			ent({ entityId: "DOC-1", type: "document", documents: ["F-E", "F-B"] }),
+			ent({ entityId: "DOC-2", type: "document", documents: ["F-E", "F-B"] }),
+			ent({ entityId: "M-E", type: "milestone", workstream: "engineering" }),
+			ent({ entityId: "M-B", type: "milestone", workstream: "business" }),
+			ent({ entityId: "F-E", type: "feature", workstream: "engineering", implementedBy: ["M-E"] }),
+			ent({ entityId: "F-B", type: "feature", workstream: "business", implementedBy: ["M-B"] }),
+		]);
+		const dec = res.positions.get("node-DEC-1")!;
+		const doc1 = res.positions.get("node-DOC-1")!;
+		const doc2 = res.positions.get("node-DOC-2")!;
+		expect(doc1).toBeDefined();
+		expect(dec).toBeDefined();
+		// Same-ws deferred placement: centered ABOVE its (band-positioned) parents,
+		// not dumped in the orphan grid below everything.
+		expect(dec.y).toBeLessThan(Math.min(doc1.y, doc2.y));
+	});
+
 	it("still orphans a deferred entity whose parents can never resolve (fixpoint terminates)", () => {
 		// Two decisions deferring on each other's documents that don't exist as
 		// containers: DEC-A affects docs that are never positioned (dangling in

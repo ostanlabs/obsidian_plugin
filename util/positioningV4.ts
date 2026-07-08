@@ -3035,37 +3035,55 @@ export class PositioningEngineV4 {
 			this.vlog(`  Same workstream: ${sameWorkstream.length}, Cross workstream: ${crossWorkstream.length}`);
 		}
 
-		// Position same-workstream entities centered above parents.
+		// Unified fixpoint over BOTH deferred groups, NOT a single pass each.
 		//
-		// Fixpoint loop, NOT a single pass: a deferred entity's parents can
-		// themselves be deferred (decision → affects two documents, each of
-		// which documents two features). In a single pass, whichever chained
-		// deferred happened to be processed before its parents had positions
-		// was silently orphaned (the DEC-031 bug: 36 of 38 orphan-band
-		// decisions in the live vault had positioned parents). Re-running the
-		// unresolved remainder until no progress lets chains settle level by
-		// level; genuinely unresolvable entities (parents never positioned)
-		// still fall through to the orphan grid.
-		let pending = sameWorkstream;
-		while (pending.length > 0) {
-			const unresolved: DeferredEntity[] = [];
-			for (const deferred of pending) {
-				if (!this.positionDeferredSameWorkstream(deferred)) {
-					unresolved.push(deferred);
-				}
+		// A deferred entity's parents can themselves be deferred — in either
+		// group (decision → affects two documents, each of which documents two
+		// features, possibly in different workstreams). Two bugs lived here:
+		//  - DEC-031: same-ws chains resolved in a single insertion-order pass,
+		//    orphaning any deferred processed before its deferred parents.
+		//  - DEC-232: the same-ws fixpoint ran to exhaustion BEFORE the
+		//    cross-ws pass, so a same-ws decision whose parent documents were
+		//    cross-ws deferred was orphaned even though those documents got
+		//    band positions moments later.
+		// Each round: try unresolved same-ws entities (they need ≥1 positioned
+		// parent), then place cross-ws entities whose parents are ready (band Y
+		// is always known; X centers over parents). On stalemate, remaining
+		// cross-ws entities are force-placed (X falls back to the band origin)
+		// so their descendants get one more chance; remaining same-ws entities
+		// then orphan to the grid.
+		let pendingSame = sameWorkstream;
+		let pendingCross = crossWorkstream;
+		while (pendingSame.length > 0 || pendingCross.length > 0) {
+			let progress = 0;
+
+			const nextSame: DeferredEntity[] = [];
+			for (const deferred of pendingSame) {
+				if (this.positionDeferredSameWorkstream(deferred)) progress++;
+				else nextSame.push(deferred);
 			}
-			if (unresolved.length === pending.length) {
-				// No progress this round — the rest can never resolve.
-				for (const deferred of unresolved) {
+
+			const nextCross = this.positionDeferredCrossWorkstream(pendingCross, false);
+			progress += pendingCross.length - nextCross.length;
+
+			if (progress === 0) {
+				if (nextCross.length > 0) {
+					// Stalemate with cross-ws entities left: force-place them (their
+					// band Y is correct regardless), then let same-ws retry once more.
+					this.positionDeferredCrossWorkstream(nextCross, true);
+					pendingSame = nextSame;
+					pendingCross = [];
+					continue;
+				}
+				// No progress and nothing force-placeable — the rest can never resolve.
+				for (const deferred of nextSame) {
 					this.orphanedEntities.push(deferred.node);
 				}
 				break;
 			}
-			pending = unresolved;
+			pendingSame = nextSame;
+			pendingCross = nextCross;
 		}
-
-		// Position cross-workstream entities in bands between workstreams
-		this.positionDeferredCrossWorkstream(crossWorkstream);
 	}
 
 	/**
@@ -3128,8 +3146,20 @@ export class PositioningEngineV4 {
 		return true;
 	}
 
-	private positionDeferredCrossWorkstream(entities: DeferredEntity[]): void {
-		if (entities.length === 0) return;
+	/**
+	 * Place cross-workstream deferred entities in the band between their
+	 * parents' workstream lanes. Returns entities NOT placed this round:
+	 * when `force` is false, entities whose parents have no positions yet are
+	 * kept back so the fixpoint can retry them after their (possibly deferred)
+	 * parents settle — placing them early would center X on nothing (x=0).
+	 * With `force`, everything is placed (X falls back to the band origin);
+	 * entities whose workstream pair can't be resolved orphan to the grid
+	 * instead of silently keeping NO position (which previously left them off
+	 * the layout entirely).
+	 */
+	private positionDeferredCrossWorkstream(entities: DeferredEntity[], force: boolean): DeferredEntity[] {
+		if (entities.length === 0) return [];
+		const unresolved: DeferredEntity[] = [];
 
 		const byWorkstreamPair = new Map<string, DeferredEntity[]>();
 
@@ -3147,7 +3177,16 @@ export class PositioningEngineV4 {
 			const ws1 = this.workstreams.get(wsNames[0]);
 			const ws2 = this.workstreams.get(wsNames[1]);
 
-			if (!ws1 || !ws2) continue;
+			if (!ws1 || !ws2) {
+				// Unresolvable workstream pair: never placeable via a band. Under
+				// force, send to the orphan grid rather than leaving no position.
+				if (force) {
+					for (const deferred of deferreds) this.orphanedEntities.push(deferred.node);
+				} else {
+					unresolved.push(...deferreds);
+				}
+				continue;
+			}
 
 			const ws1Bottom = ws1.baseY + ws1.height;
 			const ws2Top = ws2.baseY;
@@ -3171,6 +3210,12 @@ export class PositioningEngineV4 {
 					}
 				}
 
+				if (containerBounds.length === 0 && !force) {
+					// No positioned parent yet — retry after other deferreds settle.
+					unresolved.push(deferred);
+					continue;
+				}
+
 				let x = 0;
 				if (containerBounds.length > 0) {
 					const minX = Math.min(...containerBounds.map(b => b.minX));
@@ -3186,6 +3231,7 @@ export class PositioningEngineV4 {
 				};
 			}
 		}
+		return unresolved;
 	}
 
 	// ========================================================================
