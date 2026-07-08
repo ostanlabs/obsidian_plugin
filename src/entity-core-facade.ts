@@ -91,8 +91,9 @@ export class EntityCoreFacade {
    * Initialize modules that require an EntityIndex.
    * The plugin should call this after creating its index.
    *
-   * This method accepts the entity-core EntityIndex interface, not the plugin's EntityIndex.
-   * Use EntityIndexAdapter to wrap the plugin's index before passing it here.
+   * This method accepts the entity-core EntityIndex interface, not the plugin's
+   * EntityIndex wrapper. Pass the plugin index's internal ProjectIndex
+   * (`entityIndex.getCoreIndex()`), which implements the interface natively.
    */
   initializeWithIndex(index: EntityIndex): void {
     this.allocator = new IDAllocator(this.schema, index);

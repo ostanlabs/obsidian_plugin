@@ -4,8 +4,14 @@
  * Tests the positioning engine against the relationship rules defined in RELATIONSHIP_RULES.md
  * Uses real MD files from the vault as test data.
  *
- * Uses the canonical entity parsing logic from util/entityParser.ts
+ * Fixtures are loaded through the CANONICAL production read path (Phase 5 of
+ * docs/ENTITY_MODEL_CONVERGENCE_SPEC.md): entity-core `EntityParser` +
+ * `toEntityData` from src/adapters/model-map.
  */
+
+// util/fileNaming (home of generateNodeIdFromEntityId, pulled in directly and
+// via model-map) imports 'obsidian' — mock it virtually.
+jest.mock('obsidian', () => require('./harness/obsidian-mock'), { virtual: true });
 
 import * as fs from 'fs';
 import * as path from 'path';
@@ -17,10 +23,28 @@ import {
 	PositioningResult,
 	DEFAULT_POSITIONING_CONFIG,
 } from '../util/positioningV4';
-import {
-	parseEntityFromContent,
-	generateNodeIdFromEntityId,
-} from '../util/entityParser';
+import { EntityParser } from '../src/entity-core/parser';
+import { SchemaRegistry } from '../src/entity-core/schema-registry';
+import { DEFAULT_SCHEMA } from '../src/entity-core/default-schema';
+import { toEntityData } from '../src/adapters/model-map';
+import { generateNodeIdFromEntityId } from '../util/fileNaming';
+
+const parser = new EntityParser(new SchemaRegistry(DEFAULT_SCHEMA));
+
+/** Canonical fixture loader: EntityParser + toEntityData; null on files the
+ * strict parser rejects (legacy skip tolerance — such files are skipped). */
+function parseEntityFromContent(
+	content: string,
+	nodeId: string,
+	filePath: string
+): EntityData | null {
+	try {
+		const runtime = parser.parse(content, filePath);
+		return toEntityData(runtime, filePath, nodeId);
+	} catch {
+		return null;
+	}
+}
 
 // ============================================================================
 // Test Data Loading
@@ -35,7 +59,7 @@ interface LoadedEntity {
 
 /**
  * Load all MD files from the test data folder and parse them into EntityData
- * Uses the canonical parsing logic from util/entityParser.ts
+ * via the canonical EntityParser + toEntityData pipeline.
  */
 function loadTestEntities(): LoadedEntity[] {
 	const entities: LoadedEntity[] = [];

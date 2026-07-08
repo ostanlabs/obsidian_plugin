@@ -3,14 +3,14 @@
  * against the in-memory obsidian mock. The canvas render helpers it routes through
  * (closeCanvasViews / reloadCanvasViewsWithViewport) are no-ops under the mock (no open
  * canvas leaves), so the whole flow is vault-I/O observable: templated note creation,
- * the parseFrontmatter id-reuse read for pre-existing note files, and the canvas JSON
+ * the frontmatter id-reuse read for pre-existing note files, and the canvas JSON
  * node create/convert writeback.
  */
 jest.mock("obsidian", () => require("./harness/obsidian-mock"), { virtual: true });
 
 import CanvasStructuredItemsPlugin from "../main";
 import { createTestApp, Notice, TFile, Vault } from "./harness/obsidian-mock";
-import { parseFrontmatter } from "../util/frontmatter";
+import { parseRawFrontmatter } from "../util/frontmatter";
 import { _resetSessionHighWaterForTests } from "../util/idGenerator";
 
 const MANIFEST = {
@@ -75,7 +75,7 @@ describe("performCanvasNodeConversion (integration via obsidian mock)", () => {
 		// note created under the tasks type folder with generated id + defaults
 		const notePath = [...vault._files.keys()].find((p) => p.startsWith("tasks/") && p.endsWith(".md"))!;
 		expect(notePath).toBeTruthy();
-		const fm = parseFrontmatter(vault._files.get(notePath)!)!;
+		const fm = parseRawFrontmatter(vault._files.get(notePath)!)!;
 		expect(fm.id).toBe("T-001");
 		expect(fm.type).toBe("task");
 		expect(fm.title).toBe("My New Task");
@@ -112,7 +112,7 @@ describe("performCanvasNodeConversion (integration via obsidian mock)", () => {
 			"tasks/Existing.md"
 		);
 
-		// no second note file; the parseFrontmatter read supplied the id
+		// no second note file; the parseRawFrontmatter read supplied the id
 		const mdFiles = [...vault._files.keys()].filter((p) => p.endsWith(".md"));
 		expect(mdFiles).toEqual(["tasks/Existing.md"]);
 		expect(Notice.instances.join("\n")).toContain("Created task: T-042");
@@ -165,7 +165,7 @@ describe("performCanvasNodeConversion (integration via obsidian mock)", () => {
 		expect(node.text).toBeUndefined();
 		expect(node.file).toMatch(/^stories\/.*\.md$/);
 		// the backing story note was created with a generated id
-		const fm = parseFrontmatter(vault._files.get(node.file!)!)!;
+		const fm = parseRawFrontmatter(vault._files.get(node.file!)!)!;
 		expect(fm.id).toBe("S-001");
 		expect(fm.type).toBe("story");
 		expect(Notice.instances.join("\n")).toContain("Converted to story: S-001");

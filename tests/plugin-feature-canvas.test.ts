@@ -13,7 +13,7 @@ jest.mock("obsidian", () => require("./harness/obsidian-mock"), { virtual: true 
 
 import CanvasStructuredItemsPlugin from "../main";
 import { createTestApp, Notice, TFile, Vault, Workspace } from "./harness/obsidian-mock";
-import { parseFrontmatter, parseAnyFrontmatter } from "../util/frontmatter";
+import { parseRawFrontmatter, parseAnyFrontmatter } from "../util/frontmatter";
 
 const MANIFEST = {
 	id: "canvas-structured-items",
@@ -282,10 +282,10 @@ describe("applyFeatureLink (integration via obsidian mock)", () => {
 			relationshipType: "implements",
 		});
 
-		const story = parseFrontmatter(vault._files.get("stories/S-001.md")!)!;
+		const story = parseRawFrontmatter(vault._files.get("stories/S-001.md")!)!;
 		expect(story.implements).toEqual(["F-001"]);
 		// reconcileAllRelationships wrote the reverse edge onto the feature
-		const feature = parseFrontmatter(vault._files.get("features/F-001_X.md")!)!;
+		const feature = parseRawFrontmatter(vault._files.get("features/F-001_X.md")!)!;
 		expect(feature.implemented_by).toEqual(["S-001"]);
 		expect(Notice.instances.join("\n")).toContain("Linked S-001 to F-001 (implements)");
 	});
@@ -301,7 +301,7 @@ describe("applyFeatureLink (integration via obsidian mock)", () => {
 			relationshipType: "implements",
 		});
 
-		const story = parseFrontmatter(vault._files.get("stories/S-002.md")!)!;
+		const story = parseRawFrontmatter(vault._files.get("stories/S-002.md")!)!;
 		expect(story.implements).toEqual(["F-001"]);
 	});
 });

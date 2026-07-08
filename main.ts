@@ -25,7 +25,6 @@ import { LinkFeatureModal, LinkFeatureModalResult, FeatureOption } from "./ui/Li
 import { FeatureDetailsView, FEATURE_DETAILS_VIEW_TYPE } from "./ui/FeatureDetailsView";
 import { FeatureCoverageView, FEATURE_COVERAGE_VIEW_TYPE } from "./ui/FeatureCoverageView";
 import { NotionClient } from "./notion/notionClient";
-import { stripQuotes } from "./util/entityParser";
 
 // Result interfaces for internal mapping
 interface ConvertNoteResult {
@@ -44,8 +43,7 @@ import {
 } from "./util/template";
 import { parseFrontmatterAndBody, createWithFrontmatter, applyFrontmatterUpdates } from "./util/frontmatter";
 import { EntityCoreFacade } from "./src/entity-core-facade";
-import { EntityIndexAdapter } from "./src/adapters/entity-index-adapter";
-import type { EntityIndex as CoreEntityIndex, RuntimeEntity } from "./src/entity-core/types";
+import type { RuntimeEntity } from "./src/entity-core/types";
 import {
 	loadCanvasData,
 	saveCanvasData,
@@ -75,14 +73,13 @@ import { normalizeStatus as normalizeStatusFn, normalizePriority as normalizePri
 import { buildCanvasMetadata as buildCanvasMetadataFn } from "./util/canvasMetadata";
 import { mapNotionStatusToLocal as mapNotionStatusToLocalFn, notionBlocksToMarkdown as notionBlocksToMarkdownFn, richTextToPlain as richTextToPlainFn, buildMarkdownContent as buildMarkdownContentFn } from "./util/notionMarkdown";
 import { parseFutureFeatures as parseFutureFeaturesFn, mapCategoryToPhase as mapCategoryToPhaseFn, titleSimilarity as titleSimilarityFn } from "./util/featureParsing";
-import { generateUniqueFilename, isPluginCreatedNote, generateEntityFilename } from "./util/fileNaming";
+import { generateUniqueFilename, isPluginCreatedNote, generateEntityFilename, stripQuotes, generateNodeIdFromEntityId } from "./util/fileNaming";
 import { addNodesToCanvasView, getCanvasView, hasInternalCanvasAPI, inspectCanvasAPI, addEdgesToCanvasView } from "./util/canvasView";
 import { EntityIndex, EntityIndexEntry, getEntityTypeFromId } from "./util/entityNavigator";
 import { PositioningEngineV4, EntityData as EntityDataV4, RelationshipRule, PositioningConfig } from "./util/positioningV4";
 import { loadSchemaOrDefault } from "./src/entity-core/schema-bootstrap.js";
 import { buildRelationshipRules } from "./src/entity-core/schema-derivation.js";
 import { ObsidianVaultAdapter } from "./src/adapters/obsidian-vault-adapter.js";
-import { generateNodeIdFromEntityId } from "./util/entityParser";
 import { toEntityData, toItemFrontmatter, toFlatFrontmatter } from "./src/adapters/model-map";
 import { reconcileRelationships, cleanTransitiveDependencies, detectAndBreakCycles } from "./util/relationshipReconciler";
 
@@ -9240,7 +9237,8 @@ private registerCommands(): void {
 	}
 
 	/**
-	 * Canonical replacement for util/frontmatter.parseFrontmatter on READ
+	 * Canonical replacement for the legacy util/frontmatter.parseFrontmatter
+	 * (deleted in Phase 5) on READ
 	 * paths: parse via entity-core's EntityParser, project to the legacy
 	 * ItemFrontmatter view. Same null contract: null when there is no
 	 * frontmatter block, the YAML is invalid, or id/type are missing. (The
@@ -9295,14 +9293,12 @@ private registerCommands(): void {
 		this.entityIndex = new EntityIndex(this.app, this.settings.entityNavigator, entityCore.getSchema());
 		await this.entityIndex.buildIndex();
 
-		// Wire the entity index to entity-core using adapter
-		const indexAdapter = new EntityIndexAdapter(this.entityIndex, entityCore.getSchema());
-		// EntityIndexAdapter implements only the engine index seam (the subset of
-		// EntityIndex that IDAllocator/RelationshipGraph actually call). The facade
-		// declares the full EntityIndex parameter type, so cast through the seam.
-		entityCore.initializeWithIndex(indexAdapter as unknown as CoreEntityIndex);
+		// Wire the entity index's internal ProjectIndex to entity-core directly
+		// (Phase 5: the EntityIndexAdapter shim is deleted — ProjectIndex
+		// implements the entity-core EntityIndex interface natively).
+		entityCore.initializeWithIndex(this.entityIndex.getCoreIndex());
 
-		console.log("[Entity-Core] Initialized with facade and index adapter");
+		console.log("[Entity-Core] Initialized with facade and ProjectIndex");
 
 		// Watch for file changes to update index
 		this.registerEvent(

@@ -4,8 +4,10 @@
  * Covers src/adapters/model-map.ts:
  *   1. Parity — for a corpus of frontmatter fixtures (extended from
  *      frontmatterRoundTrip.test.ts), EntityParser.parse → toEntityData yields
- *      the same field values the legacy util/entityParser
- *      parseEntityFromFrontmatter produces.
+ *      PINNED literal EntityData values. The pins were generated from the
+ *      legacy util/entityParser parseEntityFromFrontmatter output while both
+ *      parsers were green (Phase 5) — they freeze the positioning projection
+ *      the legacy parser produced; the parser itself is deleted.
  *   2. Reconciled defaults (spec §5.3) — literal unknown type (no 'task'
  *      coercion), schema default workstream 'engineering' (no 'default' /
  *      legacy `effort` fallback).
@@ -20,6 +22,10 @@
  *   6. fromFrontmatterObject ≡ EntityParser.parse (schema-driven routing,
  *      no hardcoded relationship lists).
  */
+// util/fileNaming (home of generateNodeIdFromEntityId since Phase 5, pulled in
+// directly and via model-map) imports 'obsidian' — mock it virtually.
+jest.mock('obsidian', () => require('./harness/obsidian-mock'), { virtual: true });
+
 import { EntityParser } from '../src/entity-core/parser';
 import { SchemaRegistry } from '../src/entity-core/schema-registry';
 import { DEFAULT_SCHEMA } from '../src/entity-core/default-schema';
@@ -33,10 +39,7 @@ import {
 	fromFrontmatterObject,
 	DEFAULT_PRIORITY,
 } from '../src/adapters/model-map';
-import {
-	parseEntityFromContent,
-	generateNodeIdFromEntityId,
-} from '../util/entityParser';
+import { generateNodeIdFromEntityId } from '../util/fileNaming';
 import { createWithFrontmatter, updateFrontmatter } from '../util/frontmatter';
 import type { ItemFrontmatter, FeatureFrontmatter } from '../types';
 
@@ -275,29 +278,97 @@ function makeEntity(partial: Partial<RuntimeEntity>): RuntimeEntity {
 }
 
 // =============================================================================
-// 1. Parity: EntityParser.parse → toEntityData ≡ legacy parseEntityFromFrontmatter
+// 1. Parity: EntityParser.parse → toEntityData ≡ pinned legacy positioning
+//    projection (literals generated from util/entityParser
+//    parseEntityFromFrontmatter output immediately before its Phase 5 deletion)
 // =============================================================================
 
-describe('toEntityData parity with util/entityParser (known type + workstream corpus)', () => {
+/**
+ * Frozen expected EntityData per corpus fixture. Notes on the legacy shape:
+ *  - `parent: ""` — createWithFrontmatter always emits `parent: ""` and the
+ *    legacy parser read the empty string through (not undefined).
+ *  - Absent scalar keys (`supersedes`/`previousVersion` on most fixtures) were
+ *    `undefined` on the legacy object — omitted here; `toEqual` treats
+ *    undefined-valued and absent keys identically.
+ *  - The feature fixture carries no `vault_path`, so the test's
+ *    `String(entry.fm.vault_path)` yields the literal string "undefined" —
+ *    pinned as-is (both parsers received the same argument).
+ */
+const PINNED_ENTITY_DATA: Record<string, FM> = {
+	'task': {
+		entityId: 'T-001', nodeId: 'node-T-001', type: 'task', workstream: 'engineering',
+		parent: '', dependsOn: ['T-002', 'S-1'], blocks: ['T-009'], enables: [], affects: [],
+		implementedBy: [], implements: [], documents: [], filePath: 'tasks/T-001.md',
+	},
+	'task with parent': {
+		entityId: 'T-005', nodeId: 'node-T-005', type: 'task', workstream: 'engineering',
+		parent: 'S-010', dependsOn: ['T-001'], blocks: [], enables: [], affects: [],
+		implementedBy: [], implements: [], documents: [], filePath: 'tasks/T-005.md',
+	},
+	'story': {
+		entityId: 'S-010', nodeId: 'node-S-010', type: 'story', workstream: 'default',
+		parent: '', dependsOn: [], blocks: [], enables: [], affects: [],
+		implementedBy: [], implements: ['F-001'], documents: [], filePath: 'stories/S-010.md',
+	},
+	'story with deprecated enables': {
+		entityId: 'S-020', nodeId: 'node-S-020', type: 'story', workstream: 'engineering',
+		parent: 'M-002', dependsOn: [], blocks: [], enables: ['S-011', 'S-012'], affects: [],
+		implementedBy: [], implements: [], documents: [], filePath: 'stories/S-020.md',
+	},
+	'milestone': {
+		entityId: 'M-002', nodeId: 'node-M-002', type: 'milestone', workstream: 'engineering',
+		parent: '', dependsOn: ['M-001'], blocks: [], enables: [], affects: [],
+		implementedBy: [], implements: ['F-001', 'F-002'], documents: [], filePath: 'milestones/M-002.md',
+	},
+	'decision': {
+		entityId: 'DEC-003', nodeId: 'node-DEC-003', type: 'decision', workstream: 'architecture',
+		parent: '', dependsOn: [], blocks: [], enables: [], affects: ['F-001', 'DOC-002', 'S-010'],
+		implementedBy: [], implements: [], documents: [], filePath: 'decisions/DEC-003.md',
+	},
+	'decision with supersedes': {
+		entityId: 'DEC-004', nodeId: 'node-DEC-004', type: 'decision', workstream: 'architecture',
+		parent: '', dependsOn: [], blocks: [], enables: [], affects: ['DOC-002'],
+		implementedBy: [], implements: [], documents: [], supersedes: 'DEC-001',
+		filePath: 'decisions/DEC-004.md',
+	},
+	'document': {
+		entityId: 'DOC-002', nodeId: 'node-DOC-002', type: 'document', workstream: 'docs',
+		parent: '', dependsOn: [], blocks: [], enables: [], affects: [],
+		implementedBy: [], implements: [], documents: ['F-001'], filePath: 'docs/DOC-002.md',
+	},
+	'document with previous_version + decided_by': {
+		entityId: 'DOC-003', nodeId: 'node-DOC-003', type: 'document', workstream: 'docs',
+		parent: '', dependsOn: [], blocks: [], enables: [], affects: [],
+		implementedBy: [], implements: [], documents: ['F-001'], previousVersion: 'DOC-001',
+		filePath: 'docs/DOC-003.md',
+	},
+	'feature': {
+		entityId: 'F-001', nodeId: 'node-F-001', type: 'feature', workstream: 'engineering',
+		parent: '', dependsOn: [], blocks: ['F-002'], enables: [], affects: [],
+		implementedBy: ['M-002', 'S-010'], implements: [], documents: [], filePath: 'undefined',
+	},
+};
+
+describe('toEntityData parity with the pinned legacy positioning projection', () => {
 	for (const entry of CORPUS) {
-		it(`matches the legacy positioning projection for ${entry.name}`, () => {
+		it(`matches the pinned projection for ${entry.name}`, () => {
 			const filePath = String(entry.fm.vault_path);
 			const nodeId = generateNodeIdFromEntityId(String(entry.fm.id));
 			const content = contentOf(entry.fm);
 
-			const legacy = parseEntityFromContent(content, nodeId, filePath);
-			expect(legacy).not.toBeNull();
+			const pinned = PINNED_ENTITY_DATA[entry.name];
+			expect(pinned).toBeDefined();
 
 			const runtime = parser.parse(content, filePath);
 			const projected = toEntityData(runtime, filePath, nodeId);
 
-			// Compare exactly the fields the legacy parser produces (the
+			// Compare exactly the fields the legacy parser produced (the
 			// projection may carry extra bridge fields like documentedBy).
 			const picked: FM = {};
-			for (const key of Object.keys(legacy!)) {
+			for (const key of Object.keys(pinned)) {
 				picked[key] = (projected as unknown as FM)[key];
 			}
-			expect(picked).toEqual(legacy as unknown as FM);
+			expect(picked).toEqual(pinned);
 		});
 	}
 
@@ -338,10 +409,8 @@ describe('reconciled parser defaults (spec §5.3 — entity-core semantics)', ()
 			BODY,
 		].join('\n');
 
-		// Legacy behavior (pinned here as the OLD contract): coerces to task.
-		const legacy = parseEntityFromContent(content, 'node-E-001', 'epics/E-001.md');
-		expect(legacy!.type).toBe('task');
-
+		// Legacy behavior (the OLD contract, parser deleted in Phase 5):
+		// util/entityParser coerced unknown types → 'task'.
 		// Converged behavior: literal type survives for the validator to judge.
 		const runtime = parser.parse(content, 'epics/E-001.md');
 		const projected = toEntityData(runtime, 'epics/E-001.md');
@@ -360,10 +429,8 @@ describe('reconciled parser defaults (spec §5.3 — entity-core semantics)', ()
 	it('ignores the legacy `effort` fallback — schema default wins', () => {
 		const content = ['---', 'type: task', 'id: T-101', 'title: Effort only', 'effort: infra', '---', BODY].join('\n');
 
-		// Legacy behavior read effort as the workstream.
-		const legacy = parseEntityFromContent(content, 'node-T-101', 'tasks/T-101.md');
-		expect(legacy!.workstream).toBe('infra');
-
+		// Legacy behavior (the OLD contract, parser deleted in Phase 5):
+		// util/entityParser read `effort: infra` as the workstream.
 		// Converged behavior: schema default; effort survives in passthrough.
 		const runtime = parser.parse(content, 'tasks/T-101.md');
 		expect(toEntityData(runtime, 'tasks/T-101.md').workstream).toBe('engineering');

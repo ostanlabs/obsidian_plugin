@@ -563,8 +563,9 @@ export class PositioningEngineV4 {
 		// claiming its documents, a document claiming its decisions) can actually read the field
 		// and attach the child. Without these bridge entries those parent rules were dead:
 		// getFieldValue looked up `entity['documented_by']` (snake_case) which never exists on the
-		// camelCase EntityData. DEFAULT layout is unchanged because the canonical entity parser
-		// (entityParser.ts) never populates these reverse fields, so the lookup stays undefined
+		// camelCase EntityData. DEFAULT layout is unchanged because the canonical projection
+		// (model-map toEntityData) only populates these reverse fields when the schema declares
+		// the reverse pair for the entity's type, so the lookup stays undefined
 		// for the default schema / real vault — the wiring only activates when a schema+data pair
 		// actually carries the reverse field.
 		const fieldMap: Record<string, string> = {

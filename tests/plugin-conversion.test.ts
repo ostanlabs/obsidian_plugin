@@ -9,7 +9,7 @@ jest.mock("obsidian", () => require("./harness/obsidian-mock"), { virtual: true 
 
 import CanvasStructuredItemsPlugin from "../main";
 import { createTestApp, TFile, Vault } from "./harness/obsidian-mock";
-import { parseFrontmatter } from "../util/frontmatter";
+import { parseRawFrontmatter } from "../util/frontmatter";
 import { _resetSessionHighWaterForTests } from "../util/idGenerator";
 
 const MANIFEST = {
@@ -47,7 +47,7 @@ describe("performNoteConversion (integration via obsidian mock)", () => {
 		);
 
 		const content = vault._files.get("notes/Some Idea.md")!;
-		const fm = parseFrontmatter(content)!;
+		const fm = parseRawFrontmatter(content)!;
 		expect(fm.type).toBe("task");
 		expect(fm.id).toBe("T-001");
 		expect(fm.title).toBe("Some Idea"); // basename
@@ -80,7 +80,7 @@ describe("performNoteConversion (integration via obsidian mock)", () => {
 			"body\n"
 		);
 
-		const fm = parseFrontmatter(vault._files.get("notes/Legacy.md")!)!;
+		const fm = parseRawFrontmatter(vault._files.get("notes/Legacy.md")!)!;
 		expect(fm.type).toBe("story");
 		expect(fm.created_at).toBe("2020-01-01T00:00:00.000Z"); // kept
 		expect(fm.depends_on).toEqual(["T-999"]); // kept
@@ -100,7 +100,7 @@ describe("performNoteConversion (integration via obsidian mock)", () => {
 			"b\n"
 		);
 
-		const fm = parseFrontmatter(vault._files.get("notes/x.md")!)!;
+		const fm = parseRawFrontmatter(vault._files.get("notes/x.md")!)!;
 		// util/normalize maps assorted spellings to the canonical human-readable set
 		expect(fm.status).toBe("In Progress");
 	});

@@ -1,9 +1,11 @@
 /**
  * Integration: the local→Notion sync flows against the in-memory obsidian mock, with a
- * stubbed notionClient. Covers the parseFrontmatter call sites in:
- *   - syncFileToNotion(): single-note sync incl. the legacy-field migration-on-read
- *     (created→created_at, effort→workstream) that the parser applies before the
- *     frontmatter is handed to notionClient.syncNote.
+ * stubbed notionClient. Covers the frontmatter-read call sites (main.ts
+ * parseItemFrontmatter over the canonical EntityParser) in:
+ *   - syncFileToNotion(): single-note sync incl. the reconciled legacy-alias
+ *     semantics (effort/created stay in passthrough; schema-default workstream,
+ *     parse-time created_at) applied before the frontmatter is handed to
+ *     notionClient.syncNote.
  *   - syncAllCanvasNotesToNotion(): canvas-wide two-pass sync (pages, then edge-derived
  *     dependencies) — pins that eligibility is `frontmatter.created_by_plugin`, NOT the
  *     broader isPluginCreatedNote() check.
@@ -14,7 +16,7 @@ jest.mock("obsidian", () => require("./harness/obsidian-mock"), { virtual: true 
 
 import CanvasStructuredItemsPlugin from "../main";
 import { createTestApp, Notice, TFile, Vault, Workspace } from "./harness/obsidian-mock";
-import { parseFrontmatter } from "../util/frontmatter";
+import { parseRawFrontmatter } from "../util/frontmatter";
 
 const MANIFEST = {
 	id: "canvas-structured-items",
@@ -45,7 +47,7 @@ function makePlugin(seed: Record<string, string> = {}) {
 }
 
 function note(fields: Record<string, string>): string {
-	// parseFrontmatter needs type+title+id; default a title.
+	// main.ts's parseItemFrontmatter needs type+title+id; default a title.
 	const withTitle = { title: fields.id ? `${fields.id} title` : "untitled", ...fields };
 	const lines = ["---", ...Object.entries(withTitle).map(([k, v]) => `${k}: ${v}`), "---", "", "body"];
 	return lines.join("\n");
@@ -78,7 +80,7 @@ describe("syncFileToNotion (integration via obsidian mock)", () => {
 
 		expect(synced).toHaveLength(1);
 		expect(synced[0].id).toBe("T-001");
-		const fm = parseFrontmatter(vault._files.get("tasks/T-001.md")!)!;
+		const fm = parseRawFrontmatter(vault._files.get("tasks/T-001.md")!)!;
 		expect(fm.notion_page_id).toBe("page-123");
 		expect(Notice.instances).toContain("Successfully synced to Notion");
 	});
@@ -103,7 +105,8 @@ describe("syncFileToNotion (integration via obsidian mock)", () => {
 
 		await plugin.syncFileToNotion(new TFile("tasks/T-002.md"));
 
-		// Pre-convergence, parseFrontmatter auto-migrated effort→workstream and
+		// Pre-convergence, the legacy parseFrontmatter (deleted in Phase 5)
+		// auto-migrated effort→workstream and
 		// created→created_at (WI-1). The canonical EntityParser leaves legacy
 		// aliases in passthrough: workstream falls back to the schema default
 		// and created_at is stamped at parse time — the same semantics the MCP
@@ -201,8 +204,8 @@ describe("syncAllCanvasNotesToNotion (integration via obsidian mock)", () => {
 		// B depends on A: B's page gets A's page as dependency
 		expect(depUpdates).toEqual([{ page: "page-B-1", deps: ["page-A-1"] }]);
 		// both files received their page ids
-		expect(parseFrontmatter(vault._files.get("A.md")!)!.notion_page_id).toBe("page-A-1");
-		expect(parseFrontmatter(vault._files.get("B.md")!)!.notion_page_id).toBe("page-B-1");
+		expect(parseRawFrontmatter(vault._files.get("A.md")!)!.notion_page_id).toBe("page-A-1");
+		expect(parseRawFrontmatter(vault._files.get("B.md")!)!.notion_page_id).toBe("page-B-1");
 		expect(Notice.instances.join("\n")).toContain("2 pages synced");
 	});
 
@@ -292,7 +295,7 @@ describe("pollNotionForChanges (integration via obsidian mock)", () => {
 
 		await plugin.pollNotionForChanges();
 
-		const fm = parseFrontmatter(vault._files.get("tasks/T-001.md")!)!;
+		const fm = parseRawFrontmatter(vault._files.get("tasks/T-001.md")!)!;
 		expect(fm.title).toBe("From Notion");
 	});
 

@@ -1,8 +1,9 @@
 # Spec — Entity Model + Parse + Index Convergence (§1 / §8 / §5)
 
-**Status:** In progress. **Owner:** TBD. **Risk:** High (architectural, touches the
-untested `main.ts`, 10,899 lines). **Prereqs met:** schema single-source, positioning
-regression-lock, unified filenames/serializer/reconciler, obsidian-mock harness — all done.
+**Status:** ✅ COMPLETE — Phases 0-5 all done. **Owner:** TBD. **Risk was:** High
+(architectural, touches the untested `main.ts`, 10,899 lines). **Prereqs met:** schema
+single-source, positioning regression-lock, unified filenames/serializer/reconciler,
+obsidian-mock harness — all done.
 
 This is the last large piece of the plugin ⇄ MCP unification. It is the *framing* refactor
 the remaining duplication rides on: collapse the plugin's parallel entity model, parsers, and
@@ -12,7 +13,7 @@ and MCP.
 
 ---
 
-## 1. Motivation
+## 1. Motivation (written pre-refactor; describes the state before Phase 0)
 
 The `EntityCoreFacade` seam exists (`main.ts:9187`) and exposes `parseEntity`, `serializeEntity`,
 `validateEntity`, `allocateId`, `generateFilename`, `getTypeFolderPath`, `getSchema`,
@@ -26,12 +27,12 @@ keys, hardcoded relationship-field lists) and lets the plugin inherit `entity-co
 parse/serialize path is well-tested (parser 91%, serializer 95%) and whose index/allocator/
 registry layer is pinned at 99-100% line coverage as of Phase 2a (see §2a).
 
-## 2. Current state (what diverges)
+## 2. Pre-refactor state (historical — what diverged before Phases 0-5)
 
 ### §8 — Five+ entity shapes
 | Model | File | Shape | Relationship keys |
 |---|---|---|---|
-| `EntityData` | `util/positioningV4.ts:57-73` (built by `util/entityParser` `parseEntityFromFrontmatter`) | positioning input | **camelCase** (`dependsOn`, `implementedBy`, `previousVersion`) |
+| `EntityData` | `util/positioningV4.ts:57-73` (built by `util/entityParser` `parseEntityFromFrontmatter` — deleted in Phase 5; now built only by `model-map.toEntityData`) | positioning input | **camelCase** (`dependsOn`, `implementedBy`, `previousVersion`) |
 | `ItemFrontmatter` / `FeatureFrontmatter` | `types.ts:98-161` | flat frontmatter + plugin-only fields (`inProgress`, `created_by_plugin`, `notion_page_id`); `priority` is **required** (`types.ts:104`) | snake_case, typed optional arrays |
 | `EntityIndexEntry` | `util/entityNavigator.ts:44-62` | index entry holding a `TFile` | hardcoded snake_case field set, non-optional arrays defaulting `[]` |
 | `EntityFrontmatter` | `util/entityNavigator.ts:22-41` | loose all-optional DTO over raw `metadataCache` frontmatter, used by `indexFile()` | snake_case, all optional |
@@ -248,10 +249,41 @@ numbers after Phase 2a (+45 pinning tests in `k2.project-index-extra`,
   the strict parser throws on — a canonical parse could never see its own repair targets),
   and `util/idGenerator`'s `metadataCache` scan (synchronous fallback API that must also see
   non-entity notes).
-- **Phase 5 — Delete duplicates.** Relocate `stripQuotes`/`generateNodeIdFromEntityId`, then
-  remove `util/entityParser.ts`, the redundant `util/frontmatter` parsers,
-  `EntityIndexEntry`/`EntityFrontmatter`/`entityNavigator` internals, and the
-  `EntityIndexAdapter` shim. `ItemFrontmatter` becomes a thin projection type (or is deleted).
+- **Phase 5 — Delete duplicates. ✅ DONE.** What was actually deleted vs. kept:
+  - **Relocated:** `stripQuotes` + `generateNodeIdFromEntityId` moved verbatim from
+    `util/entityParser.ts` into `util/fileNaming.ts` (they are id/filename utilities);
+    importers (`main.ts`, `src/adapters/model-map.ts`) updated directly, no re-exports.
+  - **Deleted `util/entityParser.ts`** (parser family A). Its three test consumers migrated:
+    `positioning-vault-validation` and `positioningV4` now LOAD entities through the canonical
+    production path (`EntityParser` + `model-map.toEntityData`; strict-parse failures → null,
+    preserving the legacy skip/orphan tolerance — against the live AgentPlatform vault all
+    1275 active files parse cleanly, 1274 positioned, no basename-derived-id fallback needed);
+    `model-map.test.ts`'s parity corpus now asserts PINNED literal `EntityData` values
+    (generated from the legacy parser's output immediately before deletion) instead of calling
+    the legacy parser as a live reference.
+  - **Deleted `parseFrontmatter`** from `util/frontmatter.ts` (parser family B's
+    `ItemFrontmatter`-typed reader with WI-1 migration-on-read; zero production callers after
+    Phase 2). Its test-helper importers switched to `parseRawFrontmatter` (raw record, no
+    migration/validation — value-identical on plugin-written canonical files). The WI-1
+    migration unit tests (`frontmatterExtra`) died with the function; the required-field null
+    contract stays covered via `parseAnyFrontmatter`. `parseFrontmatterLines`/
+    `robustSplitFrontmatter` internals survive (used by `parseRawFrontmatter` and the writers).
+  - **Deleted the `EntityIndexAdapter` shim** (+ its test suite). `EntityIndex` gained
+    `getCoreIndex(): ProjectIndex` and `main.ts` wires
+    `entityCore.initializeWithIndex(this.entityIndex.getCoreIndex())` directly — no cast:
+    `ProjectIndex` implements the entity-core `EntityIndex` interface natively. Semantics
+    note: `ProjectIndex.buildAdjacency` keys edges by FIELD name (`depends_on`), not schema
+    relationship name (`dependency`) as the adapter did; no production caller uses
+    adjacency/cycle checks, and `facade.test.ts` was updated to field-name keys.
+  - **Deleted `EntityFrontmatter`** (unreferenced loose DTO). **`EntityIndexEntry` KEPT** —
+    it is the navigator's public boundary projection, materialized on demand from
+    `ProjectIndex` state (Phase 3 design).
+  - **Kept with in-code justification** (Phase 4 survivors, unchanged):
+    `parseFrontmatterAndBody`, `sanitizeEntityFilesForYaml`'s lenient `parseAnyFrontmatter`,
+    `util/idGenerator`'s `metadataCache` scan, and the canonical-format writers
+    (`createWithFrontmatter`/`updateFrontmatter`/`applyFrontmatterUpdates`/
+    `serializeFrontmatter`). `ItemFrontmatter` remains the thin projection type produced by
+    `toItemFrontmatter()` (per resolved open question §10).
 
 ## 7. Risks & mitigations
 
@@ -272,16 +304,34 @@ numbers after Phase 2a (+45 pinning tests in `k2.project-index-extra`,
   `ProjectIndex`-backed navigator tests; expanded `main.ts` integration tests per phase.
 - **Invariant:** `positioning-vault-validation` stays at **0 unpositioned** throughout.
 
-## 9. Acceptance criteria
-- [ ] One in-memory model: `RuntimeEntity`; `EntityData`/`ItemFrontmatter` are pure projections.
-- [ ] All plugin reads go through `EntityParser`; all navigation through `ProjectIndex`.
-- [ ] `util/entityParser.ts` (with `stripQuotes`/`generateNodeIdFromEntityId` relocated),
-      redundant `util/frontmatter` parsers, `EntityIndexEntry`, `EntityFrontmatter`,
-      `entityNavigator` internals, and `EntityIndexAdapter` are deleted.
-- [ ] Plugin-only fields round-trip via passthrough.
+## 9. Acceptance criteria (final reality; scope-adjusted lines noted)
+- [x] One in-memory model: `RuntimeEntity`; `EntityData`/`ItemFrontmatter` are pure
+      projections produced only by `model-map` (`toEntityData`/`toItemFrontmatter`).
+- [x] All plugin entity reads go through `EntityParser`; all navigation through
+      `ProjectIndex`. Three deliberate, in-code-justified exceptions survive (Phase 4):
+      `parseFrontmatterAndBody` (modal split of plain notes; raw-scalar merge semantics),
+      `sanitizeEntityFilesForYaml`'s lenient `parseAnyFrontmatter` (repairs files the strict
+      parser throws on), and `util/idGenerator`'s `metadataCache` scan (synchronous fallback
+      that must also see non-entity notes).
+- [x] Deleted: `util/entityParser.ts` (after relocating `stripQuotes`/
+      `generateNodeIdFromEntityId` to `util/fileNaming.ts`), `util/frontmatter.ts`'s
+      `parseFrontmatter` (the redundant WI-1 reader — the other family-B members either
+      survive as justified above or serve the canonical writers), `EntityFrontmatter`, and
+      `EntityIndexAdapter`. **Scope change:** `EntityIndexEntry` is NOT deleted — it survives
+      as the navigator's public boundary projection (materialized on demand from
+      `ProjectIndex`); `entityNavigator`'s internals were already rewritten over
+      `ProjectIndex` in Phase 3 rather than deleted wholesale.
+- [x] Plugin-only fields round-trip via passthrough (`frontmatterRoundTrip` +
+      `model-map.test.ts`).
 - [x] `project-index.ts`, `id-allocator.ts`, `schema-registry.ts` ≥90% coverage (100/100/99.5, Phase 2a).
-- [ ] Full suite green; positioning 0-unpositioned; `build:plugin` + `build:mcp` pass.
-- [ ] `main.ts` no longer imports `util/entityParser` or `util/entityNavigator`'s index.
+- [x] Full suite green (jest 649 + vitest 260 + integration 90); positioning-vault-validation
+      1274/1275 positioned (≥0.97 invariant, known deep-nesting residue); `build:plugin` +
+      `build:mcp` pass.
+- [x] `main.ts` no longer imports `util/entityParser` (deleted) nor `parseFrontmatter`/
+      `parseAnyFrontmatter` from `util/frontmatter`. **Scope change:** `main.ts` still
+      imports `util/entityNavigator`'s `EntityIndex` — by design: it is now a thin
+      `ProjectIndex`-backed wrapper (Phase 3) whose core index is handed to entity-core via
+      `getCoreIndex()`; the second, hand-rolled index it referred to no longer exists.
 
 ## 10. Open questions (resolved)
 - ~~Custom fields vs passthrough for plugin-only fields?~~ **Resolved:** passthrough — it is

@@ -17,8 +17,8 @@
  *  - Per spec §5.3 the converged defaults are entity-core's: the literal
  *    entity type is preserved (NO unknown-type→'task' coercion) and the
  *    workstream default is the schema's ('engineering' — NO 'default' /
- *    legacy-`effort` fallback). Those legacy coercions live only in
- *    util/entityParser.ts and die with it in Phase 5.
+ *    legacy-`effort` fallback). Those legacy coercions lived only in
+ *    util/entityParser.ts (deleted in Phase 5).
  *  - Plugin-only fields (`inProgress`, `created_by_plugin`, `notion_page_id`)
  *    ride `RuntimeEntity.passthrough` (spec §5.1).
  *  - `fromItemFrontmatter` separates fields/relationships/passthrough purely
@@ -44,7 +44,7 @@
 import type { RuntimeEntity } from '../entity-core/types.js';
 import type { SchemaRegistry } from '../entity-core/schema-registry.js';
 import type { EntityData, EntityType as PositioningEntityType } from '../../util/positioningV4.js';
-import { generateNodeIdFromEntityId } from '../../util/entityParser.js';
+import { generateNodeIdFromEntityId } from '../../util/fileNaming.js';
 import type {
 	EntityType as PluginEntityType,
 	FeatureFrontmatter,
@@ -125,7 +125,8 @@ export interface PositioningEntityData extends EntityData {
 /**
  * Project a RuntimeEntity onto the positioning engine's input shape.
  *
- * Field-for-field compatible with util/entityParser.parseEntityFromFrontmatter
+ * Field-for-field compatible with the legacy util/entityParser
+ * parseEntityFromFrontmatter (deleted in Phase 5; pinned in model-map.test.ts)
  * for known-type / known-workstream entities, EXCEPT the reconciled defaults
  * (spec §5.3): unknown `type` stays literal (old parser coerced → 'task');
  * a missing `workstream` already arrived from EntityParser as the schema

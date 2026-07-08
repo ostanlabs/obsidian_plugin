@@ -3,7 +3,8 @@
  *
  * Wired end-to-end over the in-memory harness: an ObsidianVaultAdapter sits over a
  * seeded Vault, and the index-dependent modules are initialised with a real plugin
- * EntityIndex wrapped in an EntityIndexAdapter. We assert the facade delegates to
+ * EntityIndex's internal ProjectIndex (via getCoreIndex() — the EntityIndexAdapter
+ * shim was deleted in Phase 5). We assert the facade delegates to
  * each entity-core collaborator (parser/serializer/validator/path-resolver/
  * id-allocator/relationship-graph) and enforces its "not initialised" guards.
  *
@@ -20,9 +21,8 @@ import { ObsidianVaultAdapter } from '../src/adapters/obsidian-vault-adapter';
 import { RelationshipGraph } from '../src/entity-core/relationship-graph';
 import { CanvasManager } from '../src/entity-core/canvas';
 import { SchemaMigrator } from '../src/entity-core/migrator';
-import { EntityIndexAdapter } from '../src/adapters/entity-index-adapter';
 import { EntityIndex } from '../util/entityNavigator';
-import { DEFAULT_SCHEMA } from '../src/entity-core/default-schema';
+import type { ProjectIndex } from '../src/entity-core/project-index';
 import { createTestApp } from './harness/obsidian-mock';
 import type { App } from './harness/obsidian-mock';
 import type { RuntimeEntity } from '../src/entity-core/types';
@@ -47,11 +47,12 @@ function makeFacade(seed: Record<string, string> = {}): { app: App; facade: Enti
   return { app, facade };
 }
 
-/** Build an EntityIndexAdapter over the plugin's real index for a seeded app. */
-async function indexAdapter(app: App): Promise<EntityIndexAdapter> {
+/** Build the plugin's real index for a seeded app and expose its core
+ * ProjectIndex — exactly how main.ts wires initializeWithIndex (Phase 5). */
+async function coreIndex(app: App): Promise<ProjectIndex> {
   const idx = new EntityIndex(app as any, {} as any);
   await idx.buildIndex();
-  return new EntityIndexAdapter(idx, new SchemaRegistry(DEFAULT_SCHEMA));
+  return idx.getCoreIndex();
 }
 
 describe('EntityCoreFacade', () => {
@@ -179,7 +180,7 @@ describe('EntityCoreFacade', () => {
         'archive/milestones/M-005_c.md': fm({ id: 'M-005', type: 'milestone', title: 'C' }),
       };
       const { app, facade } = makeFacade(seed);
-      facade.initializeWithIndex(await indexAdapter(app));
+      facade.initializeWithIndex(await coreIndex(app));
       // max is M-005 (archived counts) → next is M-006, padded to 3 digits.
       expect(await facade.allocateId('milestone')).toBe('M-006');
       // A type with no existing ids starts at 1.
@@ -188,7 +189,7 @@ describe('EntityCoreFacade', () => {
 
     it('getRelationshipGraph / getCanvasManager / getMigrator return live collaborators', async () => {
       const { app, facade } = makeFacade();
-      facade.initializeWithIndex(await indexAdapter(app));
+      facade.initializeWithIndex(await coreIndex(app));
       expect(facade.getRelationshipGraph()).toBeInstanceOf(RelationshipGraph);
       expect(facade.getCanvasManager()).toBeInstanceOf(CanvasManager);
       expect(facade.getMigrator()).toBeInstanceOf(SchemaMigrator);
@@ -206,18 +207,22 @@ describe('EntityCoreFacade', () => {
         }),
       };
       const { app, facade } = makeFacade(seed);
-      facade.initializeWithIndex(await indexAdapter(app));
+      facade.initializeWithIndex(await coreIndex(app));
       const graph = facade.getRelationshipGraph();
 
-      const closing = graph.wouldCreateCycle('dependency', 'M-001', 'M-002');
+      // NOTE: ProjectIndex.buildAdjacency keys edges by FIELD name
+      // ('depends_on') — the edge-type keys the plugin EntityIndex stores.
+      // The deleted EntityIndexAdapter used to resolve the schema relationship
+      // name ('dependency') to its field names instead.
+      const closing = graph.wouldCreateCycle('depends_on', 'M-001', 'M-002');
       expect(closing.hasCycle).toBe(true);
       expect(closing.cyclePath).toContain('M-001');
 
       // The opposite direction is already the existing edge → no NEW cycle.
-      expect(graph.wouldCreateCycle('dependency', 'M-002', 'M-001').hasCycle).toBe(false);
+      expect(graph.wouldCreateCycle('depends_on', 'M-002', 'M-001').hasCycle).toBe(false);
 
       // A brand-new acyclic graph reports no cycles at all.
-      expect(graph.detectCycles('dependency')).toEqual([]);
+      expect(graph.detectCycles('depends_on')).toEqual([]);
     });
 
     it('relationshipGraph.syncBidirectional writes the inverse edge into the vault file', async () => {
@@ -232,7 +237,7 @@ describe('EntityCoreFacade', () => {
         'entities/milestones/M-002_b.md': fm({ id: 'M-002', type: 'milestone', title: 'B' }),
       };
       const { app, facade } = makeFacade(seed);
-      facade.initializeWithIndex(await indexAdapter(app));
+      facade.initializeWithIndex(await coreIndex(app));
       const graph = facade.getRelationshipGraph() as RelationshipGraph;
 
       const source: RuntimeEntity = facade.parseEntity(

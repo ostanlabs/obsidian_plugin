@@ -8,7 +8,7 @@ jest.mock("obsidian", () => require("./harness/obsidian-mock"), { virtual: true 
 
 import CanvasStructuredItemsPlugin from "../main";
 import { createTestApp, Vault, Workspace } from "./harness/obsidian-mock";
-import { parseFrontmatter } from "../util/frontmatter";
+import { parseRawFrontmatter } from "../util/frontmatter";
 import { _resetSessionHighWaterForTests } from "../util/idGenerator";
 
 const MANIFEST = {
@@ -51,7 +51,7 @@ describe("createFeatureFile (integration via obsidian mock)", () => {
 		expect(vault._folders.has("features")).toBe(true);
 		const path = "features/F-001_Realtime Sync.md";
 		expect(vault._files.has(path)).toBe(true);
-		const fm = parseFrontmatter(vault._files.get(path)!)!;
+		const fm = parseRawFrontmatter(vault._files.get(path)!)!;
 		expect(fm.id).toBe("F-001");
 		expect(fm.type).toBe("feature");
 		expect(fm.title).toBe("Realtime Sync");

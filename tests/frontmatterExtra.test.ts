@@ -1,6 +1,5 @@
 import {
 	parseRawFrontmatter,
-	parseFrontmatter,
 	parseAnyFrontmatter,
 	parseFrontmatterAndBody,
 	updateFrontmatter,
@@ -60,20 +59,12 @@ describe("frontmatter - parseRawFrontmatter", () => {
 	});
 });
 
-describe("frontmatter - parseFrontmatter migrations", () => {
-	it("migrates created/updated/effort to *_at/workstream", () => {
-		const fm = parseFrontmatter(
-			`---\ntype: task\ntitle: T\nid: T-1\ncreated: 2025-01-01\nupdated: 2025-01-02\neffort: Engineering\n---`
-		);
-		expect(fm?.created_at).toBe("2025-01-01");
-		expect(fm?.updated_at).toBe("2025-01-02");
-		expect(fm?.workstream).toBe("Engineering");
-	});
-
-	it("returns null when required fields are missing", () => {
-		expect(parseFrontmatter(`---\ntype: task\ntitle: T\n---`)).toBeNull();
-	});
-});
+// NOTE (Phase 5): the legacy parseFrontmatter — the ItemFrontmatter-typed
+// reader with WI-1 migration-on-read (created→created_at, updated→updated_at,
+// effort→workstream) and required-field validation — was deleted; its unit
+// tests went with it. Legacy aliases now stay in passthrough on the canonical
+// EntityParser path (pinned in model-map.test.ts / plugin-notion-sync.test.ts);
+// the required-field null contract survives on parseAnyFrontmatter below.
 
 describe("frontmatter - parseAnyFrontmatter", () => {
 	it("returns null when required fields missing", () => {

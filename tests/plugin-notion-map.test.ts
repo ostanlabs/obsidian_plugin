@@ -9,7 +9,7 @@ jest.mock("obsidian", () => require("./harness/obsidian-mock"), { virtual: true 
 
 import CanvasStructuredItemsPlugin from "../main";
 import { createTestApp, TFile, Vault } from "./harness/obsidian-mock";
-import { parseFrontmatter } from "../util/frontmatter";
+import { parseRawFrontmatter } from "../util/frontmatter";
 
 const MANIFEST = {
 	id: "canvas-structured-items",
@@ -65,7 +65,7 @@ describe("updateLocalFileFromNotion (integration via obsidian mock)", () => {
 		await plugin.updateLocalFileFromNotion(new TFile("tasks/T-001.md"), page);
 
 		const content = vault._files.get("tasks/T-001.md")!;
-		const fm = parseFrontmatter(content)!;
+		const fm = parseRawFrontmatter(content)!;
 		expect(fm.title).toBe("Renamed Task");
 		expect(fm.status).toBe("Completed"); // "Done" → Completed via mapNotionStatusToLocal
 		expect(fm.priority).toBe("High");

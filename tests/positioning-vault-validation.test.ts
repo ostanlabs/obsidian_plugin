@@ -1,9 +1,19 @@
 /**
  * Positioning Validation Test - Real Vault
- * 
+ *
  * Validates the positioning algorithm against the actual AgentPlatform vault.
  * Checks that containment hierarchy and no-overlap rules are honored.
+ *
+ * Entities are loaded through the CANONICAL production read path (Phase 5 of
+ * docs/ENTITY_MODEL_CONVERGENCE_SPEC.md): entity-core `EntityParser` +
+ * `toEntityData` from src/adapters/model-map — the same pipeline
+ * util/entityNavigator.ts and main.ts's positioning read use — so the
+ * 0-unpositioned invariant exercises what the plugin actually runs.
  */
+
+// util/fileNaming (home of generateNodeIdFromEntityId, pulled in directly and
+// via model-map) imports 'obsidian' — mock it virtually.
+jest.mock('obsidian', () => require('./harness/obsidian-mock'), { virtual: true });
 
 import * as fs from 'fs';
 import * as path from 'path';
@@ -13,7 +23,33 @@ import {
 	DEFAULT_POSITIONING_CONFIG,
 	PositioningResult,
 } from '../util/positioningV4';
-import { parseEntityFromContent, generateNodeIdFromEntityId } from '../util/entityParser';
+import { EntityParser } from '../src/entity-core/parser';
+import { SchemaRegistry } from '../src/entity-core/schema-registry';
+import { DEFAULT_SCHEMA } from '../src/entity-core/default-schema';
+import { toEntityData } from '../src/adapters/model-map';
+import { generateNodeIdFromEntityId } from '../util/fileNaming';
+
+const parser = new EntityParser(new SchemaRegistry(DEFAULT_SCHEMA));
+
+/**
+ * Canonical replacement for the legacy parseEntityFromContent: parse via
+ * EntityParser, project via toEntityData. Returns null (skip/orphan tolerance,
+ * matching the legacy parser's null contract) when the strict parser rejects
+ * the file (e.g. missing id/type or invalid YAML) — such files are logged and
+ * skipped by the callers, exactly as before.
+ */
+function parseEntityFromContent(
+	content: string,
+	nodeId: string,
+	filePath: string
+): EntityData | null {
+	try {
+		const runtime = parser.parse(content, filePath);
+		return toEntityData(runtime, filePath, nodeId);
+	} catch {
+		return null;
+	}
+}
 
 // Path to the real vault
 const VAULT_PATH = '/Users/marc-ostan/Obsidian/OstanLabs/obsidian_notion_planning_system/obsidian-vault/Projects/AgentPlatform';

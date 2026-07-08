@@ -250,37 +250,6 @@ export function parseRawFrontmatter(content: string): ParsedFrontmatter | null {
 }
 
 /**
- * Parse frontmatter from a markdown file (for standard entities)
- */
-export function parseFrontmatter(content: string): ItemFrontmatter | null {
-	const frontmatter = parseRawFrontmatter(content);
-	if (!frontmatter) return null;
-
-	// Auto-migrate legacy fields (WI-1 migration: auto-migrate on read)
-	if (frontmatter.created && !frontmatter.created_at) {
-		frontmatter.created_at = frontmatter.created;
-	}
-	if (frontmatter.updated && !frontmatter.updated_at) {
-		frontmatter.updated_at = frontmatter.updated;
-	}
-	if (frontmatter.effort && !frontmatter.workstream) {
-		frontmatter.workstream = frontmatter.effort;
-	}
-
-	// Validate required fields for standard entities
-	// Note: workstream is optional (defaults to 'default' in MCP spec)
-	if (
-		!frontmatter.type ||
-		!frontmatter.title ||
-		!frontmatter.id
-	) {
-		return null;
-	}
-
-	return frontmatter as unknown as ItemFrontmatter;
-}
-
-/**
  * Parse frontmatter for any entity type (feature or standard)
  * Returns the raw parsed frontmatter with type field
  */

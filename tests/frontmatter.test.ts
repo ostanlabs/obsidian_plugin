@@ -1,8 +1,11 @@
-import { parseFrontmatter, updateFrontmatter, serializeFrontmatter } from "../util/frontmatter";
+import { parseRawFrontmatter, parseAnyFrontmatter, updateFrontmatter, serializeFrontmatter } from "../util/frontmatter";
 import { ItemFrontmatter } from "../types";
 
 describe("Frontmatter", () => {
-	describe("parseFrontmatter", () => {
+	// The legacy parseFrontmatter (WI-1 migration + required-field validation)
+	// was deleted in Phase 5; raw reads assert here, entity validation is
+	// exercised via the surviving parseAnyFrontmatter.
+	describe("parseRawFrontmatter", () => {
 		it("should parse valid frontmatter", () => {
 			const content = `---
 type: task
@@ -23,7 +26,7 @@ vault_path: test.md
 
 Content here`;
 
-			const result = parseFrontmatter(content);
+			const result = parseRawFrontmatter(content);
 			expect(result).not.toBeNull();
 			expect(result?.type).toBe("task");
 			expect(result?.title).toBe("Test Task");
@@ -40,22 +43,22 @@ id: T-001
 inProgress: true
 ---`;
 
-			const result = parseFrontmatter(content);
+			const result = parseRawFrontmatter(content);
 			expect(result).not.toBeNull();
 			expect(result?.inProgress).toBe(true);
 		});
 
 		it("should return null for content without frontmatter", () => {
 			const content = "# Just a heading\n\nSome content";
-			const result = parseFrontmatter(content);
+			const result = parseRawFrontmatter(content);
 			expect(result).toBeNull();
 		});
 
-		it("should return null for incomplete frontmatter", () => {
+		it("should return null for incomplete frontmatter (parseAnyFrontmatter validation)", () => {
 			const content = `---
 type: task
 ---`;
-			const result = parseFrontmatter(content);
+			const result = parseAnyFrontmatter(content);
 			expect(result).toBeNull();
 		});
 	});

@@ -10,7 +10,7 @@ jest.mock("obsidian", () => require("./harness/obsidian-mock"), { virtual: true 
 
 import CanvasStructuredItemsPlugin from "../main";
 import { createTestApp, Modal, Notice, TFile, Vault } from "./harness/obsidian-mock";
-import { parseFrontmatter } from "../util/frontmatter";
+import { parseRawFrontmatter } from "../util/frontmatter";
 import { _resetSessionHighWaterForTests } from "../util/idGenerator";
 
 const MANIFEST = {
@@ -80,7 +80,7 @@ describe("convertNoteToStructuredItem (integration via obsidian mock)", () => {
 		await openedModals[0].onSubmit({ type: "story", effort: "growth", alias: "legacy" });
 
 		const content = vault._files.get("notes/Legacy Note.md")!;
-		const fm = parseFrontmatter(content)!;
+		const fm = parseRawFrontmatter(content)!;
 		expect(fm.type).toBe("story");
 		expect(fm.id).toBe("S-001");
 		expect(fm.title).toBe("Legacy Note");
@@ -99,7 +99,7 @@ describe("convertNoteToStructuredItem (integration via obsidian mock)", () => {
 		await plugin.convertNoteToStructuredItem(new TFile("notes/Plain.md"));
 		await openedModals[0].onSubmit({ type: "task", effort: "core" });
 
-		const fm = parseFrontmatter(vault._files.get("notes/Plain.md")!)!;
+		const fm = parseRawFrontmatter(vault._files.get("notes/Plain.md")!)!;
 		expect(fm.type).toBe("task");
 		expect(fm.id).toBe("T-001");
 		expect(fm.status).toBe("Not Started");

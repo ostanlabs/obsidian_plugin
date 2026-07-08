@@ -11,7 +11,7 @@ jest.mock("obsidian", () => require("./harness/obsidian-mock"), { virtual: true 
 
 import CanvasStructuredItemsPlugin from "../main";
 import { createTestApp, Vault } from "./harness/obsidian-mock";
-import { parseFrontmatter } from "../util/frontmatter";
+import { parseRawFrontmatter } from "../util/frontmatter";
 
 const MANIFEST = {
 	id: "canvas-structured-items",
@@ -54,9 +54,9 @@ describe("reconcileAllRelationships (integration via obsidian mock)", () => {
 
 		await plugin.reconcileAllRelationships();
 
-		expect(parseFrontmatter(vault._files.get("tasks/T-1.md")!)!.blocks).toEqual(["T-2"]);
-		expect(parseFrontmatter(vault._files.get("milestones/M-1.md")!)!.children).toEqual(["S-1"]);
-		expect(parseFrontmatter(vault._files.get("features/F-1.md")!)!.implemented_by).toEqual(["S-2"]);
+		expect(parseRawFrontmatter(vault._files.get("tasks/T-1.md")!)!.blocks).toEqual(["T-2"]);
+		expect(parseRawFrontmatter(vault._files.get("milestones/M-1.md")!)!.children).toEqual(["S-1"]);
+		expect(parseRawFrontmatter(vault._files.get("features/F-1.md")!)!.implemented_by).toEqual(["S-2"]);
 	});
 
 	it("prunes broken forward references (depends_on pointing at a non-existent entity)", async () => {
@@ -68,10 +68,10 @@ describe("reconcileAllRelationships (integration via obsidian mock)", () => {
 
 		await plugin.reconcileAllRelationships();
 
-		const fm = parseFrontmatter(vault._files.get("tasks/T-5.md")!)!;
+		const fm = parseRawFrontmatter(vault._files.get("tasks/T-5.md")!)!;
 		expect(fm.depends_on).toEqual(["T-4"]);
 		// and the surviving reference produced its inverse
-		expect(parseFrontmatter(vault._files.get("tasks/T-4.md")!)!.blocks).toEqual(["T-5"]);
+		expect(parseRawFrontmatter(vault._files.get("tasks/T-4.md")!)!.blocks).toEqual(["T-5"]);
 	});
 
 	it("prunes non-ID-shaped garbage tokens from a forward relationship field, keeping valid ids", async () => {
@@ -87,14 +87,14 @@ describe("reconcileAllRelationships (integration via obsidian mock)", () => {
 
 		await plugin.reconcileAllRelationships();
 
-		const t6 = parseFrontmatter(vault._files.get("tasks/T-6.md")!)!;
+		const t6 = parseRawFrontmatter(vault._files.get("tasks/T-6.md")!)!;
 		expect(t6.depends_on).toEqual(["T-4"]);
 		// valid reference preserved and its inverse produced
-		expect(parseFrontmatter(vault._files.get("tasks/T-4.md")!)!.blocks).toEqual(["T-6"]);
+		expect(parseRawFrontmatter(vault._files.get("tasks/T-4.md")!)!.blocks).toEqual(["T-6"]);
 
-		const s3 = parseFrontmatter(vault._files.get("stories/S-3.md")!)!;
+		const s3 = parseRawFrontmatter(vault._files.get("stories/S-3.md")!)!;
 		expect(s3.implements).toEqual(["F-1"]);
-		expect(parseFrontmatter(vault._files.get("features/F-1.md")!)!.implemented_by).toEqual(["S-3"]);
+		expect(parseRawFrontmatter(vault._files.get("features/F-1.md")!)!.implemented_by).toEqual(["S-3"]);
 	});
 
 	it("does NOT delete a parent reference that is merely missing from the vault (warn-only)", async () => {
@@ -105,7 +105,7 @@ describe("reconcileAllRelationships (integration via obsidian mock)", () => {
 
 		await plugin.reconcileAllRelationships();
 
-		expect(parseFrontmatter(vault._files.get("stories/S-9.md")!)!.parent).toBe("M-404");
+		expect(parseRawFrontmatter(vault._files.get("stories/S-9.md")!)!.parent).toBe("M-404");
 	});
 
 	it("writes an operation-log file on a standalone run", async () => {
@@ -130,7 +130,7 @@ describe("reconcileAllRelationships (integration via obsidian mock)", () => {
 		await plugin.reconcileAllRelationships();
 
 		// the active (non-archived) T-7 gets the blocks inverse; archived one is left out of the map
-		expect(parseFrontmatter(vault._files.get("tasks/T-7.md")!)!.blocks).toEqual(["T-8"]);
+		expect(parseRawFrontmatter(vault._files.get("tasks/T-7.md")!)!.blocks).toEqual(["T-8"]);
 	});
 });
 
@@ -146,7 +146,7 @@ describe("sanitizeParentFields (integration via obsidian mock)", () => {
 		const log: string[] = [];
 		await plugin.sanitizeParentFields(log);
 
-		expect(parseFrontmatter(vault._files.get("stories/S-1.md")!)!.parent).toBe("M-1");
+		expect(parseRawFrontmatter(vault._files.get("stories/S-1.md")!)!.parent).toBe("M-1");
 		expect(log.join("\n")).toContain("Sanitizing parent field from array");
 	});
 

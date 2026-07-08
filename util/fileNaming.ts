@@ -4,6 +4,25 @@ import { buildEntityFilename } from "../src/entity-core/path-resolver";
 import { DEFAULT_SCHEMA } from "../src/entity-core/default-schema";
 
 /**
+ * Strip quotes from a YAML value
+ */
+export function stripQuotes(value: string): string {
+	const trimmed = value.trim();
+	if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+		(trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+		return trimmed.slice(1, -1);
+	}
+	return trimmed;
+}
+
+/**
+ * Generate a node ID from an entity ID (for testing purposes)
+ */
+export function generateNodeIdFromEntityId(entityId: string): string {
+	return `node-${entityId}`;
+}
+
+/**
  * Convert a string to snake_case
  */
 export function toSnakeCase(text: string): string {

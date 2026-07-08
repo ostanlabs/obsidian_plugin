@@ -48,29 +48,8 @@ export const ID_PATTERNS: Record<string, RegExp> = {
 	feature: /^F-\d{3,}$/,
 };
 
-// Entity frontmatter interface
-export interface EntityFrontmatter {
-	id?: string;
-	type?: EntityType;
-	title?: string;
-	parent?: string;
-	depends_on?: string[];
-	implements?: string[];  // Features this entity implements (for milestones/stories)
-	documents?: string[];   // Features this document documents (for documents)
-	affects?: string[];     // Features this decision affects (for decisions)
-	enables?: string[];
-	affects_documents?: string[];
-	implemented_by?: string[];
-	// Feature-specific fields
-	documented_by?: string[];
-	decided_by?: string[];
-	blocks?: string[];
-	tier?: string;
-	phase?: string;
-	user_story?: string;
-}
-
-// Entity index entry
+// Entity index entry — the navigator's public boundary projection (survives
+// Phase 5; materialized on demand from ProjectIndex state, see toEntry()).
 export interface EntityIndexEntry {
 	id: string;
 	type: EntityType;
@@ -196,6 +175,19 @@ export class EntityIndex {
 		this.parser = new EntityParser(registry);
 		this.inverseRelationMap = buildReverseRelationMap(registry.getSchema());
 		this.projectIndex = new ProjectIndex(this.inverseRelationMap);
+	}
+
+	/**
+	 * The internal entity-core ProjectIndex (Phase 5: replaces the deleted
+	 * EntityIndexAdapter). ProjectIndex implements the entity-core EntityIndex
+	 * interface natively, so the facade's index-dependent engines (IDAllocator,
+	 * RelationshipGraph) can be wired to it directly:
+	 * `entityCore.initializeWithIndex(entityIndex.getCoreIndex())`.
+	 * Note: relationship edges are keyed by FIELD name (`depends_on`, …), so
+	 * `buildAdjacency` takes field names — the edge-type keys this index stores.
+	 */
+	getCoreIndex(): ProjectIndex {
+		return this.projectIndex;
 	}
 
 	/** Build the entity index from vault files */
