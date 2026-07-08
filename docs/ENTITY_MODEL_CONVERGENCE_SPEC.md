@@ -169,7 +169,10 @@ numbers after Phase 2a (+45 pinning tests in `k2.project-index-extra`,
    `frontmatterRoundTrip.test.ts` already exercises. (Promotion to schema custom fields stays
    an option later; not needed for convergence.) `priority` is already a schema custom field —
    drop its first-class status in the model; `toItemFrontmatter()` synthesizes the default
-   (`'medium'`) the required `ItemFrontmatter.priority` demands.
+   (`'Medium'` — the schema field default and the only casing `ItemPriority` admits) the
+   required `ItemFrontmatter.priority` demands. Note: task has no schema `priority` field, so
+   a parsed task's priority rides passthrough; the projection reads field → passthrough →
+   synthesized default.
 2. **camelCase ↔ snake_case** — the positioning engine reads camelCase (`dependsOn`) via
    `getFieldValue`'s bridge (`positioningV4.ts:559-580`, currently mapping `depends_on`,
    `implemented_by`, `previous_version`, `documented_by`, `decided_by`). `toEntityData()` owns
@@ -196,11 +199,16 @@ numbers after Phase 2a (+45 pinning tests in `k2.project-index-extra`,
 - **Phase 0 — Coverage floor.** Raise integration coverage on the entity read/create/update/scan
   flows in `main.ts` that this refactor touches, so regressions are caught. (Extends the existing
   12 `plugin-*.test.ts` suites.)
-- **Phase 1 — Mapper layer (pure, no behavior change).** Add `toEntityData(RuntimeEntity)`,
-  `toItemFrontmatter(RuntimeEntity)`, and `fromItemFrontmatter(...)` in a plugin
-  `src/adapters/model-map.ts` over entity-core types. Round-trip tests: parse→map→position
-  identical to today; plugin fields preserved; `priority` default synthesized. Nothing consumes
-  them yet.
+- **Phase 1 — Mapper layer (pure, no behavior change). ✅ DONE.** `src/adapters/model-map.ts`:
+  `toEntityData` (+`PositioningEntityData` extension carrying `documentedBy`/`decidedBy`,
+  relationships-only), `toItemFrontmatter`/`toFeatureFrontmatter`, and
+  `fromFrontmatterObject`/`fromItemFrontmatter`/`fromFeatureFrontmatter` (schema-driven,
+  mirrors `EntityParser.parse` key-for-key). Non-obvious contract: projections read
+  relationship keys as `relationships[key] ?? passthrough[key]` because EntityParser routes
+  schema-less keys (deprecated `enables`, feature-side `depends_on`/`blocks`, milestone
+  `parent`) into passthrough while the legacy positioning parser read them untyped. 51 tests
+  in `tests/model-map.test.ts` (parity corpus, reconciled defaults, camelCase bridge,
+  round-trips, priority synthesis). Nothing consumes the mappers yet.
 - **Phase 2 — Route reads through `EntityParser`.** Replace plugin-parser *usage* with
   `facade.parseEntity(...) → RuntimeEntity → projection`, in this order: the single
   `parseEntityFromFrontmatter` site (`main.ts:8396`), then the 12 `parseFrontmatter` sites,
