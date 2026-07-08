@@ -80,11 +80,11 @@ describe("plugin vault flows (integration via obsidian mock)", () => {
 			const canvasFile = new TFile("projects/board.canvas");
 			const path = (await plugin.determineNotePath(canvasFile, "My Task", "T-001", "task")) as string;
 
-			// tasks folder from default settings; filename is <ID>_<title>.md style
+			// tasks folder from default settings; canonical filename is title-only, preserve-case
 			const tasksFolder = (plugin as unknown as { settings: { entityNavigator: { tasksFolder: string } } }).settings.entityNavigator.tasksFolder;
 			expect(path.startsWith(tasksFolder + "/")).toBe(true);
 			expect(path.endsWith(".md")).toBe(true);
-			expect(path).toContain("T-001");
+			expect(path).toContain("My_Task.md");
 			// side effect: the destination folder was created
 			expect(vault._folders.has(tasksFolder)).toBe(true);
 		});

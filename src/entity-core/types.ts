@@ -147,6 +147,13 @@ export interface SchemaSettings {
   archiveLayout: 'by-type' | 'quarterly';
   filenamePattern: string;
   /**
+   * Casing/sanitization mode for the `{title}` slug in `filenamePattern`.
+   *   - 'snake'    : lowercase, non-alphanumerics → `_` (legacy default).
+   *   - 'preserve' : keep case + hyphens, whitespace/invalid → `_`.
+   * Defaults to 'snake' when omitted (SchemaRegistry.getFilenameCase).
+   */
+  filenameCase?: 'snake' | 'preserve';
+  /**
    * Type priority order (highest priority first) used by the positioning engine's
    * overlap resolver: when two nodes overlap, the lower-priority one is moved.
    * When omitted the engine falls back to its built-in default order.

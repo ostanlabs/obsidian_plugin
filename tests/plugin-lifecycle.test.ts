@@ -104,7 +104,8 @@ describe("determineNotePath folder routing (integration via obsidian mock)", () 
 		const path = (await plugin.determineNotePath(canvasFile, "Some Title", "T-100", undefined)) as string;
 
 		expect(path.startsWith("MyProject/")).toBe(true);
-		expect(path).toContain("T-100");
+		// Canonical filenames are title-only (no id prefix).
+		expect(path).toContain("Some_Title.md");
 		expect(vault._folders.has("MyProject")).toBe(true);
 	});
 
@@ -117,7 +118,8 @@ describe("determineNotePath folder routing (integration via obsidian mock)", () 
 		const path = (await plugin.determineNotePath(canvasFile, "Some Title", "T-101", undefined)) as string;
 
 		expect(path.startsWith("Inbox/")).toBe(true);
-		expect(path).toContain("T-101");
+		// Canonical filenames are title-only (no id prefix).
+		expect(path).toContain("Some_Title.md");
 		expect(vault._folders.has("Inbox")).toBe(true);
 	});
 });

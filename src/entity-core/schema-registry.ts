@@ -208,6 +208,11 @@ export class SchemaRegistry {
     return this.schema.settings.filenamePattern;
   }
 
+  /** Filename slug casing mode; defaults to 'snake' when the schema omits it. */
+  getFilenameCase(): 'snake' | 'preserve' {
+    return this.schema.settings.filenameCase ?? 'snake';
+  }
+
   // --- Canvas -----------------------------------------------------------------
   getCanvasConfig(type: string): EntityTypeDefinition['canvas'] {
     const typeDef = this.getEntityType(type);

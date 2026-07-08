@@ -1,6 +1,7 @@
 import { App, normalizePath } from "obsidian";
 import { ItemFrontmatter } from "../types";
-import { sanitizeTitleForFilename } from "../src/entity-core/path-resolver";
+import { buildEntityFilename } from "../src/entity-core/path-resolver";
+import { DEFAULT_SCHEMA } from "../src/entity-core/default-schema";
 
 /**
  * Convert a string to snake_case
@@ -30,12 +31,19 @@ export function sanitizeFilename(filename: string): string {
 }
 
 /**
- * Generate filename in format <ID>_<slug>.md, where <slug> is the canonical
- * snake_case sanitization shared with the MCP path-resolver
- * (sanitizeTitleForFilename) — so the plugin and MCP produce identical filenames.
+ * Generate the canonical entity filename, derived from the active schema's
+ * filename settings (DEFAULT_SCHEMA.settings) via the shared buildEntityFilename
+ * builder — so the plugin and the MCP PathResolver produce IDENTICAL filenames
+ * for the same input. Canonical convention: TITLE-ONLY, PRESERVE-case
+ * (e.g. "Add 90-day retention policy" → "Add_90-day_retention_policy.md").
  */
 export function generateEntityFilename(id: string, title: string): string {
-	return `${id}_${sanitizeTitleForFilename(title)}.md`;
+	return buildEntityFilename(
+		id,
+		title,
+		DEFAULT_SCHEMA.settings.filenamePattern,
+		DEFAULT_SCHEMA.settings.filenameCase
+	);
 }
 
 /**

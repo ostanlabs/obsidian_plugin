@@ -39,7 +39,8 @@ function makeFacade(seed: Record<string, string> = {}): { app: App; facade: Enti
   const facade = new EntityCoreFacade({
     vault: app.vault as any,
     vaultPath: '',
-    entitiesFolder: 'entities',
+    // Canonical bare-folder layout: empty entitiesFolder prefix.
+    entitiesFolder: '',
     archiveFolder: 'archive',
     canvasFolder: 'projects',
   });
@@ -115,15 +116,15 @@ describe('EntityCoreFacade', () => {
   });
 
   describe('path helpers (delegating to PathResolver)', () => {
-    it('generateFilename applies the {id}_{title} pattern with a sanitized slug', () => {
+    it('generateFilename applies the canonical title-only, preserve-case pattern', () => {
       const { facade } = makeFacade();
-      expect(facade.generateFilename('S-001', 'Build the Thing!')).toBe('S-001_build_the_thing.md');
+      expect(facade.generateFilename('S-001', 'Build the Thing!')).toBe('Build_the_Thing.md');
     });
 
-    it('getTypeFolderPath routes each type under the entities folder', () => {
+    it('getTypeFolderPath routes each type to its BARE folder (no entities/ prefix)', () => {
       const { facade } = makeFacade();
-      expect(facade.getTypeFolderPath('milestone')).toBe('entities/milestones');
-      expect(facade.getTypeFolderPath('feature')).toBe('entities/features');
+      expect(facade.getTypeFolderPath('milestone')).toBe('milestones');
+      expect(facade.getTypeFolderPath('feature')).toBe('features');
     });
 
     it('getTypeFolderPath throws for an unknown type', () => {

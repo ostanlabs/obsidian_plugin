@@ -415,9 +415,9 @@ describe('MCP stdio server (mcp.ts) — portable integration suite', () => {
       expect(m).toBeTruthy();
       const newId = m![1];
 
-      // The file exists on disk in the fixture vault.
+      // The file exists on disk in the fixture vault (title-only, preserve-case name).
       const files = fs.readdirSync(path.join(vault, 'tasks'));
-      expect(files.some((f) => f.startsWith(newId))).toBe(true);
+      expect(files).toContain('Add_integration_tests.md');
 
       // And is now retrievable through the index.
       const fetched = await client.callJson('get_entity', { id: newId });

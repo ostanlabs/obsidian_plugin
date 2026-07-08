@@ -15,17 +15,60 @@ import {
 import type { SchemaRegistry } from './schema-registry.js';
 import { getEntityTypeFromId } from './id-allocator.js';
 
+/** Filename slug casing mode (see {@link sanitizeTitleForFilename}). */
+export type FilenameCase = 'snake' | 'preserve';
+
 /**
- * Canonical entity-title → filename slug (snake_case, lowercase). Single source of
- * truth for filename sanitization shared by the MCP path-resolver AND the plugin
- * (util/fileNaming), so both produce identical `<id>_<slug>.md` names.
+ * Canonical entity-title → filename slug. Single source of truth for filename
+ * sanitization shared by the MCP path-resolver AND the plugin (util/fileNaming),
+ * so both produce identical filenames for the same input.
+ *
+ * Modes:
+ *   - 'snake'    (default): lowercase, `[^a-z0-9]+` → `_`, trim `_`.
+ *                e.g. "Q1 Launch" → "q1_launch".
+ *   - 'preserve'          : keep case + hyphens, replace runs of whitespace and
+ *                filesystem-invalid chars (\/:*?"<>| + control) — and any other
+ *                non `[A-Za-z0-9_-]` char — with `_`, collapse repeats, trim `_`.
+ *                e.g. "Add 90-day retention policy" → "Add_90-day_retention_policy".
  */
-export function sanitizeTitleForFilename(title: string): string {
+export function sanitizeTitleForFilename(
+  title: string,
+  mode: FilenameCase = 'snake'
+): string {
+  if (mode === 'preserve') {
+    return title
+      .replace(/[^A-Za-z0-9_-]+/g, '_') // whitespace / invalid / other → _
+      .replace(/_+/g, '_') // collapse repeated underscores
+      .replace(/^_+|_+$/g, ''); // trim leading/trailing underscores
+  }
   return title
     .toLowerCase()
     .trim()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, ''); // Remove leading/trailing underscores
+}
+
+/**
+ * Shared filename builder — the single place that turns (id, title) into a
+ * `<pattern>.md` filename. Used by both the MCP PathResolver and the plugin's
+ * util/fileNaming, so the two always agree.
+ */
+export function buildEntityFilename(
+  id: EntityId,
+  title: string,
+  pattern: string,
+  mode: FilenameCase = 'snake'
+): string {
+  return (
+    pattern
+      .replace('{id}', id)
+      .replace('{title}', sanitizeTitleForFilename(title, mode)) + '.md'
+  );
+}
+
+/** Join path segments, dropping empty ones so an empty prefix yields no leading slash. */
+function joinPath(...segments: string[]): string {
+  return segments.filter((s) => s !== '' && s != null).join('/');
 }
 
 export interface PathResolverConfig {
@@ -46,7 +89,7 @@ export class PathResolver {
     if (!typeDef) {
       throw new Error(`Unknown entity type: ${type}`);
     }
-    return `${this.config.entitiesFolder}/${typeDef.folder}`;
+    return joinPath(this.config.entitiesFolder, typeDef.folder);
   }
 
   getEntityPath(id: EntityId, title: string): VaultPath {
@@ -57,14 +100,12 @@ export class PathResolver {
   }
 
   generateFilename(id: EntityId, title: string): string {
-    const pattern = this.schema.getFilenamePattern();
-    const sanitizedTitle = this.sanitizeForFilename(title);
-
-    // Simple pattern substitution
-    return pattern
-      .replace('{id}', id)
-      .replace('{title}', sanitizedTitle)
-      + '.md';
+    return buildEntityFilename(
+      id,
+      title,
+      this.schema.getFilenamePattern(),
+      this.schema.getFilenameCase()
+    );
   }
 
   getArchiveFolderPath(id: EntityId): VaultPath {
@@ -73,7 +114,7 @@ export class PathResolver {
     if (!typeDef) {
       throw new Error(`Unknown entity type: ${type}`);
     }
-    return `${this.config.archiveFolder}/${typeDef.folder}`;
+    return joinPath(this.config.archiveFolder, typeDef.folder);
   }
 
   getArchivePath(id: EntityId, title: string): VaultPath {
@@ -103,6 +144,9 @@ export class PathResolver {
   }
 
   isEntityPath(filePath: VaultPath): boolean {
+    if (this.isArchivePath(filePath)) return false;
+    // Bare-folder layout (empty prefix): any non-archive vault path is an entity path.
+    if (!this.config.entitiesFolder) return true;
     return filePath.startsWith(`${this.config.entitiesFolder}/`);
   }
 
@@ -112,10 +156,6 @@ export class PathResolver {
       throw new Error(`Cannot determine type from id: ${id}`);
     }
     return type;
-  }
-
-  private sanitizeForFilename(title: string): string {
-    return sanitizeTitleForFilename(title);
   }
 
   toVaultPath(absolutePath: string): VaultPath {

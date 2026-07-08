@@ -17,6 +17,9 @@ import {
 	generateUniqueFilename,
 	isPluginCreatedNote,
 } from "../util/fileNaming";
+import { PathResolver } from "../src/entity-core/path-resolver";
+import { SchemaRegistry } from "../src/entity-core/schema-registry";
+import { DEFAULT_SCHEMA } from "../src/entity-core/default-schema";
 
 describe("fileNaming", () => {
 	describe("toSnakeCase", () => {
@@ -50,19 +53,47 @@ describe("fileNaming", () => {
 	});
 
 	describe("generateEntityFilename", () => {
-		// Unified with the MCP path-resolver: snake_case, lowercase slug.
-		it("produces <ID>_<snake_case-title>.md", () => {
+		// Canonical convention (production vault): TITLE-ONLY (no id prefix),
+		// PRESERVE-case slug (spaces→_, hyphens kept, case preserved).
+		it("produces a title-only, preserve-case filename (no id prefix)", () => {
 			expect(generateEntityFilename("M-001", "Kickoff Plan")).toBe(
-				"M-001_kickoff_plan.md"
+				"Kickoff_Plan.md"
 			);
 		});
-		it("sanitizes the title portion to snake_case", () => {
-			expect(generateEntityFilename("T-9", "a/b:c")).toBe("T-9_a_b_c.md");
-			expect(generateEntityFilename("F-1", "OAuth 2.0 / SSO!")).toBe("F-1_oauth_2_0_sso.md");
+		it("keeps hyphens and case, replacing spaces/invalid chars with _", () => {
+			expect(generateEntityFilename("T-1", "Add 90-day retention policy")).toBe(
+				"Add_90-day_retention_policy.md"
+			);
+		});
+		it("sanitizes filesystem-invalid characters", () => {
+			expect(generateEntityFilename("T-9", "a/b:c")).toBe("a_b_c.md");
+			expect(generateEntityFilename("F-1", "OAuth 2.0 / SSO!")).toBe("OAuth_2_0_SSO.md");
 		});
 		it("does not truncate (parity with MCP path-resolver)", () => {
 			const longTitle = "x".repeat(200);
-			expect(generateEntityFilename("S-1", longTitle)).toBe(`S-1_${"x".repeat(200)}.md`);
+			expect(generateEntityFilename("S-1", longTitle)).toBe(`${"x".repeat(200)}.md`);
+		});
+	});
+
+	// Cross-engine parity: the plugin's generateEntityFilename MUST equal the MCP
+	// PathResolver.generateFilename for the same input (single source of truth).
+	describe("plugin ↔ MCP filename parity", () => {
+		const resolver = new PathResolver(new SchemaRegistry(DEFAULT_SCHEMA), {
+			vaultPath: "/vault",
+			entitiesFolder: "",
+			archiveFolder: "archive",
+			canvasFolder: "projects",
+		});
+		it.each([
+			["M-001", "Kickoff Plan"],
+			["T-1", "Add 90-day retention policy"],
+			["DEC-2", "Use Postgres: ADR #1"],
+			["F-1", "OAuth 2.0 / SSO!"],
+			["S-9", "API Versioning Strategy"],
+		])("generateEntityFilename == PathResolver.generateFilename (%s, %s)", (id, title) => {
+			expect(generateEntityFilename(id, title)).toBe(
+				resolver.generateFilename(id, title)
+			);
 		});
 	});
 

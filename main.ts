@@ -9187,7 +9187,10 @@ private registerCommands(): void {
 		this.entityCore = new EntityCoreFacade({
 			vault: this.app.vault,
 			vaultPath: (this.app.vault.adapter as any).basePath || '',
-			entitiesFolder: 'entities',
+			// Bare type folders (milestones/, stories/, …) — no `entities/` prefix,
+			// matching the production vault. Empty prefix → PathResolver emits
+			// `milestones/Title.md` (see path-resolver joinPath).
+			entitiesFolder: '',
 			archiveFolder: 'archive',
 			canvasFolder: 'projects',
 		});

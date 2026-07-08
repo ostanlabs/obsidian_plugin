@@ -26,7 +26,11 @@ export const DEFAULT_SCHEMA: Schema = {
   settings: {
     idPadding: 3,
     archiveLayout: 'by-type',
-    filenamePattern: '{id}_{title}',
+    // Canonical convention matching the production vault: TITLE-ONLY filenames
+    // (no id prefix), PRESERVE-case slugs (spaces→_, hyphens kept, case preserved).
+    // e.g. "Add 90-day retention policy" → "Add_90-day_retention_policy.md".
+    filenamePattern: '{title}',
+    filenameCase: 'preserve',
     // Overlap-resolution priority (highest first): higher-priority nodes stay put and
     // lower-priority nodes are nudged aside when two overlap. Single source of truth for
     // positioningV4's overlap resolver.
