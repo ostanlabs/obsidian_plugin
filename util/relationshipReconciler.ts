@@ -3,6 +3,9 @@ import { parseAnyFrontmatter, applyFrontmatterUpdates } from "./frontmatter";
 import { sanitizeYamlValue, hasUnsafeYamlChars } from "./yamlSanitizer";
 import { DEFAULT_SCHEMA } from "../src/entity-core/default-schema.js";
 import { buildReverseRelationMap } from "../src/entity-core/schema-derivation.js";
+import { SchemaRegistry } from "../src/entity-core/schema-registry.js";
+import { EntityParser } from "../src/entity-core/parser.js";
+import { toFlatFrontmatter } from "../src/adapters/model-map.js";
 
 // ---------------------------------------------------------------------------
 // Schema-derived relationship maps (refactor §3).
@@ -19,6 +22,40 @@ import { buildReverseRelationMap } from "../src/entity-core/schema-derivation.js
 
 /** field name → inverse field name, both directions (e.g. depends_on↔blocks). */
 const REVERSE_RELATION_MAP: Record<string, string> = buildReverseRelationMap(DEFAULT_SCHEMA);
+
+// ---------------------------------------------------------------------------
+// Canonical entity parsing (Phase 4 of docs/ENTITY_MODEL_CONVERGENCE_SPEC.md).
+//
+// The reconciliation passes below build their entity maps via entity-core's
+// EntityParser + the lossless flat projection (model-map.toFlatFrontmatter)
+// instead of util/frontmatter.parseAnyFrontmatter. A direct import is safe:
+// this module already depends on src/entity-core (DEFAULT_SCHEMA /
+// buildReverseRelationMap above) and nothing under src/ imports util/
+// relationshipReconciler, so there is no util→src→util cycle. The same
+// DEFAULT_SCHEMA drives parsing and the relationship maps, keeping the two in
+// lock-step.
+//
+// Null contract matches the plugin's parseAnyEntityFrontmatter helper: null
+// when there is no frontmatter block, the YAML is invalid, or id/type are
+// missing. (The legacy parser also required `title`; EntityParser defaults a
+// missing title to 'Untitled' — the passes below never read titles.)
+//
+// NOTE: sanitizeEntityFilesForYaml deliberately KEEPS parseAnyFrontmatter —
+// see the comment there.
+// ---------------------------------------------------------------------------
+
+const ENTITY_PARSER = new EntityParser(new SchemaRegistry(DEFAULT_SCHEMA));
+
+/** Parse markdown content into the flat frontmatter record view, or null. */
+function parseEntityFlat(content: string, path: string): Record<string, unknown> | null {
+	try {
+		const entity = ENTITY_PARSER.parse(content, path);
+		if (!entity.id || !entity.type) return null;
+		return toFlatFrontmatter(entity);
+	} catch {
+		return null;
+	}
+}
 
 /** field name → schema cardinality ('one' ⇒ scalar, 'many' ⇒ array). */
 const FIELD_CARDINALITY: Record<string, "one" | "many"> = (() => {
@@ -74,6 +111,11 @@ export async function sanitizeEntityFilesForYaml(
 	for (const file of entityFiles) {
 		try {
 			const content = await app.vault.read(file);
+			// INTENTIONALLY the lenient legacy parser, NOT parseEntityFlat: this
+			// pass exists to REPAIR files whose YAML is broken (unquoted colons →
+			// "Nested mappings are not allowed"). Strict YAML.parse (EntityParser)
+			// throws on exactly those files, so a canonical parse could never see
+			// its own repair targets. The lenient line-parser is load-bearing here.
 			const frontmatter = parseAnyFrontmatter(content);
 			if (!frontmatter) continue;
 
@@ -162,7 +204,7 @@ export async function reconcileRelationships(
 	for (const file of entityFiles) {
 		try {
 			const content = await app.vault.read(file);
-			const frontmatter = parseAnyFrontmatter(content);
+			const frontmatter = parseEntityFlat(content, file.path);
 			if (frontmatter && frontmatter.id) {
 				entityMap.set(frontmatter.id as string, { file, frontmatter });
 			}
@@ -320,7 +362,7 @@ export async function cleanTransitiveDependencies(
 	for (const file of entityFiles) {
 		try {
 			const content = await app.vault.read(file);
-			const frontmatter = parseAnyFrontmatter(content);
+			const frontmatter = parseEntityFlat(content, file.path);
 			if (frontmatter && frontmatter.id) {
 				const dependsOn = getArrayField(frontmatter, "depends_on");
 				entityMap.set(frontmatter.id as string, { file, frontmatter, dependsOn });
@@ -570,7 +612,7 @@ export async function detectAndBreakCycles(
 	for (const file of entityFiles) {
 		try {
 			const content = await app.vault.read(file);
-			const frontmatter = parseAnyFrontmatter(content);
+			const frontmatter = parseEntityFlat(content, file.path);
 			if (frontmatter && frontmatter.id) {
 				const entityType = (frontmatter.type as string || "").toLowerCase();
 				if (!entityTypeFilter || entityType === entityTypeFilter.toLowerCase()) {

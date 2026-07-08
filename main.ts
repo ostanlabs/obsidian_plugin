@@ -218,16 +218,22 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 		// Add settings tab
 		this.addSettingTab(new CanvasStructuredItemsSettingTab(this.app, this));
 
+		// Views receive the canonical entity-core parse as an injected function
+		// (Phase 4): keeps ui/* off util/frontmatter without importing the
+		// plugin class (no main ↔ ui cycle).
+		const parseEntityFm = (content: string, path: string) =>
+			this.parseAnyEntityFrontmatter(content, path);
+
 		// Register Feature Details View
 		this.registerView(
 			FEATURE_DETAILS_VIEW_TYPE,
-			(leaf) => new FeatureDetailsView(leaf)
+			(leaf) => new FeatureDetailsView(leaf, parseEntityFm)
 		);
 
 		// Register Feature Coverage View
 		this.registerView(
 			FEATURE_COVERAGE_VIEW_TYPE,
-			(leaf) => new FeatureCoverageView(leaf)
+			(leaf) => new FeatureCoverageView(leaf, parseEntityFm)
 		);
 
 		// Register commands
@@ -2923,6 +2929,14 @@ private registerCommands(): void {
 				path: file.path,
 			});
 			const content = await this.app.vault.read(file);
+			// Phase 4 verdict: this stays on parseFrontmatterAndBody — the ONE
+			// surviving frontmatter/body split utility. The canonical path cannot
+			// serve this site: (a) the input is often a PLAIN note (no id/type),
+			// which EntityParser rejects by contract; (b) RuntimeEntity does not
+			// carry the body, which the conversion must re-emit; (c) the merge in
+			// performNoteConversion is pinned to RAW string scalars (created_at
+			// verbatim, legacy `created` fallback — tests/plugin-note-modal.test.ts),
+			// while a parse→project round-trip substitutes parsed/defaulted values.
 			const { frontmatter, body } = parseFrontmatterAndBody(content);
 
 		// Show modal to get item details
@@ -9272,13 +9286,14 @@ private registerCommands(): void {
 			}
 		}
 
-		// Build entity index
-		this.entityIndex = new EntityIndex(this.app, this.settings.entityNavigator);
-		await this.entityIndex.buildIndex();
-
 		// Initialize entity-core facade (lazy accessor so read paths work
 		// regardless of init order; only allocateId needs the index wiring below)
 		const entityCore = this.getEntityCore();
+
+		// Build entity index (ProjectIndex-backed, Phase 3; shares the facade's
+		// schema so its EntityParser + reverse-relationship map match all other reads)
+		this.entityIndex = new EntityIndex(this.app, this.settings.entityNavigator, entityCore.getSchema());
+		await this.entityIndex.buildIndex();
 
 		// Wire the entity index to entity-core using adapter
 		const indexAdapter = new EntityIndexAdapter(this.entityIndex, entityCore.getSchema());
@@ -10333,10 +10348,17 @@ private registerCommands(): void {
 		reconcileLog.push('\n=== SANITIZATION PASS: Fixing malformed parent fields ===');
 
 		for (const file of files) {
-			const cache = this.app.metadataCache.getFileCache(file);
-			if (!cache?.frontmatter) continue;
+			// Phase 4: content read via the canonical parser instead of the raw
+			// metadataCache — the cache lags writes (this flow used to sleep 500ms
+			// for it), while vault.read sees the current on-disk state. The
+			// null contract (no frontmatter / bad YAML / missing id or type)
+			// matches the old `!cache?.frontmatter` / `!fm.id` skips for entity
+			// files; the array-valued `parent` survives the flat projection
+			// verbatim (relationship values are not coerced).
+			const content = await this.app.vault.read(file);
+			const fm = this.parseAnyEntityFrontmatter(content, file.path);
+			if (!fm) continue;
 
-			const fm = cache.frontmatter;
 			const entityId = fm.id;
 			if (!entityId) continue;
 

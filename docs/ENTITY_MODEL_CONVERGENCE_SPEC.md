@@ -227,15 +227,27 @@ numbers after Phase 2a (+45 pinning tests in `k2.project-index-extra`,
   tests (secondary indexes, reverse-relationship map injection/swap, adjacency, allocator
   gap/malformed-id/reservation semantics, registry defaults incl. `engineering`). Verified no
   plugin path reaches `getRelationshipGraph`. Runs in parallel with Phases 0-2.
-- **Phase 3 — Adopt `ProjectIndex`.** Feed `EntityMetadata` from the vault scan into a
-  `ProjectIndex`; rewrite `entityNavigator`'s public methods as `ProjectIndex` queries; keep
-  the same method signatures so the sole consumer (`main.ts`) is unchanged. Retire
-  `EntityIndexEntry`/`EntityFrontmatter` internally (via the adapter). Migrate the
-  `entityNavigator.ts:111` direct `metadataCache` read as part of the new scan.
-- **Phase 4 — Consumers.** Migrate `ui/FeatureDetailsView`, `ui/FeatureCoverageView`,
-  `util/relationshipReconciler`, and the structured-item modal path (`parseFrontmatterAndBody`)
-  from `parseFrontmatter*`/`ItemFrontmatter` raw parsing to the `RuntimeEntity` projections.
-  Migrate the remaining direct `metadataCache` reads (`main.ts:10251`, `idGenerator`).
+- **Phase 3 — Adopt `ProjectIndex`. ✅ DONE.** `EntityIndex` internals rewritten over
+  entity-core's `ProjectIndex`: content-based scan (`vault.cachedRead` → `EntityParser` →
+  `EntityMetadata`; the `metadataCache` read is gone), all 24 public methods are now
+  `ProjectIndex` queries (same signatures; `EntityIndexEntry` survives only as an on-demand
+  projection at the API boundary), graph edges read `relationships[key] ?? passthrough[key]`
+  for the nine legacy array fields so schema-less keys still navigate while shadowing custom
+  *fields* (decision `decided_by`) don't. `updateFile` re-adds forward edges without
+  `delete`, preserving other entities' incoming edges across saves. Constructor gained an
+  optional `schema?: SchemaRegistry` (facade's registry wired in `main.ts`). 18-test parity
+  suite added.
+- **Phase 4 — Consumers. ✅ DONE.** `ui/*` views parse via a constructor-injected canonical
+  parse function (closure over `main.ts`'s helper; a legacy 8-field array-coercion shim keeps
+  rendering identical for hand-written scalar relationship values); the shared reconciler's
+  three map-building functions run on `EntityParser` (exports unchanged; MCP stdio gate
+  green); the sanitization pass reads content instead of `metadataCache`. Three deliberate
+  survivors, justified in-code: `parseFrontmatterAndBody` (modal split — plain notes without
+  id/type are its primary input, `RuntimeEntity` carries no body, raw-scalar merge semantics
+  are pinned), `sanitizeEntityFilesForYaml`'s lenient `parseAnyFrontmatter` (it repairs files
+  the strict parser throws on — a canonical parse could never see its own repair targets),
+  and `util/idGenerator`'s `metadataCache` scan (synchronous fallback API that must also see
+  non-entity notes).
 - **Phase 5 — Delete duplicates.** Relocate `stripQuotes`/`generateNodeIdFromEntityId`, then
   remove `util/entityParser.ts`, the redundant `util/frontmatter` parsers,
   `EntityIndexEntry`/`EntityFrontmatter`/`entityNavigator` internals, and the

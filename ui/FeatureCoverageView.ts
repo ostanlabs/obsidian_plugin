@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf, TFile } from "obsidian";
-import { parseAnyFrontmatter } from "../util/frontmatter";
 import { FeatureFrontmatter, FeatureTier, FeaturePhase, FeatureStatus } from "../types";
+import { coerceLegacyArrayFields, ParseEntityFrontmatterFn } from "./FeatureDetailsView";
 
 export const FEATURE_COVERAGE_VIEW_TYPE = "feature-coverage-view";
 
@@ -33,7 +33,11 @@ export class FeatureCoverageView extends ItemView {
 		hasGaps: false,
 	};
 
-	constructor(leaf: WorkspaceLeaf) {
+	constructor(
+		leaf: WorkspaceLeaf,
+		/** Canonical parse injected by the plugin — see ParseEntityFrontmatterFn. */
+		private readonly parseEntityFrontmatter: ParseEntityFrontmatterFn
+	) {
 		super(leaf);
 	}
 
@@ -64,10 +68,10 @@ export class FeatureCoverageView extends ItemView {
 			if (!file.basename.match(/^F-\d{3,}/)) continue;
 
 			const content = await this.app.vault.read(file);
-			const fm = parseAnyFrontmatter(content);
+			const fm = this.parseEntityFrontmatter(content, file.path);
 			if (!fm || fm.type !== "feature") continue;
 
-			const f = fm as unknown as FeatureFrontmatter;
+			const f = coerceLegacyArrayFields(fm) as unknown as FeatureFrontmatter;
 			this.features.push({
 				id: f.id || file.basename,
 				title: f.title || "Untitled",

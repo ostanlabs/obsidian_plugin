@@ -4,7 +4,8 @@
  * builds a forward/reverse relationship graph, prunes broken references, writes the
  * computed inverse fields back, and breaks dependency cycles. Fully vault-I/O (no canvas
  * render). Also covers sanitizeParentFields (array→scalar), which runs as its pre-pass
- * and reads cache.frontmatter via the extended metadataCache.
+ * and (since Phase 4) reads file content through the canonical entity-core parse
+ * instead of the raw metadataCache.
  */
 jest.mock("obsidian", () => require("./harness/obsidian-mock"), { virtual: true });
 

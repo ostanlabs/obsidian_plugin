@@ -33,6 +33,20 @@ export function _resetSessionHighWaterForTests(): void {
  * Generate a unique ID for a new entity.
  * Scans existing notes to find the highest ID then increments.
  * A per-session high-water mark prevents collisions when metadataCache lags.
+ *
+ * Phase 4 verdict (docs/ENTITY_MODEL_CONVERGENCE_SPEC.md): this module KEEPS
+ * its direct metadataCache reads instead of migrating to content reads via
+ * the canonical EntityParser, because:
+ *  - `generateId`/`findHighestId` are SYNCHRONOUS exported APIs; content
+ *    reads (vault.read) are async and would change the signatures.
+ *  - The max-ID scan must cover ALL vault files, including non-entity notes
+ *    that carry an `id` but no `type` — EntityParser rejects those by
+ *    contract, so a canonical parse would silently shrink the scan set.
+ *  - This is the fallback allocator when the entity-core facade is
+ *    unavailable; the canonical route already exists as facade.allocateId.
+ *  - It runs on every entity creation over the whole vault; the metadata
+ *    cache avoids O(vault) file I/O, and staleness is already mitigated by
+ *    the session high-water mark above.
  */
 export function generateId(
 	app: App,

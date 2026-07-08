@@ -286,6 +286,39 @@ describe("detectAndBreakCycles", () => {
 	});
 });
 
+describe("canonical entity parsing (Phase 4)", () => {
+	it("reconciles entities that have no title (EntityParser defaults it; the legacy parser skipped them)", async () => {
+		const { app, files, store } = makeVault([
+			{ id: "M-001", type: "milestone", implements: ["F-001"] },
+			{ id: "F-001", type: "feature", title: "F" },
+		]);
+		const res = await reconcileRelationships(app, files);
+		expect(res.totalReconciled).toBe(1);
+		expect(store.get("F-001.md")!.implemented_by).toEqual(["M-001"]);
+	});
+
+	it("excludes strict-YAML-invalid files from the reconcile map (repair belongs to sanitizeEntityFilesForYaml)", async () => {
+		const { app, files, store } = makeVault([
+			// unquoted colon in the title → YAML.parse throws → canonical parse null
+			{ id: "M-001", type: "milestone", title: "Bad: colon", implements: ["F-001"] },
+			{ id: "F-001", type: "feature", title: "F" },
+		]);
+		const res = await reconcileRelationships(app, files);
+		expect(res.totalReconciled).toBe(0);
+		expect(store.get("F-001.md")!.implemented_by).toBeUndefined();
+	});
+
+	it("excludes files missing id or type from the reconcile map", async () => {
+		const { app, files, store } = makeVault([
+			{ id: "M-001", title: "no type", implements: ["F-001"] },
+			{ id: "F-001", type: "feature", title: "F" },
+		]);
+		const res = await reconcileRelationships(app, files);
+		expect(res.totalReconciled).toBe(0);
+		expect(store.get("F-001.md")!.implemented_by).toBeUndefined();
+	});
+});
+
 describe("sanitizeEntityFilesForYaml", () => {
 	it("sanitizes unsafe colon characters in string fields", async () => {
 		const { app, files, store } = makeVault([

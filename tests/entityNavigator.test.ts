@@ -6,13 +6,22 @@ import {
 } from "../util/entityNavigator";
 
 // ---------------------------------------------------------------------------
-// Light Obsidian fake: only the surface EntityIndex touches
-//   app.vault.getMarkdownFiles() and app.metadataCache.getFileCache(file)
+// Light Obsidian fake: only the surface EntityIndex touches. Since Phase 3
+// the index reads file CONTENT (vault.cachedRead) and parses it via
+// entity-core's EntityParser, so the fake serves serialized frontmatter
+// instead of a metadataCache.
 // ---------------------------------------------------------------------------
 interface FakeEntity {
 	path?: string; // defaults to `${id}.md`
 	basename?: string;
 	frontmatter: Record<string, unknown> | null;
+}
+
+function serializeFrontmatter(fm: Record<string, unknown>): string {
+	const lines = Object.entries(fm).map(([k, v]) =>
+		Array.isArray(v) ? `${k}: ${JSON.stringify(v)}` : `${k}: ${v}`
+	);
+	return `---\n${lines.join("\n")}\n---\nBody\n`;
 }
 
 function makeApp(entities: FakeEntity[]) {
@@ -21,20 +30,24 @@ function makeApp(entities: FakeEntity[]) {
 		const basename = e.basename ?? path.replace(/\.md$/, "");
 		return { file: { path, basename }, frontmatter: e.frontmatter };
 	});
-	const cacheByPath = new Map<string, unknown>();
+	const contentByPath = new Map<string, string>();
 	for (const f of files) {
-		cacheByPath.set(
+		contentByPath.set(
 			f.file.path,
-			f.frontmatter ? { frontmatter: f.frontmatter } : {}
+			f.frontmatter ? serializeFrontmatter(f.frontmatter) : "Just a plain note.\n"
 		);
 	}
 	const app = {
-		vault: { getMarkdownFiles: () => files.map((f) => f.file) },
-		metadataCache: {
-			getFileCache: (file: any) => cacheByPath.get(file.path),
+		vault: {
+			getMarkdownFiles: () => files.map((f) => f.file),
+			cachedRead: async (file: any) => {
+				const content = contentByPath.get(file.path);
+				if (content === undefined) throw new Error(`ENOENT: ${file.path}`);
+				return content;
+			},
 		},
 	} as any;
-	return { app, files };
+	return { app, files, contentByPath };
 }
 
 const settings = {} as any;
@@ -72,7 +85,7 @@ describe("entityNavigator - buildIndex / lookups", () => {
 	it("indexes entities and skips non-entities", async () => {
 		const idx = await buildIndex([
 			{ frontmatter: { id: "M-001", type: "milestone", title: "Root" } },
-			{ frontmatter: null }, // no cache -> skipped
+			{ frontmatter: null }, // no frontmatter -> skipped
 			{ frontmatter: { title: "no id and non-entity basename" }, path: "misc.md" },
 		]);
 		expect(idx.isReady()).toBe(true);
@@ -277,14 +290,16 @@ describe("entityNavigator - feature navigation", () => {
 
 describe("entityNavigator - incremental updates", () => {
 	it("updateFile replaces an existing entry", async () => {
-		const { app, files } = makeApp([
+		const { app, files, contentByPath } = makeApp([
 			{ frontmatter: { id: "T-001", type: "task", title: "Old" } },
 		]);
 		const idx = new EntityIndex(app, settings);
 		await idx.buildIndex();
-		// mutate the cache then update
-		(app.metadataCache.getFileCache(files[0].file) as any).frontmatter.title =
-			"New";
+		// mutate the file content then update
+		contentByPath.set(
+			files[0].file.path,
+			serializeFrontmatter({ id: "T-001", type: "task", title: "New" })
+		);
 		await idx.updateFile(files[0].file);
 		expect(idx.get("T-001")?.title).toBe("New");
 	});

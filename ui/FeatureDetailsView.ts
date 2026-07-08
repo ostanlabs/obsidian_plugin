@@ -1,14 +1,62 @@
 import { ItemView, WorkspaceLeaf, TFile, App } from "obsidian";
-import { parseAnyFrontmatter } from "../util/frontmatter";
 import { FeatureFrontmatter } from "../types";
 
 export const FEATURE_DETAILS_VIEW_TYPE = "feature-details-view";
+
+/**
+ * Canonical frontmatter parse, injected by the plugin (Phase 4 of
+ * docs/ENTITY_MODEL_CONVERGENCE_SPEC.md). Backed by entity-core's
+ * EntityParser + the lossless flat projection (model-map.toFlatFrontmatter),
+ * with the legacy null contract: null when there is no frontmatter block,
+ * the YAML is invalid, or id/type are missing. Injected as a function (rather
+ * than importing the plugin class) to avoid a main.ts ↔ ui/* import cycle.
+ */
+export type ParseEntityFrontmatterFn = (
+	content: string,
+	path: string
+) => Record<string, unknown> | null;
+
+/**
+ * The legacy parser (util/frontmatter.parseRawFrontmatter) coerced these
+ * fields to arrays on read (string → [string], other non-arrays → []); the
+ * canonical flat projection preserves scalars as-is. The views consume these
+ * fields as arrays (.length / .join / iteration), so reproduce that coercion
+ * here to keep rendering identical for hand-written scalar values.
+ */
+const LEGACY_ARRAY_FIELDS = [
+	"depends_on",
+	"blocks",
+	"implemented_by",
+	"documented_by",
+	"decided_by",
+	"personas",
+	"acceptance_criteria",
+	"test_refs",
+] as const;
+
+export function coerceLegacyArrayFields(
+	fm: Record<string, unknown>
+): Record<string, unknown> {
+	for (const field of LEGACY_ARRAY_FIELDS) {
+		const value = fm[field];
+		if (value === undefined) continue;
+		if (typeof value === "string") {
+			fm[field] = value ? [value] : [];
+		} else if (!Array.isArray(value)) {
+			fm[field] = [];
+		}
+	}
+	return fm;
+}
 
 export class FeatureDetailsView extends ItemView {
 	private currentFeature: FeatureFrontmatter | null = null;
 	private currentFile: TFile | null = null;
 
-	constructor(leaf: WorkspaceLeaf) {
+	constructor(
+		leaf: WorkspaceLeaf,
+		private readonly parseEntityFrontmatter: ParseEntityFrontmatterFn
+	) {
 		super(leaf);
 	}
 
@@ -58,22 +106,22 @@ export class FeatureDetailsView extends ItemView {
 		}
 
 		const content = await this.app.vault.read(activeFile);
-		const fm = parseAnyFrontmatter(content);
+		const fm = this.parseEntityFrontmatter(content, activeFile.path);
 		if (!fm || fm.type !== "feature") {
 			return;
 		}
 
-		this.currentFeature = fm as unknown as FeatureFrontmatter;
+		this.currentFeature = coerceLegacyArrayFields(fm) as unknown as FeatureFrontmatter;
 		this.currentFile = activeFile;
 		this.render();
 	}
 
 	public async showFeature(file: TFile): Promise<void> {
 		const content = await this.app.vault.read(file);
-		const fm = parseAnyFrontmatter(content);
+		const fm = this.parseEntityFrontmatter(content, file.path);
 		if (!fm) return;
 
-		this.currentFeature = fm as unknown as FeatureFrontmatter;
+		this.currentFeature = coerceLegacyArrayFields(fm) as unknown as FeatureFrontmatter;
 		this.currentFile = file;
 		this.render();
 	}
