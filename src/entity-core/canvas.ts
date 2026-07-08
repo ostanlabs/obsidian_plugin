@@ -16,6 +16,7 @@ import {
 } from './types.js';
 import type { SchemaRegistry } from './schema-registry.js';
 import type { PathResolver } from './path-resolver.js';
+import { getEntityTypeFromId } from './id-allocator.js';
 
 export interface CanvasNode {
   id: string;
@@ -107,9 +108,11 @@ export class CanvasManager {
   async addNode(canvasPath: CanvasPath, entityId: EntityId, position?: Position): Promise<void> {
     const canvas = await this.readCanvas(canvasPath);
 
-    // Determine entity path (would need index in production)
-    const type = entityId.split('-')[0];
-    const folder = this.schema.getEntityType(type)?.folder || 'entities';
+    // Determine entity path (would need index in production). The schema registry
+    // is keyed by type NAME ('milestone'), not the ID PREFIX ('M'), so resolve the
+    // prefix→type via the schema-driven id-allocator helper before reading its folder.
+    const type = getEntityTypeFromId(entityId, this.schema);
+    const folder = (type && this.schema.getEntityType(type)?.folder) || 'entities';
     const entityPath = `entities/${folder}/${entityId}.md` as VaultPath;
 
     const pos = position || this.calculateNextPosition(canvas);

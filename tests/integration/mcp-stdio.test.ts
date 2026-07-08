@@ -1032,6 +1032,10 @@ const MUT_FIXTURE: Record<string, string> = {
   'tasks/TC-1.md': ent({ id: 'TC-1', type: 'task', title: 'Completed child task', status: 'Completed', workstream: 'engineering', goal: 'done', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'MC-1' }),
   // dangling parent → reconcile write removes the parent field
   'tasks/TC-2.md': ent({ id: 'TC-2', type: 'task', title: 'Dangling parent', status: 'Not Started', workstream: 'engineering', goal: 'g', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'M-777' }),
+  // forward dependency drift: TC-3 depends_on TC-4, but TC-4 has no `blocks` back-edge
+  // → reconcile write must ADD TC-3 to TC-4.blocks and persist it.
+  'tasks/TC-3.md': ent({ id: 'TC-3', type: 'task', title: 'Dependent task', status: 'Not Started', workstream: 'engineering', goal: 'g', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, depends_on: ['TC-4'] }),
+  'tasks/TC-4.md': ent({ id: 'TC-4', type: 'task', title: 'Blocking task', status: 'Not Started', workstream: 'engineering', goal: 'g', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
 };
 
 describe('mcp.ts write/mutation paths — disposable fixture', () => {
@@ -1056,6 +1060,15 @@ describe('mcp.ts write/mutation paths — disposable fixture', () => {
     // The dangling-parent removal is a real mutation to the child file.
     const e = await c.callJson('get_entity', { id: 'TC-2' });
     expect(e.relationships?.parent).toBeUndefined();
+
+    // Forward-drift additions must ALSO persist (previously reported but never written):
+    // (1) parent→children — TC-1's parent MC-1 must gain TC-1 in its children list.
+    const mc1 = await c.callJson('get_entity', { id: 'MC-1' });
+    expect(mc1.relationships?.children).toContain('TC-1');
+    expect(mc1.relationships?.children).toContain('SC-1'); // pre-existing child preserved
+    // (2) depends_on→blocks — TC-3 depends_on TC-4, so TC-4 must gain TC-3 in blocks.
+    const tc4 = await c.callJson('get_entity', { id: 'TC-4' });
+    expect(tc4.relationships?.blocks).toContain('TC-3');
   });
 
   test('batch real create resolves a {{client_id}} cross-reference', async () => {

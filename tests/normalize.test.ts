@@ -115,6 +115,43 @@ describe("normalize", () => {
 				expect(normalizeStatus("  done  ")).toBe("Completed");
 			});
 		});
+
+		// refactor §7: features use Planned/In Progress/Complete/Deferred.
+		// Before the schema-driven fix these fell through to the task branch and
+		// mis-mapped (e.g. "complete"/"planned" → "Not Started"). Now correct.
+		describe("feature entity", () => {
+			it("defaults to Planned when undefined/empty", () => {
+				expect(normalizeStatus(undefined, "feature")).toBe("Planned");
+				expect(normalizeStatus("", "feature")).toBe("Planned");
+			});
+			it("returns exact allowed values as-is", () => {
+				expect(normalizeStatus("Planned", "feature")).toBe("Planned");
+				expect(normalizeStatus("In Progress", "feature")).toBe("In Progress");
+				expect(normalizeStatus("Complete", "feature")).toBe("Complete");
+				expect(normalizeStatus("Deferred", "feature")).toBe("Deferred");
+			});
+			it("maps complete/completed/done to Complete (was wrongly 'Not Started')", () => {
+				expect(normalizeStatus("complete", "feature")).toBe("Complete");
+				expect(normalizeStatus("completed", "feature")).toBe("Complete");
+				expect(normalizeStatus("done", "feature")).toBe("Complete");
+			});
+			it("maps planned/deferred/in progress variants", () => {
+				expect(normalizeStatus("planned", "feature")).toBe("Planned");
+				expect(normalizeStatus("deferred", "feature")).toBe("Deferred");
+				expect(normalizeStatus("in progress", "feature")).toBe("In Progress");
+				expect(normalizeStatus("in_progress", "feature")).toBe("In Progress");
+			});
+			it("is case-insensitive", () => {
+				expect(normalizeStatus("COMPLETE", "feature")).toBe("Complete");
+				expect(normalizeStatus("planned", "feature")).toBe("Planned");
+			});
+			it("defaults unknown feature status to Planned (was wrongly 'Not Started')", () => {
+				expect(normalizeStatus("whatever", "feature")).toBe("Planned");
+			});
+			it("trims whitespace before matching", () => {
+				expect(normalizeStatus("  complete  ", "feature")).toBe("Complete");
+			});
+		});
 	});
 
 	describe("normalizePriority", () => {

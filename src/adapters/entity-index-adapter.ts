@@ -111,8 +111,13 @@ export class EntityIndexAdapter implements EngineIndexSeam {
       return adjacency;
     }
 
-    // Collect all field names for this relationship in the given direction
-    const fieldNames = rel.pairs.map((pair) => direction === 'forward' ? pair.forward : pair.reverse);
+    // Collect the DISTINCT field names for this relationship in the given direction.
+    // A relationship may declare several pairs that share one field name (e.g.
+    // `dependency` has m→m/s→s/t→t all using `depends_on`); reading such a field once
+    // per pair would emit each target N times, so de-dup the field-name set.
+    const fieldNames = [
+      ...new Set(rel.pairs.map((pair) => (direction === 'forward' ? pair.forward : pair.reverse))),
+    ];
 
     // Scan all entries and build adjacency list
     const entries = this.pluginIndex.getAll();
@@ -122,12 +127,16 @@ export class EntityIndexAdapter implements EngineIndexSeam {
 
       // Check all field names for this relationship
       for (const fieldName of fieldNames) {
-        // Get the relationship field value (array of target IDs)
-        // Note: plugin's EntityIndexEntry stores relationship arrays as string[]
-        const targetIds = (entry as any)[fieldName] as string[] | undefined;
+        // Get the relationship field value. Plugin entries store some fields as
+        // arrays (depends_on/blocks/children) and others as a SCALAR string
+        // (hierarchy `parent`). Wrap a scalar as a single-element list; spreading it
+        // would explode the id string into its individual characters.
+        const value = (entry as any)[fieldName] as string | string[] | undefined;
 
-        if (targetIds && targetIds.length > 0) {
-          targets.push(...targetIds as EntityId[]);
+        if (Array.isArray(value)) {
+          if (value.length > 0) targets.push(...(value as EntityId[]));
+        } else if (typeof value === 'string' && value.length > 0) {
+          targets.push(value as EntityId);
         }
       }
 

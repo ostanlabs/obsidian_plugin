@@ -1270,46 +1270,64 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Build relationship graph for reconciliation
         const graph = new RelationshipGraph(schema, index);
-        const updates: RuntimeEntity[] = [];
+        // Single write buffer keyed by id: forward-drift fixes mutate the PARENT's
+        // `children` / the dependency's `blocks`, so those related entities must be
+        // loaded, mutated, and persisted too — not just the child/source `entity`.
+        // Keying by id lets multiple children accumulate onto one parent object and
+        // avoids a parent that is itself a `meta` being written twice with divergent
+        // state (last-writer-wins losing a mutation).
+        const pending = new Map<string, RuntimeEntity>();
+        const loadEntity = async (id: string): Promise<RuntimeEntity | null> => {
+          const buffered = pending.get(id);
+          if (buffered) return buffered;
+          const p = index.getPathById(id);
+          return p ? parser.parse(await adapter.readFile(p), p) : null;
+        };
 
         for (const meta of metas) {
           // Reconciliation reads/writes relationship fields, which live only on
           // the full parsed entity (index metadata is flat).
-          const entityPath = index.getPathById(meta.id);
-          const entity = entityPath ? parser.parse(await adapter.readFile(entityPath), entityPath) : null;
+          const entity = await loadEntity(meta.id);
           if (!entity) continue;
           let modified = false;
-          const updated = { ...entity };
 
           // Fix parent/children relationships
-          if (updated.relationships?.parent) {
-            const parentPath = index.getPathById(updated.relationships.parent as string);
-            const parent = parentPath ? parser.parse(await adapter.readFile(parentPath), parentPath) : null;
+          if (entity.relationships?.parent) {
+            const parentId = entity.relationships.parent as string;
+            const parent = await loadEntity(parentId);
             if (parent) {
-              // Ensure parent has this entity in children
+              // Ensure parent has this entity in children (persist the addition).
               const parentChildren = (parent.relationships?.children as string[]) || [];
               if (!parentChildren.includes(entity.id)) {
                 changes.push(`${parent.id}: Add ${entity.id} to children`);
-                modified = true;
+                if (!dry_run) {
+                  parent.relationships = parent.relationships || {};
+                  parent.relationships.children = [...parentChildren, entity.id];
+                  pending.set(parent.id, parent);
+                }
               }
             } else {
-              changes.push(`${entity.id}: Parent ${updated.relationships.parent} not found - removing`);
-              delete updated.relationships.parent;
+              changes.push(`${entity.id}: Parent ${parentId} not found - removing`);
+              delete entity.relationships.parent;
               modified = true;
             }
           }
 
           // Fix depends_on/blocks relationships
-          if (updated.relationships?.depends_on) {
-            const deps = updated.relationships.depends_on as string[];
+          if (entity.relationships?.depends_on) {
+            const deps = entity.relationships.depends_on as string[];
             for (const depId of deps) {
-              const depPath = index.getPathById(depId);
-              const dep = depPath ? parser.parse(await adapter.readFile(depPath), depPath) : null;
+              const dep = await loadEntity(depId);
               if (dep) {
+                // Ensure the dependency lists this entity in blocks (persist it).
                 const blocks = (dep.relationships?.blocks as string[]) || [];
                 if (!blocks.includes(entity.id)) {
                   changes.push(`${dep.id}: Add ${entity.id} to blocks`);
-                  modified = true;
+                  if (!dry_run) {
+                    dep.relationships = dep.relationships || {};
+                    dep.relationships.blocks = [...blocks, entity.id];
+                    pending.set(dep.id, dep);
+                  }
                 }
               } else {
                 changes.push(`${entity.id}: Dependency ${depId} not found - removing`);
@@ -1319,13 +1337,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           if (modified && !dry_run) {
-            updates.push(updated);
+            pending.set(entity.id, entity);
           }
         }
 
         // Write updates
-        if (!dry_run && updates.length > 0) {
-          for (const entity of updates) {
+        if (!dry_run && pending.size > 0) {
+          for (const entity of pending.values()) {
             const content = serializer.serialize(entity);
             // Write back to the entity's existing file path; only fall back to a
             // generated <ID>_<title> path for entities not yet in the index.

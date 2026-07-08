@@ -132,44 +132,36 @@ describe('EntityIndexAdapter', () => {
     });
 
     /**
-     * KNOWN BUG #1 (reported, not fixed): buildAdjacency collects field names as
-     * `rel.pairs.map(pair => pair.forward)` WITHOUT de-duplicating. Every relationship
-     * whose pairs share one field name (dependency has 3 pairs all `depends_on`)
-     * therefore reads the same entry field once per pair, duplicating each target.
-     * Harmless for cycle/reachability queries (visited-guarded), but the adjacency
-     * list is not the expected edge set. Pinned here to make the defect visible.
+     * FIXED BUG #1: buildAdjacency used to collect field names as
+     * `rel.pairs.map(pair => pair.forward)` WITHOUT de-duplicating, so a relationship
+     * whose pairs share one field name (dependency has 3 pairs all `depends_on`) read
+     * the same entry field once per pair and emitted each target 3x. The field-name
+     * set is now de-duplicated, so each target appears exactly once.
      */
-    it('duplicates each target once per same-named pair (KNOWN BUG #1)', async () => {
+    it('emits each target exactly once regardless of same-named pairs (fixed BUG #1)', async () => {
       const adapter = await buildAdapter({
         'S-001.md': fm({ id: 'S-001', type: 'story', title: 'A' }),
         'S-002.md': fm({ id: 'S-002', type: 'story', title: 'B', depends_on: ['S-001'] }),
       });
-      // dependency has 3 pairs (m→m, s→s, t→t) all with forward field `depends_on`.
-      expect(adapter.buildAdjacency('dependency', 'forward').get('S-002')).toEqual([
-        'S-001',
-        'S-001',
-        'S-001',
-      ]);
+      // dependency has 3 pairs (m→m, s→s, t→t) all with forward field `depends_on`;
+      // the de-dup'd field set now yields a single edge.
+      expect(adapter.buildAdjacency('dependency', 'forward').get('S-002')).toEqual(['S-001']);
     });
 
     /**
-     * KNOWN BUG #2 (reported, not fixed): the hierarchy `parent` field is stored on
-     * the plugin entry as a SCALAR string, but buildAdjacency treats every field as
-     * `string[]` and does `targets.push(...value)` — spreading the id string into its
-     * individual characters. Compounded with BUG #1 (two hierarchy pairs both named
-     * `parent`), the scalar is spread twice. Asserted qualitatively.
+     * FIXED BUG #2: the hierarchy `parent` field is stored on the plugin entry as a
+     * SCALAR string, but buildAdjacency used to treat every field as `string[]` and
+     * `targets.push(...value)` — spreading the id string into its individual
+     * characters. Scalars are now wrapped as a single-element list.
      */
-    it('spreads the scalar `parent` id into characters on hierarchy (KNOWN BUG #2)', async () => {
+    it('treats the scalar `parent` id as a single target on hierarchy (fixed BUG #2)', async () => {
       const adapter = await buildAdapter({
         'M-001.md': fm({ id: 'M-001', type: 'milestone', title: 'M' }),
         'S-001.md': fm({ id: 'S-001', type: 'story', title: 'S', parent: 'M-001' }),
       });
       const targets = adapter.buildAdjacency('hierarchy', 'forward').get('S-001');
-      // Correct behaviour would be ['M-001']; instead we get spread characters.
-      expect(targets).not.toEqual(['M-001']);
-      expect(targets).not.toContain('M-001');
-      expect(targets).toContain('M');
-      expect(targets).toContain('-');
+      // Correct behaviour: the scalar id is a single, un-spread target.
+      expect(targets).toEqual(['M-001']);
     });
   });
 

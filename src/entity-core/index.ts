@@ -35,3 +35,7 @@ export {
   type LayoutResult,
 } from './canvas.js';
 export { ProjectIndex } from './project-index.js';
+export {
+  normalizeStatus as normalizeStatusForType,
+  normalizePriority as normalizePriorityForType,
+} from './status-normalizer.js';

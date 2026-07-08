@@ -63,20 +63,14 @@ describe('G. CanvasManager', () => {
     expect(manager.getTypeFromPath('no/entities/segment.md')).toBeNull();
   });
 
-  // addNode keys the folder lookup by ID prefix (getEntityType('M')), but the schema
-  // registry is keyed by type NAME ('milestone'). A schema whose type name equals the
-  // prefix makes that lookup consistent so addNode can be exercised end to end.
-  const prefixKeyedSchema = () => {
-    const clone = structuredClone(DEFAULT_SCHEMA);
-    clone.entityTypes[0].type = 'M'; // milestone: rename type to match its idPrefix
-    return clone;
-  };
-
+  // addNode resolves the entity's folder from its ID PREFIX ('M') via the
+  // schema-driven getEntityTypeFromId helper, so it works against the stock
+  // DEFAULT_SCHEMA (keyed by type NAME 'milestone') with no clone/rename workaround.
   it('addNode appends a schema-styled node and persists the canvas', async () => {
     const fs = new InMemoryFileSystem({
       '/vault/projects/main.canvas': JSON.stringify({ nodes: [], edges: [] }),
     });
-    const reg = new SchemaRegistry(prefixKeyedSchema());
+    const reg = new SchemaRegistry(DEFAULT_SCHEMA);
     const mgr = new CanvasManager(reg, fs, new PathResolver(reg, CONFIG));
 
     await mgr.addNode('projects/main.canvas', 'M-001');
@@ -99,7 +93,7 @@ describe('G. CanvasManager', () => {
         edges: [],
       }),
     });
-    const reg = new SchemaRegistry(prefixKeyedSchema());
+    const reg = new SchemaRegistry(DEFAULT_SCHEMA);
     const mgr = new CanvasManager(reg, fs, new PathResolver(reg, CONFIG));
 
     await mgr.addNode('projects/main.canvas', 'M-002');
@@ -117,7 +111,7 @@ describe('G. CanvasManager', () => {
     const fs = new InMemoryFileSystem({
       '/vault/projects/main.canvas': JSON.stringify({ nodes: [], edges: [] }),
     });
-    const reg = new SchemaRegistry(prefixKeyedSchema());
+    const reg = new SchemaRegistry(DEFAULT_SCHEMA);
     const mgr = new CanvasManager(reg, fs, new PathResolver(reg, CONFIG));
 
     await mgr.addNode('projects/main.canvas', 'M-003', { x: 12, y: 34 });
