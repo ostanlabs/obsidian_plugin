@@ -227,6 +227,21 @@ function main(SCHEMA) {
     const a = -Math.PI / 2 + i * (2 * Math.PI / NODES.length);
     pos[n.type] = { x: CX + R * Math.cos(a), y: CY + R * Math.sin(a) };
   });
+  // Preset hexagon slots for the core types: execution hierarchy on the LEFT
+  // half (milestone/story/task), knowledge entities on the RIGHT half
+  // (feature/document/decision). Flat-top hexagon angles; unknown/extra types
+  // keep their computed circle slot; everything stays draggable.
+  const PRESET_ANGLES = {
+    milestone: 240, story: 180, task: 120,      // up-left, left, down-left
+    feature: 300, document: 0, decision: 60,    // up-right, right, down-right
+  };
+  NODES.forEach(n => {
+    const deg = PRESET_ANGLES[n.type];
+    if (deg !== undefined) {
+      const a = deg * Math.PI / 180;
+      pos[n.type] = { x: CX + R * Math.cos(a), y: CY + R * Math.sin(a) };
+    }
+  });
 
   // ── Sidebar ────────────────────────────────────────────────────────────────
   function buildSidebar() {
