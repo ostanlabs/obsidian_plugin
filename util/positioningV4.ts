@@ -143,10 +143,17 @@ interface ProcessedNode {
 	// Containment
 	containmentParentId?: string;      // Single parent after priority resolution
 	containmentEdgeTargets: string[];  // Additional containment targets (edge only)
+	// Priority of each candidate CHILD-rule parent (parentEntityId -> rule priority). Populated
+	// only from child-direction containment rules that carry an explicit schema priority; used by
+	// resolveParentConflict to honor rule priority when candidates disambiguate cleanly.
+	containmentParentPriorities: Map<string, number>;
 	children: ProcessedNode[];
 	// Sequencing
 	sequencingBefore: string[];        // Entities this comes BEFORE
 	sequencingAfter: string[];         // Entities this comes AFTER
+	// Sequencing targets whose producing rule set crossWsPositioning (schema knob). Cross-
+	// workstream milestone layout is applied only for edges present here.
+	crossWsSeqTargets: Set<string>;
 	// Positioning
 	containerSize?: ContainerSize;
 	position?: NodePosition;
@@ -365,9 +372,11 @@ export class PositioningEngineV4 {
 				data: entity,
 				category: 'orphan',  // Default, will be updated in Phase 3
 				containmentEdgeTargets: [],
+				containmentParentPriorities: new Map(),
 				children: [],
 				sequencingBefore: [],
 				sequencingAfter: [],
+				crossWsSeqTargets: new Set(),
 			};
 
 			this.processedNodes.set(entity.entityId, node);
@@ -548,11 +557,22 @@ export class PositioningEngineV4 {
 	 * Get field value from entity, handling field name mapping
 	 */
 	private getFieldValue(entity: EntityData, fieldName: string): string | string[] | undefined {
-		// Map ruleset field names to EntityData property names
-		const fieldMap: Record<string, keyof EntityData> = {
+		// Map ruleset field names (schema snake_case) to EntityData property names (camelCase).
+		// Includes the reverse container fields `documented_by`/`decided_by` so that a
+		// container's PARENT rule (emitParentRule on documentation/decision-impact — a feature
+		// claiming its documents, a document claiming its decisions) can actually read the field
+		// and attach the child. Without these bridge entries those parent rules were dead:
+		// getFieldValue looked up `entity['documented_by']` (snake_case) which never exists on the
+		// camelCase EntityData. DEFAULT layout is unchanged because the canonical entity parser
+		// (entityParser.ts) never populates these reverse fields, so the lookup stays undefined
+		// for the default schema / real vault — the wiring only activates when a schema+data pair
+		// actually carries the reverse field.
+		const fieldMap: Record<string, string> = {
 			'depends_on': 'dependsOn',
 			'implemented_by': 'implementedBy',
 			'previous_version': 'previousVersion',
+			'documented_by': 'documentedBy',
+			'decided_by': 'decidedBy',
 		};
 
 		const mappedField = fieldMap[fieldName] || fieldName;
@@ -577,6 +597,14 @@ export class PositioningEngineV4 {
 
 		// Process "child" direction (this entity is child of target)
 		if (childRels.length > 0) {
+			// Record each child-rule candidate's explicit schema priority (if any) so the later
+			// containment-conflict resolver can honor rule priority instead of discarding it.
+			for (const rel of childRels) {
+				if (rel.priority !== undefined) {
+					node.containmentParentPriorities.set(rel.targetEntityId, rel.priority);
+				}
+			}
+
 			// Sort by priority (lower wins)
 			childRels.sort((a, b) => (a.priority || 999) - (b.priority || 999));
 
@@ -628,6 +656,11 @@ export class PositioningEngineV4 {
 			} else if (rel.direction === 'after') {
 				// This entity comes AFTER target
 				node.sequencingAfter.push(rel.targetEntityId);
+			}
+			// Record whether the producing rule opted this edge into cross-workstream
+			// positioning (schema `crossWsPositioning`, after `crossWsExcludedTypes` filtering).
+			if (rel.crossWsPositioning) {
+				node.crossWsSeqTargets.add(rel.targetEntityId);
 			}
 		}
 	}
@@ -806,7 +839,7 @@ export class PositioningEngineV4 {
 		if (allParents.length <= 1) return false;
 
 		// Try to resolve by finding the most specific parent (deepest in hierarchy)
-		const resolvedParent = this.resolveParentConflict(allParents);
+		const resolvedParent = this.resolveParentConflict(allParents, node.containmentParentPriorities);
 		if (resolvedParent) {
 			// Resolved! Update node to use the most specific parent
 			node.containmentParentId = resolvedParent;
@@ -820,12 +853,39 @@ export class PositioningEngineV4 {
 	/**
 	 * Try to resolve parent conflict.
 	 * Priority:
+	 * 0. If the candidate parents carry explicit (schema-derived) rule priorities that pick a
+	 *    unique winner, honor it. This is the schema `positioning.priority` knob made functional.
 	 * 1. If one parent is an ancestor of another, pick the most specific (deepest)
 	 * 2. If all parents are milestones in the same workstream, pick the first one (leftmost)
 	 * 3. Otherwise, can't resolve - truly conflicting
 	 */
-	private resolveParentConflict(parentIds: string[]): string | undefined {
+	private resolveParentConflict(parentIds: string[], priorities?: Map<string, number>): string | undefined {
 		if (parentIds.length <= 1) return parentIds[0];
+
+		// Strategy 0: honor explicit rule priority (schema positioning.priority) when it uniquely
+		// disambiguates. This fires ONLY when EVERY candidate carries a defined child-rule
+		// priority AND there is a strict unique minimum. Parent-direction claims never record a
+		// priority, so any mix with one of those skips this strategy; and within the DEFAULT
+		// schema each entity type sources exactly one child field, so all of a node's child-rule
+		// parents share a single priority (never a unique minimum) — hence DEFAULT layout is
+		// unchanged and this only activates for custom schemas that set differing priorities.
+		if (priorities && priorities.size > 0) {
+			const allHavePriority = parentIds.every(id => priorities.has(id));
+			if (allHavePriority) {
+				let minPriority = Infinity;
+				let minCount = 0;
+				let minId: string | undefined;
+				for (const id of parentIds) {
+					const p = priorities.get(id)!;
+					if (p < minPriority) { minPriority = p; minCount = 1; minId = id; }
+					else if (p === minPriority) { minCount++; }
+				}
+				if (minCount === 1 && minId) {
+					console.log(`[PositioningV4] Resolved containment by rule priority: picked ${minId} (priority ${minPriority}) from [${parentIds.join(', ')}]`);
+					return minId;
+				}
+			}
+		}
 
 		// Strategy 1: Check if one parent is an ancestor of another
 		// If A is ancestor of B, then B is more specific - pick B
@@ -1822,9 +1882,13 @@ export class PositioningEngineV4 {
 
 		for (const ws of sortedWorkstreams) {
 			for (const m of ws.milestones) {
-				// Check sequencingAfter for cross-workstream deps (this comes AFTER target)
+				// Check sequencingAfter for cross-workstream deps (this comes AFTER target).
+				// Gated on the schema `crossWsPositioning` knob: only edges whose producing
+				// sequencing rule opted into cross-workstream positioning create a cross-WS
+				// layout constraint. (DEFAULT schema sets this true for milestone dependency, so
+				// default behavior is preserved; a custom schema can disable it.)
 				for (const depId of m.sequencingAfter) {
-					if (allMilestoneIds.has(depId)) {
+					if (allMilestoneIds.has(depId) && m.crossWsSeqTargets.has(depId)) {
 						const depNode = this.processedNodes.get(depId);
 						if (depNode && depNode.workstream !== m.workstream) {
 							crossWsDeps.push({ source: depId, target: m.entityId });
@@ -1833,7 +1897,7 @@ export class PositioningEngineV4 {
 				}
 				// Check sequencingBefore for cross-workstream deps (this comes BEFORE target)
 				for (const targetId of m.sequencingBefore) {
-					if (allMilestoneIds.has(targetId)) {
+					if (allMilestoneIds.has(targetId) && m.crossWsSeqTargets.has(targetId)) {
 						const targetNode = this.processedNodes.get(targetId);
 						if (targetNode && targetNode.workstream !== m.workstream) {
 							crossWsDeps.push({ source: m.entityId, target: targetId });

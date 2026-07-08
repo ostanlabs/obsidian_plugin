@@ -73,6 +73,29 @@ describe("reconcileAllRelationships (integration via obsidian mock)", () => {
 		expect(parseFrontmatter(vault._files.get("tasks/T-4.md")!)!.blocks).toEqual(["T-5"]);
 	});
 
+	it("prunes non-ID-shaped garbage tokens from a forward relationship field, keeping valid ids", async () => {
+		const { plugin, vault } = makePlugin({
+			// depends_on holds a valid id (T-4) plus free-text garbage that cleanEntityId drops
+			// at read time. The garbage must be REMOVED from disk, not silently kept.
+			"tasks/T-4.md": note({ type: "task", id: "T-4" }),
+			"tasks/T-6.md": note({ type: "task", id: "T-6", depends_on: "[T-4, see the other task]" }),
+			// implements with a garbage token too
+			"features/F-1.md": note({ type: "feature", id: "F-1" }),
+			"stories/S-3.md": note({ type: "story", id: "S-3", implements: "[F-1, TODO figure this out]" }),
+		});
+
+		await plugin.reconcileAllRelationships();
+
+		const t6 = parseFrontmatter(vault._files.get("tasks/T-6.md")!)!;
+		expect(t6.depends_on).toEqual(["T-4"]);
+		// valid reference preserved and its inverse produced
+		expect(parseFrontmatter(vault._files.get("tasks/T-4.md")!)!.blocks).toEqual(["T-6"]);
+
+		const s3 = parseFrontmatter(vault._files.get("stories/S-3.md")!)!;
+		expect(s3.implements).toEqual(["F-1"]);
+		expect(parseFrontmatter(vault._files.get("features/F-1.md")!)!.implemented_by).toEqual(["S-3"]);
+	});
+
 	it("does NOT delete a parent reference that is merely missing from the vault (warn-only)", async () => {
 		const { plugin, vault } = makePlugin({
 			// parent M-404 not present; reconciler warns but must preserve the field

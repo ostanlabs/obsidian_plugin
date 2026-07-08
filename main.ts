@@ -10707,6 +10707,15 @@ private registerCommands(): void {
 				const currentImplements = parseYamlArray(fm, 'implements');
 				const currentDocuments = parseYamlArray(fm, 'documents');
 				const currentAffects = parseYamlArray(fm, 'affects');
+				// Raw (pre-clean) persisted tokens. Comparing the cleanup target against the
+				// CLEANED view hides non-ID-shaped garbage (e.g. free text) because cleanEntityId
+				// already dropped it at read time — so the cleaned view equals the target and the
+				// write is skipped, leaving the garbage on disk. Compare against the raw tokens so
+				// that removing a malformed token counts as a change and triggers a rewrite.
+				const currentDependsOnRaw = parseYamlArrayRaw(fm, 'depends_on');
+				const currentImplementsRaw = parseYamlArrayRaw(fm, 'implements');
+				const currentDocumentsRaw = parseYamlArrayRaw(fm, 'documents');
+				const currentAffectsRaw = parseYamlArrayRaw(fm, 'affects');
 				// Use [ \t]* instead of \s* to avoid matching newlines
 				const supersededByMatch = fm.match(/^superseded_by:[ \t]*(.+)$/m);
 				const currentSupersededBy = supersededByMatch?.[1]?.trim();
@@ -10765,21 +10774,21 @@ private registerCommands(): void {
 					// Only update if the cleaned value is different from current
 					if (forwardCleanup) {
 						if (forwardCleanup.implements !== undefined) {
-							if (JSON.stringify([...currentImplements].sort()) !== JSON.stringify([...forwardCleanup.implements].sort())) {
+							if (JSON.stringify([...currentImplementsRaw].sort()) !== JSON.stringify([...forwardCleanup.implements].sort())) {
 								updates.implements = forwardCleanup.implements;
-								console.log(`[Reconciler] ${entityId}.implements: current=[${currentImplements.join(', ')}], cleaned=[${forwardCleanup.implements.join(', ')}]`);
+								console.log(`[Reconciler] ${entityId}.implements: current=[${currentImplementsRaw.join(', ')}], cleaned=[${forwardCleanup.implements.join(', ')}]`);
 							}
 						}
 						if (forwardCleanup.documents !== undefined) {
-							if (JSON.stringify([...currentDocuments].sort()) !== JSON.stringify([...forwardCleanup.documents].sort())) {
+							if (JSON.stringify([...currentDocumentsRaw].sort()) !== JSON.stringify([...forwardCleanup.documents].sort())) {
 								updates.documents = forwardCleanup.documents;
-								console.log(`[Reconciler] ${entityId}.documents: current=[${currentDocuments.join(', ')}], cleaned=[${forwardCleanup.documents.join(', ')}]`);
+								console.log(`[Reconciler] ${entityId}.documents: current=[${currentDocumentsRaw.join(', ')}], cleaned=[${forwardCleanup.documents.join(', ')}]`);
 							}
 						}
 						if (forwardCleanup.affects !== undefined) {
-							if (JSON.stringify([...currentAffects].sort()) !== JSON.stringify([...forwardCleanup.affects].sort())) {
+							if (JSON.stringify([...currentAffectsRaw].sort()) !== JSON.stringify([...forwardCleanup.affects].sort())) {
 								updates.affects = forwardCleanup.affects;
-								console.log(`[Reconciler] ${entityId}.affects: current=[${currentAffects.join(', ')}], cleaned=[${forwardCleanup.affects.join(', ')}]`);
+								console.log(`[Reconciler] ${entityId}.affects: current=[${currentAffectsRaw.join(', ')}], cleaned=[${forwardCleanup.affects.join(', ')}]`);
 							}
 						}
 						if (forwardCleanup.parent === null) {
@@ -10803,8 +10812,9 @@ private registerCommands(): void {
 						// Remove duplicates
 						const finalDeps = [...new Set(mergedDeps)];
 
-						// Only update if the final result is different from current
-						if (JSON.stringify([...currentDependsOn].sort()) !== JSON.stringify([...finalDeps].sort())) {
+						// Compare against the RAW persisted tokens (not the cleaned view) so that
+						// pruning non-ID-shaped garbage is detected as a change and written back.
+						if (JSON.stringify([...currentDependsOnRaw].sort()) !== JSON.stringify([...finalDeps].sort())) {
 							updates.depends_on = finalDeps;
 							console.log(`[Reconciler] ${entityId}.depends_on: current=[${currentDependsOn.join(', ')}], cleaned=[${cleanedDeps.join(', ')}], new=[${newDependsOn.join(', ')}], final=[${finalDeps.join(', ')}]`);
 						}

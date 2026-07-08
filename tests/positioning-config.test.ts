@@ -341,4 +341,162 @@ describe("PositioningEngineV4 — config → layout locks", () => {
       expect(pos(r2, "A-1").y).toBeGreaterThan(pos(r2, "B-1").y);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // B2b — `priority` now drives the containment WINNER for real (layout delta).
+  //
+  // Companion to B2. B2 locked that priority flows schema → derived rule but noted the FINAL
+  // position was a no-op (the two-parent entity was deferred to a symmetric band, discarding
+  // priority). The engine now honors rule priority in resolveParentConflict (Strategy 0): when
+  // every candidate container carries a DEFINED child-rule priority and there is a UNIQUE minimum,
+  // the lowest-priority-number container wins. X-1 has two container claims in DIFFERENT
+  // workstreams (parent→M-eng, implements→M-biz); swapping which relationship holds priority 1
+  // swaps which milestone contains X-1, so its position moves. (DEFAULT layout is unaffected:
+  // each default entity type sources exactly one child field, so its parents never carry two
+  // differing defined priorities — Strategy 0 never fires there.)
+  // -------------------------------------------------------------------------
+  describe("B2b: priority selects the containment winner (layout delta)", () => {
+    const schema = (pParent: number, pImpl: number): Schema => ({
+      ...base,
+      relationships: [
+        { name: "h", label: "H",
+          pairs: [{ from: "story", to: "milestone", forward: "parent", reverse: "children" }],
+          cardinality: { forward: "one", reverse: "many" }, canvas: {}, graph: {},
+          positioning: { role: "containment", containerEnd: "to", priority: pParent } },
+        { name: "impl", label: "I",
+          pairs: [{ from: "story", to: "milestone", forward: "implements", reverse: "implemented_by" }],
+          cardinality: { forward: "many", reverse: "many" }, canvas: {}, graph: {},
+          positioning: { role: "containment", containerEnd: "to", priority: pImpl } },
+      ],
+    } as unknown as Schema);
+
+    const entities = () => [
+      ent({ entityId: "M-eng", type: "milestone", workstream: "engineering" }),
+      ent({ entityId: "M-biz", type: "milestone", workstream: "business" }),
+      ent({ entityId: "X-1", type: "story", parent: "M-eng", implements: ["M-biz"] }),
+    ];
+
+    it("priority 1 on `parent` → X-1 nests under M-eng (child placed left of it)", () => {
+      const res = engineFor(schema(1, 2)).calculatePositions(entities());
+      expect(res.positions.size).toBe(3);
+      expect(pos(res, "X-1").x).toBeLessThan(pos(res, "M-eng").x);
+    });
+
+    it("priority 1 on `implements` → X-1 nests under M-biz instead (child placed left of it)", () => {
+      const res = engineFor(schema(2, 1)).calculatePositions(entities());
+      expect(res.positions.size).toBe(3);
+      expect(pos(res, "X-1").x).toBeLessThan(pos(res, "M-biz").x);
+    });
+
+    it("swapping which relationship holds priority 1 moves X-1", () => {
+      const a = engineFor(schema(1, 2)).calculatePositions(entities());
+      const b = engineFor(schema(2, 1)).calculatePositions(entities());
+      expect(pos(a, "X-1")).not.toEqual(pos(b, "X-1"));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // G1 — the reverse container fields `documented_by` / `decided_by` are now READABLE.
+  //
+  // B3's comment recorded that `documented_by` was unreadable by getFieldValue, so the
+  // documentation/decision-impact PARENT rules (a feature claiming its documents, a document
+  // claiming its decisions) were dead. getFieldValue now bridges `documented_by → documentedBy`
+  // (and `decided_by → decidedBy`), so a container carrying the reverse field can claim its
+  // child via the emitParentRule path. Here F-1 carries ONLY `documented_by` (DOC-1 has NO
+  // forward `documents`), so DOC-1's sole route to a home is F-1's reverse-field parent claim.
+  // With emitParentRule:true it nests up-and-left of F-1; with it off, DOC-1 falls to the orphan
+  // area — a delta that is only possible because the reverse field is actually read. (DEFAULT
+  // layout is unaffected: the canonical entity parser never populates these reverse fields.)
+  // -------------------------------------------------------------------------
+  describe("G1: documented_by reverse field is readable via getFieldValue bridge", () => {
+    const schema = (emitParentRule: boolean): Schema => ({
+      ...base,
+      relationships: [
+        { name: "h", label: "H",
+          pairs: [{ from: "story", to: "milestone", forward: "parent", reverse: "children" }],
+          cardinality: { forward: "one", reverse: "many" }, canvas: {}, graph: {},
+          positioning: { role: "containment", containerEnd: "to" } },
+        { name: "doc", label: "Doc",
+          pairs: [{ from: "document", to: "feature", forward: "documents", reverse: "documented_by" }],
+          cardinality: { forward: "many", reverse: "many" }, canvas: {}, graph: {},
+          positioning: { role: "containment", containerEnd: "to", priority: 1, emitParentRule } },
+      ],
+    } as unknown as Schema);
+
+    // F-1 carries the REVERSE field documented_by; DOC-1 carries NO forward `documents`.
+    const entities = () => [
+      ent({ entityId: "M-1", type: "milestone" }),
+      ent({ entityId: "S-1", type: "story", parent: "M-1" }),
+      { ...ent({ entityId: "F-1", type: "feature" }), documentedBy: ["DOC-1"] } as EntityData,
+      ent({ entityId: "DOC-1", type: "document" }),
+    ];
+
+    it("emitParentRule:true → feature reads documented_by and nests DOC-1 up-and-left of it", () => {
+      const s = schema(true);
+      expect(findRule(s, "feature", "documented_by")).toMatchObject({
+        targetType: "document", action: "containment", direction: "parent",
+      });
+      const res = engineFor(s).calculatePositions(entities());
+      expect(pos(res, "DOC-1").x).toBeLessThan(pos(res, "F-1").x);
+      expect(pos(res, "DOC-1").y).toBeLessThan(pos(res, "F-1").y);
+    });
+
+    it("emitParentRule:false → no parent rule → DOC-1 falls to the orphan area (below)", () => {
+      const res = engineFor(schema(false)).calculatePositions(entities());
+      expect(pos(res, "DOC-1").y).toBeGreaterThan(pos(res, "F-1").y);
+    });
+
+    it("toggling emitParentRule moves DOC-1 (proves the reverse field is consumed)", () => {
+      const on = engineFor(schema(true)).calculatePositions(entities());
+      const off = engineFor(schema(false)).calculatePositions(entities());
+      expect(pos(on, "DOC-1")).not.toEqual(pos(off, "DOC-1"));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // D2 — `crossWsPositioning` now gates cross-workstream milestone layout (layout delta).
+  //
+  // B2's comment recorded the crossWs flag as a no-op. The engine now records, per sequencing
+  // edge, whether the producing rule set crossWsPositioning (after crossWsExcludedTypes filtering)
+  // and applies a cross-workstream milestone anchor ONLY for opted-in edges. M-biz (business)
+  // depends_on M-eng (engineering). With the flag ON, M-biz is anchored to the RIGHT of M-eng's
+  // workstream; with it OFF, M-biz's workstream falls back to x=0. The root workstream
+  // (engineering) is unaffected either way, so M-eng stays put while M-biz moves. (DEFAULT layout
+  // is preserved: the default dependency rule sets crossWsPositioning:true, so the gate passes
+  // through exactly as before.)
+  // -------------------------------------------------------------------------
+  describe("D2: crossWsPositioning gates cross-workstream milestone layout", () => {
+    const schema = (crossWs: boolean): Schema => ({
+      ...base,
+      relationships: [
+        { name: "h", label: "H",
+          pairs: [{ from: "story", to: "milestone", forward: "parent", reverse: "children" }],
+          cardinality: { forward: "one", reverse: "many" }, canvas: {}, graph: {},
+          positioning: { role: "containment", containerEnd: "to" } },
+        { name: "dep", label: "Dep",
+          pairs: [{ from: "milestone", to: "milestone", forward: "depends_on", reverse: "blocks" }],
+          cardinality: { forward: "many", reverse: "many" }, canvas: {}, graph: {},
+          positioning: { role: "sequencing", forwardDirection: "after", emitReverseRule: true, crossWsPositioning: crossWs } },
+      ],
+    } as unknown as Schema);
+
+    const entities = () => [
+      ent({ entityId: "M-eng", type: "milestone", workstream: "engineering" }),
+      ent({ entityId: "M-biz", type: "milestone", workstream: "business", dependsOn: ["M-eng"] }),
+    ];
+
+    it("crossWsPositioning:true → M-biz is anchored to the right of the root workstream", () => {
+      const on = engineFor(schema(true)).calculatePositions(entities());
+      const off = engineFor(schema(false)).calculatePositions(entities());
+      // the flag only moves the dependent (non-root) milestone; the root milestone is fixed
+      expect(pos(on, "M-eng")).toEqual(pos(off, "M-eng"));
+      expect(pos(on, "M-biz").x).toBeGreaterThan(pos(off, "M-biz").x);
+    });
+
+    it("toggling crossWsPositioning moves M-biz", () => {
+      const on = engineFor(schema(true)).calculatePositions(entities());
+      const off = engineFor(schema(false)).calculatePositions(entities());
+      expect(pos(on, "M-biz")).not.toEqual(pos(off, "M-biz"));
+    });
+  });
 });
