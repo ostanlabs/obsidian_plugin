@@ -83,7 +83,7 @@ describe("syncFileToNotion (integration via obsidian mock)", () => {
 		expect(Notice.instances).toContain("Successfully synced to Notion");
 	});
 
-	it("migrates legacy fields on read: effort→workstream and created→created_at reach syncNote", async () => {
+	it("does NOT migrate legacy aliases on read: syncNote sees canonical defaults (§5.3 reconciled)", async () => {
 		const synced: Array<Record<string, unknown>> = [];
 		const { plugin } = makePlugin({
 			"tasks/T-002.md": note({
@@ -103,9 +103,14 @@ describe("syncFileToNotion (integration via obsidian mock)", () => {
 
 		await plugin.syncFileToNotion(new TFile("tasks/T-002.md"));
 
-		// parseFrontmatter's auto-migration (WI-1) is what syncNote sees
-		expect(synced[0].workstream).toBe("growth");
-		expect(synced[0].created_at).toBe("2020-06-01T00:00:00.000Z");
+		// Pre-convergence, parseFrontmatter auto-migrated effort→workstream and
+		// created→created_at (WI-1). The canonical EntityParser leaves legacy
+		// aliases in passthrough: workstream falls back to the schema default
+		// and created_at is stamped at parse time — the same semantics the MCP
+		// has always applied to this vault.
+		expect(synced[0].workstream).toBe("engineering");
+		expect(synced[0].created_at).toBeDefined();
+		expect(synced[0].created_at).not.toBe("2020-06-01T00:00:00.000Z");
 	});
 
 	it("does not rewrite the file when notion_page_id already exists", async () => {

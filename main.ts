@@ -42,10 +42,10 @@ import {
 	replacePlaceholders,
 	replaceFeaturePlaceholders,
 } from "./util/template";
-import { parseFrontmatter, parseAnyFrontmatter, parseFrontmatterAndBody, createWithFrontmatter, applyFrontmatterUpdates } from "./util/frontmatter";
+import { parseAnyFrontmatter, parseFrontmatterAndBody, createWithFrontmatter, applyFrontmatterUpdates } from "./util/frontmatter";
 import { EntityCoreFacade } from "./src/entity-core-facade";
 import { EntityIndexAdapter } from "./src/adapters/entity-index-adapter";
-import type { EntityIndex as CoreEntityIndex } from "./src/entity-core/types";
+import type { EntityIndex as CoreEntityIndex, RuntimeEntity } from "./src/entity-core/types";
 import {
 	loadCanvasData,
 	saveCanvasData,
@@ -83,7 +83,7 @@ import { loadSchemaOrDefault } from "./src/entity-core/schema-bootstrap.js";
 import { buildRelationshipRules } from "./src/entity-core/schema-derivation.js";
 import { ObsidianVaultAdapter } from "./src/adapters/obsidian-vault-adapter.js";
 import { generateNodeIdFromEntityId } from "./util/entityParser";
-import { toEntityData } from "./src/adapters/model-map";
+import { toEntityData, toItemFrontmatter } from "./src/adapters/model-map";
 import { reconcileRelationships, cleanTransitiveDependencies, detectAndBreakCycles } from "./util/relationshipReconciler";
 
 const DEFAULT_NODE_HEIGHT = 242;  // 220 * 1.1
@@ -744,7 +744,7 @@ private registerCommands(): void {
 		try {
 			// Read and parse frontmatter
 			const content = await this.app.vault.read(file);
-			const frontmatter = parseFrontmatter(content);
+			const frontmatter = this.parseItemFrontmatter(content, file.path);
 
 			if (!frontmatter) {
 				new Notice("This note does not have valid canvas item frontmatter");
@@ -836,7 +836,7 @@ private registerCommands(): void {
 				try {
 					// Read frontmatter to check if it's a plugin-created entity
 					const content = await this.app.vault.read(file);
-					const frontmatter = parseFrontmatter(content);
+					const frontmatter = this.parseItemFrontmatter(content, file.path);
 
 					if (!frontmatter || !frontmatter.created_by_plugin) {
 						skippedCount++;
@@ -3145,7 +3145,7 @@ private registerCommands(): void {
 				const existingFile = this.app.vault.getAbstractFileByPath(notePath);
 				if (existingFile instanceof TFile) {
 					const fileContent = await this.app.vault.read(existingFile);
-					const parsed = parseFrontmatter(fileContent);
+					const parsed = this.parseItemFrontmatter(fileContent, existingFile.path);
 					id = parsed?.id || await this.generateEntityId(result.type);
 					console.debug('[Canvas Plugin] Read ID from existing file:', id);
 				} else {
@@ -3449,7 +3449,7 @@ private registerCommands(): void {
 			for (const file of mdFiles) {
 				try {
 					const content = await this.app.vault.read(file);
-					const frontmatter = parseFrontmatter(content);
+					const frontmatter = this.parseItemFrontmatter(content, file.path);
 
 					if (frontmatter && isPluginCreatedNote(frontmatter) && frontmatter.id) {
 						this.fileEntityIdCache.set(file.path, frontmatter.id);
@@ -3564,7 +3564,7 @@ private registerCommands(): void {
 		}
 		try {
 			const content = await this.app.vault.read(file);
-			const frontmatter = parseFrontmatter(content);
+			const frontmatter = this.parseItemFrontmatter(content, file.path);
 			const result = frontmatter !== null && isPluginCreatedNote(frontmatter);
 			console.debug('[Canvas Plugin] isPluginCreatedFile result:', {
 				hasFrontmatter: frontmatter !== null,
@@ -3647,7 +3647,7 @@ private registerCommands(): void {
 				}
 
 				const fromContent = await this.app.vault.read(fromFile);
-				const fromFrontmatter = parseFrontmatter(fromContent);
+				const fromFrontmatter = this.parseItemFrontmatter(fromContent, fromFile.path);
 				if (!fromFrontmatter?.id) {
 					continue;
 				}
@@ -3708,7 +3708,7 @@ private registerCommands(): void {
 
 		try {
 			const content = await this.app.vault.read(file);
-			const frontmatter = parseFrontmatter(content);
+			const frontmatter = this.parseItemFrontmatter(content, file.path);
 
 			if (!frontmatter || !isPluginCreatedNote(frontmatter)) {
 				return false;
@@ -3997,7 +3997,7 @@ private registerCommands(): void {
 
 		try {
 			const content = await this.app.vault.read(file);
-			const frontmatter = parseFrontmatter(content);
+			const frontmatter = this.parseItemFrontmatter(content, file.path);
 
 			// Only process plugin-created notes
 			if (!frontmatter || !isPluginCreatedNote(frontmatter)) {
@@ -4142,7 +4142,7 @@ private registerCommands(): void {
 			for (const file of allFiles) {
 				try {
 					const content = await this.app.vault.read(file);
-					const frontmatter = parseFrontmatter(content);
+					const frontmatter = this.parseItemFrontmatter(content, file.path);
 
 					// Check if this file was created by our plugin
 					const isPluginFile = frontmatter && isPluginCreatedNote(frontmatter);
@@ -4273,10 +4273,13 @@ private registerCommands(): void {
 					if (!notionPage.last_edited_time) continue;
 					const notionUpdated = new Date(notionPage.last_edited_time).getTime();
 					const content = await this.app.vault.read(localFile);
-					const frontmatter = parseFrontmatter(content);
+					const frontmatter = this.parseItemFrontmatter(content, localFile.path);
 					if (!frontmatter) continue;
 
-					const localUpdated = new Date(frontmatter.updated_at ?? frontmatter.updated ?? new Date()).getTime();
+					// updated_at is always set post-parse (EntityParser fills a
+					// missing one with parse time); the legacy `updated` alias is
+					// no longer consulted (spec §5.3).
+					const localUpdated = new Date(frontmatter.updated_at ?? new Date()).getTime();
 
 					// If Notion is newer, update local file
 					if (notionUpdated > localUpdated + 1000) { // 1 second buffer
@@ -4317,44 +4320,68 @@ private registerCommands(): void {
 	private async updateLocalFileFromNotion(file: TFile, page: NotionPage): Promise<void> {
 		try {
 			const content = await this.app.vault.read(file);
-			const frontmatter = parseFrontmatter(content);
-			if (!frontmatter) return;
+			// Round-trip through the canonical model: parse → mutate → serialize.
+			// RuntimeEntity.passthrough carries every key the schema doesn't
+			// claim, so relationship fields and unknown keys survive the rewrite.
+			const facade = this.getEntityCore();
+			let entity: RuntimeEntity;
+			try {
+				entity = facade.parseEntity(content, file.path);
+			} catch {
+				// No/invalid frontmatter — nothing to update (legacy null contract)
+				return;
+			}
+			if (!entity.id || !entity.type) return;
 
 			// Extract properties from Notion page
 			const props = page.properties;
 			if (!props) return;
 
-			// Update frontmatter from Notion properties
+			// Schema-aware setter: declared custom fields go to entity.fields,
+			// everything else (inProgress, time_estimate, task priority, effort)
+			// rides passthrough — same placement EntityParser gives them on read.
+			const schemaFields = new Set(
+				facade.getSchema().getFields(entity.type).map((f) => f.name)
+			);
+			const setField = (name: string, value: unknown) => {
+				if (schemaFields.has(name)) {
+					entity.fields[name] = value;
+				} else {
+					entity.passthrough = { ...(entity.passthrough ?? {}), [name]: value };
+				}
+			};
+
+			// Update entity from Notion properties
 			if (props.Title?.title?.[0]?.plain_text) {
-				frontmatter.title = props.Title.title[0].plain_text;
+				entity.title = props.Title.title[0].plain_text;
 			}
 			if (props.Status?.select?.name) {
-				frontmatter.status = this.mapNotionStatusToLocal(props.Status.select.name);
+				entity.status = this.mapNotionStatusToLocal(props.Status.select.name);
 			}
 			if (props.Priority?.select?.name) {
-				frontmatter.priority = props.Priority.select.name as ItemPriority;
+				setField('priority', props.Priority.select.name as ItemPriority);
 			}
 			if (props.Effort?.select?.name) {
-				frontmatter.effort = props.Effort.select.name;
+				setField('effort', props.Effort.select.name);
 			}
 			if (props["In Progress"]?.checkbox !== undefined) {
-				frontmatter.inProgress = props["In Progress"].checkbox;
+				setField('inProgress', props["In Progress"].checkbox);
 			}
 			if (props["Time Estimate"]?.number !== undefined) {
-				frontmatter.time_estimate = props["Time Estimate"].number;
+				setField('time_estimate', props["Time Estimate"].number);
 			}
 
-			// Update the updated timestamp
+			// Update the canonical timestamp (updated_at, not the legacy `updated`)
 			if (page.last_edited_time) {
-				frontmatter.updated = new Date(page.last_edited_time).toISOString();
+				entity.updated_at = new Date(page.last_edited_time).toISOString();
 			}
 
 			// Get body content from Notion blocks
 			const blocks = await this.notionClient!.getPageContent(page.id);
 			const bodyContent = this.notionBlocksToMarkdown(blocks);
 
-			// Rebuild the file content
-			const newContent = this.buildMarkdownContent(frontmatter, bodyContent);
+			// Rebuild the file content in the canonical EntitySerializer format
+			const newContent = facade.serializeEntity(entity) + bodyContent;
 
 			// Write the updated content
 			this.isUpdatingCanvas = true; // Prevent triggering auto-sync back to Notion
@@ -5286,7 +5313,7 @@ private registerCommands(): void {
 
 				// Read and parse frontmatter
 				const content = await this.app.vault.read(file);
-				const frontmatter = parseFrontmatter(content);
+				const frontmatter = this.parseItemFrontmatter(content, file.path);
 
 				// Also try to parse V2 style frontmatter
 				const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
@@ -9196,6 +9223,28 @@ private registerCommands(): void {
 			});
 		}
 		return this.entityCore;
+	}
+
+	/**
+	 * Canonical replacement for util/frontmatter.parseFrontmatter on READ
+	 * paths: parse via entity-core's EntityParser, project to the legacy
+	 * ItemFrontmatter view. Same null contract: null when there is no
+	 * frontmatter block, the YAML is invalid, or id/type are missing. (The
+	 * legacy parser also required `title`; EntityParser defaults a missing
+	 * title to 'Untitled', which downstream treats identically.)
+	 *
+	 * Legacy-alias migration (`created`→`created_at`, `updated`→`updated_at`,
+	 * `effort`→`workstream`) is intentionally NOT applied — aliases ride
+	 * passthrough, exactly as the MCP already reads this vault (spec §5.3).
+	 */
+	private parseItemFrontmatter(content: string, path: string): ItemFrontmatter | null {
+		try {
+			const entity = this.getEntityCore().parseEntity(content, path);
+			if (!entity.id || !entity.type) return null;
+			return toItemFrontmatter(entity);
+		} catch {
+			return null;
+		}
 	}
 
 	private async initializeEntityNavigator(): Promise<void> {
