@@ -56,28 +56,30 @@ calls only `allocateId`; parse/serialize/validate/relationship-graph/path-resolv
 present-but-unused. So unification is mostly "call the facade" — **the risk is entirely
 in output divergences** that would reformat or relocate real vault files.
 
-**Done (safe):** filename sanitization (snake_case, shared); dead-code deletion;
-workstream aliasing + schema single-source (prior).
+**EXECUTED (Phase B/C — all decisions made & implemented, tested, committed):**
+1. ✅ **§9 Filename + folder** (#3+#5) — one shared `buildEntityFilename` + `filenameCase`
+   schema setting; canonical = **title-only, preserve-case, bare folders** to match the
+   production vault. Plugin & MCP now emit *identical* paths. Vault `schema.json` updated to
+   title-only. No files renamed.
+2. ✅ **§7/§4 Status** (#4) — schema-driven `status-normalizer.ts`; MCP stays reject-only
+   (schema advertises the vocab); plugin delegates. Fixed the feature-status mis-map bug.
+3. ✅ **§3 Reconciliation** (#2) — reconciler inverse maps schema-derived (dropped
+   deprecated `enables`, added the 4 missing inverses); additive-only; post-hoc cycle
+   auto-break kept; entity-core API still prevents cycle-closing writes.
+4. ✅ **§2 Serializer** (#1) — plugin writes the canonical `EntitySerializer` format
+   (quoted scalars, block arrays); body + plugin-only fields preserved; round-trip corpus;
+   removes the yamlSanitizer bug class. A **dry-run** `scripts/reformat-vault.mjs` exists to
+   normalize existing files — **NOT run on your vault** (see §6).
 
-**Designed, needs your decision (Phase B/C in `UNIFICATION_REFACTOR_PLAN.md`):**
-1. **Serializer canonicalization** — plugin writes inline-JSON arrays + unquoted scalars;
-   entity-core writes quoted scalars + YAML block arrays. Adopting `EntitySerializer`
-   reformats every file **but eliminates the whole YAML-sanitization bug class**. _Decision:
-   adopt EntitySerializer + model plugin-only fields as passthrough?_
-2. **Relationship reconciliation** — plugin uses a hardcoded inverse map (incl. deprecated
-   `enables`), additive-only, and **breaks cycles by deleting edges**; entity-core is
-   schema-derived, add+remove, and rejects cycles. _Decision: adopt `syncBidirectional`;
-   keep a plugin-side cycle-breaker?_
-3. **Path/folder layout** — plugin routes to `milestones/`; entity-core to
-   `entities/milestones/`. _This is a data fact to confirm against the production vault._
-4. **Status normalization** — plugin coerces (but mishandles feature statuses);
-   entity-core rejects. _Decision: shared schema-driven coercion; coerce on MCP write too?_
-5. **Entity model + index** (architectural) — 4+ entity shapes; canonical = `RuntimeEntity`
-   + `ProjectIndex`.
+**Still deferred (architectural, high-risk — designed in `UNIFICATION_REFACTOR_PLAN.md`):**
+5. **§1/§8/§5 Entity model + parse + index** — converge the 4+ entity shapes on
+   `RuntimeEntity` + `ProjectIndex`; route plugin parse through `EntityParser`. This is the
+   framing refactor everything else rides on; left as the next deliberate step.
 
-These **rewrite vault files** (format/inverse fields/location) and encode product
-decisions, so — like the filename rename migration — they are designed + test-guarded
-here but **not run unattended on your live vault**.
+**Residual risks from §2 (documented):** `applyFrontmatterUpdates` no longer uses Obsidian's
+`processFrontMatter`, so it loses that API's concurrent-write serialization (still a
+same-file read-modify-write); and it preserves existing key *order* rather than normalizing
+to MCP's canonical order (format is byte-consistent; the migration script normalizes order).
 
 ## 4. Positioning & containment (preserved + configurable)
 
@@ -93,46 +95,48 @@ here but **not run unattended on your live vault**.
   These should be **wired into layout or dropped** from the schema surface to make
   "configurable via schema" fully true. Recommended as a bounded follow-up.
 
-## 5. Pre-existing bugs surfaced (documented, not auto-fixed)
+## 5. Pre-existing bugs surfaced (4 of 5 now FIXED)
 
-1. **`mcp.ts reconcile_relationships` write mode under-reconciles** — for parent→children
+✅ **#1, #2, #4, #5 fixed** (commit `3015e49`); ⬜ **#3 remaining** (small, listed below).
+
+1. ✅ **FIXED — `mcp.ts reconcile_relationships` write mode under-reconciles** — for parent→children
    and depends_on→blocks drift it reports "Add X" and sets `modified=true` but writes the
    *child/source* entity, never mutating the *parent's* `children` / dependency's `blocks`.
    Only the removal branches persist. A real correctness bug in a core tool (ties to
    refactor §3). _Behavior-changing fix — recommend doing with the reconciliation unification._
-2. **`entity-core canvas.ts addNode()`** looks up the folder by ID prefix (`'M'`) against a
-   type-name-keyed map → always throws under `DEFAULT_SCHEMA`. **Latent** (only the facade's
-   `CanvasManager` wraps it; the plugin uses `util/canvas`, so it's effectively unused in
-   production). Low severity; easy fix (resolve folder by prefix→type).
-3. **`main.ts reconcileAllRelationships` keeps non-ID-shaped garbage** — a malformed
+2. ✅ **FIXED — `entity-core canvas.ts addNode()`** looked up the folder by ID prefix (`'M'`)
+   against a type-name-keyed map → always threw under `DEFAULT_SCHEMA`. Now resolves by
+   prefix→type (`getEntityTypeFromId`).
+3. ⬜ **OPEN — `main.ts reconcileAllRelationships` keeps non-ID-shaped garbage** — a malformed
    relationship token (e.g. free text) is dropped at read-time by `cleanEntityId`, so the
    file reads "already clean" and the garbage is never pruned from disk. Only valid-shaped
-   dangling refs get pruned.
-4. **`EntityIndexAdapter.buildAdjacency` emits duplicate edges** — field names collected
-   as `rel.pairs.map(p => p.forward)` without de-dup, so a relationship with N same-named
-   pairs (dependency=3× `depends_on`, hierarchy=2× `parent`) emits each target N times.
-   Benign for visited-guarded cycle/reachability queries, but the adjacency list is wrong.
-5. **`EntityIndexAdapter.buildAdjacency` spreads scalar `parent` into characters** — it
-   treats every field as `string[]` and does `targets.push(...value)`, so scalar
-   `parent: 'M-001'` becomes `['M','-','0','0','1']`. **Any hierarchy cycle check via this
-   adapter is garbage.** Latent today (plugin calls only `allocateId`), but it bites the
-   moment cycle detection is routed through the facade — fix before the reconciliation
-   unification (refactor §3).
+   dangling refs get pruned. (Small; not yet fixed.)
+4. ✅ **FIXED — `EntityIndexAdapter.buildAdjacency` duplicate edges** — field-name set now
+   de-dup'd.
+5. ✅ **FIXED — `EntityIndexAdapter.buildAdjacency` scalar `parent` char-spread** — scalar
+   vs array handled; `parent: 'M-001'` → `['M-001']`. Hierarchy cycle checks now correct.
 
-## 6. Decisions I need from you (to unblock Phase B/C)
+## 6. Decisions — ALL MADE & EXECUTED
 
-1. Canonical serializer: adopt entity-core's always-quote/block-array `EntitySerializer`
-   everywhere (one-time reformat of all files)?
-2. Cycle policy: keep the plugin's destructive auto-heal, or move to entity-core's
-   reject-only + a bounded cycle-breaker?
-3. Vault layout: bare `milestones/` or `entities/milestones/`? (Confirm against prod vault.)
-4. Coerce-on-write for MCP status, or keep reject-only?
-5. Run the one-time **filename rename migration** on the live vault (with backup) to
-   converge existing files to snake_case?
-6. Should I fix the 3 bugs above (esp. #1 reconcile write) now, or bundle with the refactor?
+1. ✅ Serializer: **adopt `EntitySerializer`** everywhere — done (§2).
+2. ✅ Cycle policy: **prevent (API) + post-hoc auto-break** — done (§3, entity-core prevents).
+3. ✅ Vault layout: **bare `milestones/`** — done (§9).
+4. ✅ Status: **reject-only on MCP, schema advertises** — done (§7).
+5. ✅ Filenames: **title-only (match vault), configurable, no rename** — done (§9);
+   vault `schema.json` set to title-only.
+6. ✅ Bugs: **4 of 5 fixed** now (#3 remains).
+
+**Remaining actions (your call, need you present + a backup):**
+- Run `scripts/reformat-vault.mjs --vault <path> --apply --backup` once to normalize your
+  existing entity files to the canonical quoted/block-array format + key order. Currently
+  DRY-RUN only; not run on your vault.
+- Fix bug #3 (reconcile non-ID garbage) — small.
+- The architectural §1/§8/§5 model/index convergence — the next deliberate refactor.
 
 ## 7. Commits (this run)
 
-Filename unification → dead-code deletion → positioning regression-lock + coverage
-(mcp/util) → main.ts vault-I/O coverage → adapters/facade coverage → this report. All on
-the submodule `main` branch with the parent pointer updated per step. Nothing pushed.
+Single-source schema → Phase 5 extraction (12 pure modules) → positioning alignment +
+config + designer + doc → obsidian-mock harness → coverage waves (mcp 92%, util/adapters,
+main.ts vault-I/O) → positioning regression-lock → dead-code deletion → **Phase B/C
+unification: §9 filename/folder, §7 status, §3 reconciler, §2 serializer** + 4 bug fixes.
+All on the submodule `main` branch, parent pointer updated per step. **Nothing pushed.**
