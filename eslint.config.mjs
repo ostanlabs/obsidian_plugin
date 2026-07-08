@@ -4,7 +4,7 @@ import obsidianmd from "eslint-plugin-obsidianmd";
 
 export default [
   {
-    ignores: ["node_modules/**", "main.js", "*.mjs", "tests/**"],
+    ignores: ["node_modules/**", "main.js", "*.mjs", "tests/**", "scripts/**"],
   },
   {
     files: ["**/*.ts"],
