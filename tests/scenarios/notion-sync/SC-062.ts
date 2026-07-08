@@ -18,7 +18,11 @@ export default defineScenario({
         workstream: 'engineering',
         status: 'In Progress',
         priority: 'Medium',
-        notion_id: 'notion-page-123',
+        // The real plugin's field is `notion_page_id` (types.ts:116) — it is the
+        // key used to match local files to Notion pages when pulling changes
+        // (main.ts updateLocalFileFromNotion). Passed via `extra` so the fixture
+        // writes it into the created file's frontmatter.
+        extra: { notion_page_id: 'notion-page-123' },
       }),
     ],
     canvas: { nodes: [], edges: [] },

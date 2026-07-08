@@ -1,5 +1,5 @@
 import { defineScenario } from '../../framework';
-import { milestone, command } from '../../framework/fixtures';
+import { milestone, command, expectFrontmatter } from '../../framework/fixtures';
 
 /**
  * EC-081: Notion Token Invalid/Expired
@@ -49,13 +49,11 @@ export default defineScenario({
       check: 'no-crash',
       description: 'Plugin does not crash',
     },
-    // Local files unchanged
-    {
-      check: 'frontmatter-field-not-exists',
-      path: 'milestones/M-001_MVP.md',
-      field: 'notion_id',
-      description: 'notion_id not added (sync failed)',
-    },
+    // Local files unchanged. The real plugin's field is `notion_page_id`
+    // (types.ts:116) and it is ALWAYS present-but-empty on plugin-created files
+    // (util/frontmatter.ts createWithFrontmatter alwaysInclude list), so the
+    // correct "sync failed, nothing written" assertion is that it stays "".
+    expectFrontmatter('milestones/M-001_MVP.md', 'notion_page_id', ''),
   ],
 });
 

@@ -61,18 +61,19 @@ parent: S-002
       expected: 3,
       description: 'All 3 nodes on canvas',
     },
-    // Warning about cycle
-    {
-      check: 'notice-shown',
-      type: 'warning',
-      message: 'Circular parent reference detected',
-      description: 'Warning about circular parent chain',
-    },
-    // One edge skipped
+    // NOTE on real plugin behavior: cycle detection/breaking only applies to
+    // depends_on dependencies (main.ts populateCanvasFromVault calls
+    // detectAndBreakCycles for milestone/story DEPENDENCIES). Parent edges are
+    // created unconditionally for every entity with a `parent` whose target is
+    // on the canvas (main.ts: "Create edge for parent relationship" —
+    // `if (info.parent) { ... createEdge(sourceNodeId, parentNodeId, ...) }`),
+    // with no parent-cycle warning notice. Layout depth calculation guards
+    // against the cycle with a visited set, so nothing hangs — all 3 parent
+    // edges are drawn.
     {
       check: 'canvas-edge-count',
-      expected: 2,
-      description: 'Only 2 edges (one skipped to break cycle)',
+      expected: 3,
+      description: 'All 3 parent edges drawn (real plugin does not break parent cycles)',
     },
     // Command completes (no infinite loop)
     {

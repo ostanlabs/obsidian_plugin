@@ -62,11 +62,16 @@ workstream: engineering
   expectations: [
     // Valid file processed
     expectCanvasNode('M-001'),
-    // Missing id skipped
+    // REAL plugin behavior (main.ts populateCanvasFromVault): inclusion is gated
+    // ONLY on a recognized `type` (`if (!typeMatch) continue;` /
+    // `if (!entityTypes.includes(entityType)) continue;`). A missing `id` does
+    // NOT skip the file — createNode is called for every collected entity, id is
+    // optional metadata. So NoId.md (type: milestone) IS added, while NoType.md
+    // and NoBoth.md (no type) are skipped → 2 nodes total.
     {
       check: 'canvas-node-count',
-      expected: 1,
-      description: 'Only 1 node (files without id skipped)',
+      expected: 2,
+      description: '2 nodes: M-001 + NoId.md (type gates inclusion, id does not)',
     },
     // Warning about missing fields
     {

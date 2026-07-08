@@ -58,9 +58,11 @@ export default defineScenario({
       expected: 'M-001',
       description: 'S-001 parent synced to Notion',
     },
-    // Local files updated with notion_id
-    expectFrontmatter('milestones/M-001_MVP.md', 'notion_id', { notEmpty: true }),
-    expectFrontmatter('stories/S-001_Auth.md', 'notion_id', { notEmpty: true }),
+    // Local files updated with the Notion page id. The real plugin stores this
+    // in `notion_page_id` (types.ts:116; main.ts updateNoteWithNotionId), NOT
+    // `notion_id`. The MockAdapter deterministically assigns `notion-<entityId>`.
+    expectFrontmatter('milestones/M-001_MVP.md', 'notion_page_id', 'notion-M-001'),
+    expectFrontmatter('stories/S-001_Auth.md', 'notion_page_id', 'notion-S-001'),
     // Notice
     {
       check: 'notice-shown',

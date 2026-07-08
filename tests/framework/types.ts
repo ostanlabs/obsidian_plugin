@@ -114,6 +114,10 @@ export interface ScenarioPreconditions {
   canvas?: CanvasFixture | null;
   /** Plugin settings overrides */
   settings?: Record<string, unknown>;
+  /** Simulated Notion database state (consumed by MockAdapter's sync/pull simulation) */
+  notionDatabase?: { pages?: Array<{ id: string; properties?: Record<string, unknown>; [key: string]: unknown }> };
+  /** Simulated Notion API failure modes (e.g. { authError: true }) */
+  notionMock?: Record<string, unknown>;
   /** Raw files to create (for migration scenarios, etc.) */
   files?: Array<{ path: string; content: string }>;
   /** Optional description of preconditions */

@@ -158,6 +158,18 @@ export class ScenarioRunner {
   private async setupPreconditions(scenario: TestScenario): Promise<void> {
     const { preconditions } = scenario;
 
+    // Pass simulated Notion state (settings / database / failure modes) to
+    // adapters that support it (MockAdapter). State is cleared by adapter.reset()
+    // between scenarios, so this is set fresh for every scenario.
+    const notionCapable = this.adapter as unknown as {
+      setNotionState?: (state: { settings?: Record<string, unknown>; database?: unknown; mock?: unknown }) => void;
+    };
+    notionCapable.setNotionState?.({
+      settings: preconditions.settings,
+      database: preconditions.notionDatabase,
+      mock: preconditions.notionMock,
+    });
+
     // Create folders
     if (preconditions.folders) {
       for (const folder of preconditions.folders) {

@@ -55,7 +55,11 @@ workstream: engineering
   expectations: [
     // Valid ID on canvas
     expectCanvasNode('M-001'),
-    // Invalid IDs still processed (lenient)
+    // Invalid IDs still processed (lenient). This matches the REAL plugin:
+    // populateCanvasFromVault (main.ts) gates only on a valid `type` and extracts
+    // the id as a raw string via regex + stripQuotes — it never validates against
+    // ID_PATTERNS (util/entityNavigator.ts), so '001' and 'story-one' both get
+    // canvas nodes.
     {
       check: 'canvas-node-exists',
       nodeId: '001',
@@ -66,13 +70,9 @@ workstream: engineering
       nodeId: 'story-one',
       description: 'Invalid ID story-one still added to canvas',
     },
-    // Warning shown
-    {
-      check: 'notice-shown',
-      type: 'warning',
-      message: 'Non-standard ID format',
-      description: 'Warning about non-standard ID formats',
-    },
+    // Note: the real plugin shows NO warning notice about non-standard ID
+    // formats during populate (main.ts populateCanvasFromVault has no such
+    // Notice), so no notice expectation here.
     // Total nodes
     {
       check: 'canvas-node-count',

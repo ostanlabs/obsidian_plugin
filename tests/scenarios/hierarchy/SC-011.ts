@@ -31,7 +31,11 @@ export default defineScenario({
   ],
 
   expectations: [
-    expectFrontmatter('stories/S-001_Orphan_Story.md', 'parent', null),
+    // The plugin's canonical create format ALWAYS emits `parent: ""` for entities
+    // without a parent (util/frontmatter.ts createWithFrontmatter: `parent` is in
+    // the alwaysInclude list and is written as "" when unset), so the parsed
+    // frontmatter value is the empty string, not null/absent.
+    expectFrontmatter('stories/S-001_Orphan_Story.md', 'parent', ''),
     expectCanvasNode('S-001'),
     {
       check: 'position-in-orphan-grid',

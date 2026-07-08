@@ -33,6 +33,20 @@ const ENTITY_ID_PREFIXES: Record<string, string> = {
   feature: 'F-',
 };
 
+// Entity types recognized by the real plugin's populate flow
+// (main.ts populateCanvasFromVault: `const entityTypes = ['milestone', ...]`).
+const ENTITY_TYPES = ['milestone', 'story', 'task', 'decision', 'document', 'feature'];
+
+/**
+ * Simulated Notion state, provided by scenario preconditions
+ * (settings / notionDatabase / notionMock) via ScenarioRunner.
+ */
+export interface NotionSimState {
+  settings?: Record<string, unknown>;
+  database?: { pages?: Array<{ id: string; properties?: Record<string, unknown> }> };
+  mock?: { authError?: boolean; [key: string]: unknown };
+}
+
 // ============================================================================
 // Mock Adapter Implementation
 // ============================================================================
@@ -52,27 +66,38 @@ export class MockAdapter implements TestAdapter {
   /** Notices shown during test execution */
   private notices: string[] = [];
 
+  /** Simulated Notion state (settings/database/failure modes) for the current scenario */
+  private notionState: NotionSimState = {};
+
   constructor(fixturesPath?: string) {
     this.fixturesPath = fixturesPath || path.join(__dirname, '..', 'fixtures');
   }
-  
+
   // --------------------------------------------------------------------------
   // Lifecycle
   // --------------------------------------------------------------------------
-  
+
   async initialize(): Promise<void> {
     this.files.clear();
     this.notices = [];
+    this.notionState = {};
   }
 
   async cleanup(): Promise<void> {
     this.files.clear();
     this.notices = [];
+    this.notionState = {};
   }
 
   async reset(): Promise<void> {
     this.files.clear();
     this.notices = [];
+    this.notionState = {};
+  }
+
+  /** Set simulated Notion state (called by ScenarioRunner from scenario preconditions) */
+  setNotionState(state: NotionSimState): void {
+    this.notionState = state || {};
   }
   
   // --------------------------------------------------------------------------
@@ -153,6 +178,23 @@ export class MockAdapter implements TestAdapter {
     await this.updateFile(canvasPath, JSON.stringify(data, null, 2));
   }
   
+  /**
+   * Extract the entity ID from raw file content the way the REAL plugin does in
+   * populateCanvasFromVault (main.ts: `frontmatterText.match(/^id:[ \t]*(.+)$/m)` +
+   * stripQuotes). Unlike parseRawFrontmatter/parseYamlValue, this preserves
+   * numeric-looking IDs like `001` as the string '001' (no YAML number coercion),
+   * matching real plugin behavior.
+   */
+  private extractRawEntityId(content: string): string | undefined {
+    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    if (!fmMatch) return undefined;
+    const idMatch = fmMatch[1].match(/^id:[ \t]*(.+)$/m);
+    if (!idMatch) return undefined;
+    const trimmed = idMatch[1].trim();
+    const unquoted = trimmed.replace(/^["']|["']$/g, '');
+    return unquoted || undefined;
+  }
+
   async findNodeByEntityId(canvasPath: string, entityId: string): Promise<CanvasNode | null> {
     const canvasData = await this.getCanvasData(canvasPath);
 
@@ -162,12 +204,13 @@ export class MockAdapter implements TestAdapter {
         return node;
       }
 
-      // Then check if it's a file node with matching entity ID in frontmatter
+      // Then check if it's a file node with matching entity ID in frontmatter.
+      // Use raw string ID extraction (like the real plugin) so IDs such as '001'
+      // are matched as strings rather than YAML-coerced numbers.
       if (node.type === 'file' && node.file) {
         try {
           const content = await this.readFile(node.file);
-          const fm = parseRawFrontmatter(content);
-          if (fm && fm.id === entityId) {
+          if (this.extractRawEntityId(content) === entityId) {
             return node;
           }
         } catch {
@@ -218,6 +261,9 @@ export class MockAdapter implements TestAdapter {
       case 'sync-from-notion':
         await this.mockSyncFromNotion(input);
         break;
+      case 'pull-from-notion':
+        await this.mockPullFromNotion(input);
+        break;
       case 'update-status':
         await this.mockUpdateStatus(input);
         break;
@@ -251,6 +297,13 @@ export class MockAdapter implements TestAdapter {
       case 'move-file':
         await this.mockMoveFile(input);
         break;
+      case 'delete-file':
+        // Some scenarios express file deletion as a command rather than a
+        // delete-file STEP; honor it so the deletion actually happens.
+        if (input?.path) {
+          await this.deleteFile(input.path as string);
+        }
+        break;
       case 'update-frontmatter':
         await this.mockUpdateFrontmatter(input);
         break;
@@ -266,7 +319,6 @@ export class MockAdapter implements TestAdapter {
       case 'click-frontmatter-link':
       case 'double-click-canvas-node':
       case 'reveal-in-canvas':
-      case 'pull-from-notion':
       case 'push-to-notion':
         // These are setup/config/UI/sync commands - no-op in mock
         break;
@@ -476,9 +528,17 @@ export class MockAdapter implements TestAdapter {
       // Canvas doesn't exist yet, that's fine
     }
 
-    // Collect all entities first
+    // Collect all entities first.
+    // Gate on a valid `type` like the REAL plugin does (main.ts populateCanvasFromVault:
+    // `if (!typeMatch) continue;` / `if (!entityTypes.includes(entityType)) continue;`).
+    // The real plugin does NOT require an `id` — files with a valid type but no id
+    // still get a canvas node — and it does NOT validate the id format against
+    // ID_PATTERNS (util/entityNavigator.ts), so non-standard IDs like '001' or
+    // 'story-one' are added leniently.
     const folders = ['milestones', 'stories', 'tasks', 'decisions', 'documents', 'features'];
     let nodeIndex = 0;
+    // File nodes for entity files that have a valid type but no id
+    const idlessNodes: Array<{ nodeId: string; filePath: string }> = [];
 
     for (const folder of folders) {
       const files = await this.listFiles(folder);
@@ -487,25 +547,45 @@ export class MockAdapter implements TestAdapter {
           try {
             const content = await this.readFile(filePath);
             const fm = parseRawFrontmatter(content);
-            if (fm && fm.id) {
-              // Move archived entities to archive folder
-              if (fm.archived === true) {
-                const archivePath = `archive/${filePath}`;
-                await this.moveFile(filePath, archivePath);
-                // Create .gitkeep in archive folder
-                const archiveFolder = archivePath.substring(0, archivePath.lastIndexOf('/'));
-                await this.createFile(`${archiveFolder}/.gitkeep`, '');
-                continue;
-              }
+            if (!fm) continue;
+            const entityType = typeof fm.type === 'string' ? fm.type.toLowerCase() : undefined;
+            if (!entityType || !ENTITY_TYPES.includes(entityType)) continue;
 
+            // Move archived entities to archive folder
+            if (fm.archived === true) {
+              const archivePath = `archive/${filePath}`;
+              await this.moveFile(filePath, archivePath);
+              // Create .gitkeep markers for the archive folder structure.
+              // The real plugin ensures the archive folders exist via
+              // app.vault.createFolder(...) before moving (main.ts cascade-archive:
+              // creates archive root + per-type subfolder); in the mock FS folders
+              // are represented by .gitkeep files.
+              const archiveFolder = archivePath.substring(0, archivePath.lastIndexOf('/'));
+              await this.createFile('archive/.gitkeep', '');
+              await this.createFile(`${archiveFolder}/.gitkeep`, '');
+              continue;
+            }
+
+            // Extract the id as a RAW string (like main.ts does with a regex +
+            // stripQuotes) so numeric-looking ids ('001') stay strings.
+            const rawId = this.extractRawEntityId(content);
+            if (rawId) {
+              // Real plugin skips duplicate entity IDs — first file wins
+              // (main.ts populateCanvasFromVault: batchEntityIds check).
+              if (entityIdToNodeId.has(rawId)) continue;
               const nodeId = `node-${nodeIndex++}`;
-              entityIdToNodeId.set(fm.id as string, nodeId);
-              entityData.set(fm.id as string, {
-                id: fm.id as string,
+              entityIdToNodeId.set(rawId, nodeId);
+              entityData.set(rawId, {
+                id: rawId,
                 parent: fm.parent as string | undefined,
                 dependsOn: Array.isArray(fm.depends_on) ? fm.depends_on as string[] : [],
                 filePath,
               });
+            } else {
+              // Valid entity type but no id: real plugin still creates a node
+              // (main.ts createNode is called for every entity in entitiesToAdd;
+              // id is optional metadata).
+              idlessNodes.push({ nodeId: `node-${nodeIndex++}`, filePath });
             }
           } catch {
             // Skip
@@ -594,6 +674,22 @@ export class MockAdapter implements TestAdapter {
         width: 400,
         height: 300,
       });
+    }
+
+    // Nodes for valid-type entity files that have no id (real plugin adds these
+    // too; they just never participate in id-based relationships/edges).
+    let idlessY = 0;
+    for (const { nodeId: idlessNodeId, filePath: idlessPath } of idlessNodes) {
+      nodes.push({
+        id: idlessNodeId,
+        type: 'file',
+        file: idlessPath,
+        x: -450,
+        y: idlessY,
+        width: 400,
+        height: 300,
+      });
+      idlessY += 350;
     }
 
     // Build dependency graph for transitive edge removal
@@ -692,8 +788,10 @@ export class MockAdapter implements TestAdapter {
           try {
             const content = await this.readFile(filePath);
             const fm = parseRawFrontmatter(content);
-            if (fm && fm.id) {
-              const entityId = fm.id as string;
+            // Use raw string id (matches collection pass / real plugin behavior)
+            const rawEntityId = fm ? this.extractRawEntityId(content) : undefined;
+            if (fm && rawEntityId) {
+              const entityId = rawEntityId;
               const childNodeId = entityIdToNodeId.get(entityId);
 
               // Parent relationship edge (child → parent)
@@ -805,15 +903,27 @@ export class MockAdapter implements TestAdapter {
   }
 
   private async mockSyncToNotion(input?: Record<string, unknown>): Promise<void> {
+    // Simulates the real plugin's sync-to-notion behavior:
+    // - On success, the plugin stores the created page id in `notion_page_id`
+    //   (NOT `notion_id`) via updateNoteWithNotionId -> applyFrontmatterUpdates
+    //   (main.ts:660-668, field defined in types.ts:116), and only when the
+    //   note doesn't already have one (main.ts:765, main.ts:859).
+    // - On failure (e.g. invalid token), the plugin shows an error notice and
+    //   writes nothing (main.ts syncNoteToNotion catch: "Failed to sync to Notion").
+    if (this.notionState.mock?.authError) {
+      this.notices.push(
+        'Notion authentication failed: invalid or expired token - check your Notion token in plugin settings'
+      );
+      return;
+    }
+
     const entityId = input?.entityId as string | undefined;
 
     if (entityId) {
       // Sync single entity
       await this.updateEntityFrontmatter(entityId, (fm) => {
-        fm.notion_synced = true;
-        fm.notion_last_sync = new Date().toISOString();
-        if (!fm.notion_id) {
-          fm.notion_id = `notion-${entityId}`;
+        if (!fm.notion_page_id) {
+          fm.notion_page_id = `notion-${entityId}`;
         }
       });
     } else {
@@ -828,10 +938,8 @@ export class MockAdapter implements TestAdapter {
               const fm = parseRawFrontmatter(content);
               if (fm && fm.id) {
                 await this.updateEntityFrontmatter(fm.id as string, (fmUpdate) => {
-                  fmUpdate.notion_synced = true;
-                  fmUpdate.notion_last_sync = new Date().toISOString();
-                  if (!fmUpdate.notion_id) {
-                    fmUpdate.notion_id = `notion-${fm.id}`;
+                  if (!fmUpdate.notion_page_id) {
+                    fmUpdate.notion_page_id = `notion-${fm.id}`;
                   }
                 });
               }
@@ -846,6 +954,60 @@ export class MockAdapter implements TestAdapter {
 
   private async mockSyncFromNotion(input?: Record<string, unknown>): Promise<void> {
     // In mock, this is a no-op since we don't have actual Notion data
+  }
+
+  /**
+   * Simulates pulling changes from Notion into local files.
+   * Mirrors the real plugin's "update local file from Notion page data" flow
+   * (main.ts:4314-4372): pages are matched to local entities by `notion_page_id`
+   * and Notion property values win (frontmatter is updated from Notion).
+   * Page data comes from the scenario's `notionDatabase` precondition.
+   */
+  private async mockPullFromNotion(input?: Record<string, unknown>): Promise<void> {
+    if (this.notionState.mock?.authError) {
+      this.notices.push(
+        'Notion authentication failed: invalid or expired token - check your Notion token in plugin settings'
+      );
+      return;
+    }
+
+    const pages = this.notionState.database?.pages || [];
+    let pulledCount = 0;
+
+    const folders = ['milestones', 'stories', 'tasks', 'decisions', 'documents', 'features'];
+    for (const page of pages) {
+      if (!page.id || !page.properties) continue;
+
+      // Find the local entity file whose notion_page_id matches this page
+      for (const folder of folders) {
+        const files = await this.listFiles(folder);
+        let matched = false;
+        for (const filePath of files) {
+          if (!filePath.endsWith('.md')) continue;
+          try {
+            const content = await this.readFile(filePath);
+            const fm = parseRawFrontmatter(content);
+            if (!fm || !fm.id || fm.notion_page_id !== page.id) continue;
+
+            // Apply Notion properties to local frontmatter (Notion wins)
+            await this.updateEntityFrontmatter(fm.id as string, (fmUpdate) => {
+              for (const [key, value] of Object.entries(page.properties!)) {
+                if (key === 'id') continue; // entity id is the join key, never overwritten
+                fmUpdate[key] = value;
+              }
+            });
+            pulledCount++;
+            matched = true;
+            break;
+          } catch {
+            // Skip unreadable files
+          }
+        }
+        if (matched) break;
+      }
+    }
+
+    this.notices.push(`Pulled ${pulledCount} ${pulledCount === 1 ? 'entity' : 'entities'} from Notion`);
   }
 
   private async mockUpdateStatus(input?: Record<string, unknown>): Promise<void> {
@@ -1441,17 +1603,28 @@ export class MockAdapter implements TestAdapter {
     };
   }
 
-  private async verifyCanvasEdge(exp: { check: 'canvas-edge'; canvas: string; fromEntityId: string; toEntityId: string; expected: boolean }): Promise<ExpectationResult> {
-    const canvasData = await this.getCanvasData(exp.canvas);
-    const fromNode = await this.findNodeByEntityId(exp.canvas, exp.fromEntityId);
-    const toNode = await this.findNodeByEntityId(exp.canvas, exp.toEntityId);
+  private async verifyCanvasEdge(exp: { check: 'canvas-edge' | 'canvas-edge-exists'; canvas?: string; fromEntityId?: string; toEntityId?: string; fromNode?: string; toNode?: string; expected?: boolean }): Promise<ExpectationResult> {
+    // Support both fixture-style (fromEntityId/toEntityId) and scenario-literal
+    // style (fromNode/toNode) property names, and default the canvas path.
+    const canvas = exp.canvas || 'project.canvas';
+    const fromId = exp.fromEntityId ?? exp.fromNode;
+    const toId = exp.toEntityId ?? exp.toNode;
+    const expected = exp.expected !== undefined ? exp.expected : true;
+
+    if (!fromId || !toId) {
+      return { expectation: exp, passed: false, error: 'No from/to entity id provided' };
+    }
+
+    const canvasData = await this.getCanvasData(canvas);
+    const fromNode = await this.findNodeByEntityId(canvas, fromId);
+    const toNode = await this.findNodeByEntityId(canvas, toId);
 
     if (!fromNode || !toNode) {
       return {
         expectation: exp,
-        passed: !exp.expected,
+        passed: !expected,
         actual: false,
-        error: !fromNode ? `From node not found: ${exp.fromEntityId}` : `To node not found: ${exp.toEntityId}`,
+        error: !fromNode ? `From node not found: ${fromId}` : `To node not found: ${toId}`,
       };
     }
 
@@ -1461,7 +1634,7 @@ export class MockAdapter implements TestAdapter {
 
     return {
       expectation: exp,
-      passed: edgeExists === exp.expected,
+      passed: edgeExists === expected,
       actual: edgeExists,
     };
   }
@@ -1650,12 +1823,15 @@ export class MockAdapter implements TestAdapter {
     }
   }
 
-  private async verifyCanvasEdgeNotExists(exp: { check: 'canvas-edge-not-exists'; canvas?: string; fromEntityId: string; toEntityId: string }): Promise<ExpectationResult> {
+  private async verifyCanvasEdgeNotExists(exp: { check: 'canvas-edge-not-exists'; canvas?: string; fromEntityId?: string; toEntityId?: string; fromNode?: string; toNode?: string }): Promise<ExpectationResult> {
     const canvas = exp.canvas || 'project.canvas';
+    // Support both fromEntityId/toEntityId and fromNode/toNode property names
+    const fromId = exp.fromEntityId ?? exp.fromNode;
+    const toId = exp.toEntityId ?? exp.toNode;
     try {
       const canvasData = await this.getCanvasData(canvas);
-      const fromNode = await this.findNodeByEntityId(canvas, exp.fromEntityId);
-      const toNode = await this.findNodeByEntityId(canvas, exp.toEntityId);
+      const fromNode = fromId ? await this.findNodeByEntityId(canvas, fromId) : null;
+      const toNode = toId ? await this.findNodeByEntityId(canvas, toId) : null;
 
       if (!fromNode || !toNode) {
         return { expectation: exp, passed: true, actual: false };
