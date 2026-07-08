@@ -105,20 +105,21 @@ describe("frontmatter - parseFrontmatterAndBody", () => {
 });
 
 describe("frontmatter - updateFrontmatter", () => {
-	it("serializes arrays as YAML block sequences and quotes scalars", () => {
+	it("serializes arrays as YAML block sequences and quotes only when needed", () => {
 		const out = updateFrontmatter(`---\ntype: task\n---\nbody`, {
 			depends_on: ["A", "B"],
 			title: "Has: colon",
 		});
-		// Canonical EntitySerializer format: block-sequence arrays, quoted scalars.
-		expect(out).toContain('depends_on:\n  - "A"\n  - "B"');
+		// Canonical EntitySerializer format: block-sequence arrays, plain scalars,
+		// quoting only where required (the colon+space forces quotes here).
+		expect(out).toContain("depends_on:\n  - A\n  - B");
 		expect(out).toContain('title: "Has: colon"');
 		expect(out).toContain("body");
 	});
 
 	it("prepends frontmatter when the source has none", () => {
 		const out = updateFrontmatter("plain body", { title: "X" });
-		expect(out).toContain('title: "X"');
+		expect(out).toContain("title: X");
 		expect(out).toContain("plain body");
 	});
 
@@ -152,7 +153,7 @@ describe("frontmatter - createWithFrontmatter", () => {
 			title: "T",
 			parent: "M-001",
 		} as Partial<ItemFrontmatter>);
-		expect(out).toContain('parent: "M-001"');
+		expect(out).toContain("parent: M-001");
 	});
 
 	it("quotes string values containing special chars", () => {
@@ -186,8 +187,8 @@ describe("frontmatter - serializeFrontmatter", () => {
 			canvas_source: "c.canvas",
 			vault_path: "t.md",
 		} as unknown as ItemFrontmatter);
-		expect(out).toContain('workstream: "Infra"');
-		expect(out).toContain('created_at: "2025-01-01"');
+		expect(out).toContain("workstream: Infra");
+		expect(out).toContain("created_at: 2025-01-01");
 		expect(out).toContain("depends_on: []");
 		expect(out).toContain('notion_page_id: ""');
 	});
@@ -207,8 +208,8 @@ describe("frontmatter - serializeFrontmatter", () => {
 			notion_page_id: "abc123",
 			depends_on: ["S-1"],
 		} as unknown as ItemFrontmatter);
-		expect(out).toContain('notion_page_id: "abc123"');
-		expect(out).toContain('depends_on:\n  - "S-1"');
+		expect(out).toContain("notion_page_id: abc123");
+		expect(out).toContain("depends_on:\n  - S-1");
 	});
 });
 
@@ -239,20 +240,20 @@ describe("frontmatter - applyFrontmatterUpdates", () => {
 			stale: "", // empty -> delete
 		});
 		const out = get();
-		expect(out).toContain('title: "New"');
+		expect(out).toContain("title: New");
 		expect(out).not.toContain("stale");
 		// Body preserved verbatim.
 		expect(out).toContain("# Body");
 		expect(out).toContain("text");
 	});
 
-	it("writes the canonical format (quoted scalars, block arrays)", async () => {
+	it("writes the canonical format (plain scalars, block arrays)", async () => {
 		const { app, get } = makeApp(`---\ntype: task\nid: T-1\n---\nbody`);
 		await applyFrontmatterUpdates(app, makeFile("t.md"), {
 			depends_on: ["T-2", "T-3"],
 		});
 		const out = get();
-		expect(out).toContain('depends_on:\n  - "T-2"\n  - "T-3"');
+		expect(out).toContain("depends_on:\n  - T-2\n  - T-3");
 		expect(out).toContain("body");
 	});
 });

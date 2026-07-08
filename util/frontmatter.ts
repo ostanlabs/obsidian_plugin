@@ -19,18 +19,19 @@ export type GenericFrontmatter = ItemFrontmatter | FeatureFrontmatter;
  * These MUST stay byte-identical to entity-core's `EntitySerializer`
  * (src/entity-core/serializer.ts) so that plugin-written and MCP-written entity
  * files are indistinguishable:
- *   - scalars are double-quoted        (defaultStringType: 'QUOTE_DOUBLE')
- *   - arrays are YAML block sequences  (- "T-002")
+ *   - quote-when-needed scalars        (defaultStringType: 'PLAIN')
+ *   - arrays are YAML block sequences  (- item)
  *   - lines are never wrapped          (lineWidth: 0)
  *   - keys stay plain/unquoted         (defaultKeyType: 'PLAIN')
  *
  * This is what removes the old `yamlSanitizer` / `sanitizeRelationships` bug
- * class: values with colons (`title: "Component 3: Config Loader"`) are always
- * quoted, so the plugin never emits YAML that its own reader can't parse.
+ * class: the YAML writer auto-quotes only the values that need it (colons →
+ * `title: "Component 3: Config Loader"`), so the plugin never emits YAML that its
+ * own reader can't parse, while simple values stay readable/unquoted.
  */
 const YAML_STRINGIFY_OPTS = {
 	lineWidth: 0,
-	defaultStringType: "QUOTE_DOUBLE",
+	defaultStringType: "PLAIN",
 	defaultKeyType: "PLAIN",
 } as const;
 

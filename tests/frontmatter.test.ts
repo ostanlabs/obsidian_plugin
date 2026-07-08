@@ -75,10 +75,10 @@ status: Not Started
 				status: "Completed",
 			});
 
-			// Canonical EntitySerializer format: scalars are double-quoted.
-			expect(result).toContain('title: "New Title"');
-			expect(result).toContain('status: "Completed"');
-			expect(result).toContain('type: "task"');
+			// Canonical EntitySerializer format: quote-when-needed (plain scalars).
+			expect(result).toContain("title: New Title");
+			expect(result).toContain("status: Completed");
+			expect(result).toContain("type: task");
 		});
 
 		it("should not modify content outside frontmatter", () => {
@@ -116,9 +116,9 @@ Some text`;
 			const result = serializeFrontmatter(frontmatter);
 
 			expect(result).toContain("---");
-			expect(result).toContain('type: "task"');
-			expect(result).toContain('title: "Test Task"');
-			expect(result).toContain('id: "T-001"');
+			expect(result).toContain("type: task");
+			expect(result).toContain("title: Test Task");
+			expect(result).toContain("id: T-001");
 			// Booleans stay unquoted in the canonical format.
 			expect(result).toContain("inProgress: false");
 		});

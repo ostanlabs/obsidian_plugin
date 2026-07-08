@@ -72,7 +72,9 @@ export class EntitySerializer {
     // Serialize to YAML frontmatter
     const yaml = YAML.stringify(frontmatter, {
       lineWidth: 0, // Don't wrap lines
-      defaultStringType: 'QUOTE_DOUBLE',
+      // Quote-when-needed: plain/unquoted scalars, auto-quoted only when a value
+      // would otherwise misparse (colons, ambiguous numbers/bools, special leads).
+      defaultStringType: 'PLAIN',
       defaultKeyType: 'PLAIN',
     });
 

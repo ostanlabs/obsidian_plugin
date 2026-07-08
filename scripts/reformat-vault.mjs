@@ -38,7 +38,7 @@ import YAML from 'yaml';
 // Canonical YAML settings — MUST match EntitySerializer / util/frontmatter.ts.
 const YAML_STRINGIFY_OPTS = {
   lineWidth: 0,
-  defaultStringType: 'QUOTE_DOUBLE',
+  defaultStringType: 'PLAIN',
   defaultKeyType: 'PLAIN',
 };
 
