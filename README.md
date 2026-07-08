@@ -67,6 +67,77 @@ cp main.js manifest.json styles.css /path/to/vault/.obsidian/plugins/canvas-proj
 3. Run **"Project Canvas: Populate from vault"** to scan for entities
 4. Run **"Project Canvas: Reposition nodes"** to apply hierarchical layout
 
+## Running Locally (Plugin + MCP Server)
+
+Both the Obsidian plugin and the MCP server build from this repository and share
+the same schema and on-disk entity format, so they can operate on the same vault
+concurrently.
+
+### 1. Build
+
+```bash
+git clone git@github.com:ostanlabs/obsidian_plugin.git
+cd obsidian_plugin
+npm install
+npm run build        # build:plugin (tsc gate + esbuild) AND build:mcp -> bin/mcp-server.mjs
+```
+
+### 2. Install the plugin into your vault
+
+```bash
+PLUGIN_DIR="<your-vault>/.obsidian/plugins/canvas-project-manager"
+mkdir -p "$PLUGIN_DIR"
+cp main.js manifest.json styles.css "$PLUGIN_DIR/"
+```
+
+Then reload Obsidian (or toggle the plugin off/on under **Settings → Community
+plugins**). After code changes: `npm run build` and copy the three files again.
+
+### 3. Run the MCP server
+
+The server speaks MCP over **stdio** and targets one project folder via the
+`VAULT_PATH` environment variable — the folder that contains `milestones/`,
+`stories/`, `tasks/`, etc. On first run it bootstraps a `schema.json` there if
+none exists.
+
+```bash
+VAULT_PATH="/path/to/vault/Projects/YourProject" node bin/mcp-server.mjs
+```
+
+Register it with Claude Code:
+
+```bash
+claude mcp add obsidian-mcp \
+  -e VAULT_PATH="/path/to/vault/Projects/YourProject" \
+  -- node /absolute/path/to/obsidian_plugin/bin/mcp-server.mjs
+```
+
+Or in a JSON MCP config (Claude Desktop and compatible clients):
+
+```json
+{
+  "mcpServers": {
+    "obsidian-mcp": {
+      "command": "node",
+      "args": ["/absolute/path/to/obsidian_plugin/bin/mcp-server.mjs"],
+      "env": { "VAULT_PATH": "/path/to/vault/Projects/YourProject" }
+    }
+  }
+}
+```
+
+After rebuilding the server (`npm run build:mcp`), reconnect the MCP client
+(e.g. `/mcp` in Claude Code) to pick up the new binary.
+
+### 4. Test
+
+```bash
+npm test                 # jest — plugin + positioning suites
+npm run test:core        # vitest — entity-core suites
+npm run test:mcp         # MCP stdio integration suite (spawns bin/mcp-server.mjs)
+npm run test:integration # full integration config (stdio + scenario framework)
+```
+
 ## Features
 
 ### Canvas Integration
@@ -192,7 +263,7 @@ See [Workstream Normalization Guide](../obsidian_docs/docs/user-guide/workstream
 - Archive sync for deleted notes
 
 ### MCP Integration (Optional)
-Enable HTTP server for AI-assisted project management via [@ostanlabs/obsidian-mcp](https://www.npmjs.com/package/@ostanlabs/obsidian-mcp). See [MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) for details.
+AI-assisted project management via the bundled stdio MCP server (`bin/mcp-server.mjs`, built by `npm run build:mcp`). See [Running Locally](#running-locally-plugin--mcp-server) above and [MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) for details.
 
 ## Entity Frontmatter
 
