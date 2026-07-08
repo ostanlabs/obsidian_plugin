@@ -279,6 +279,34 @@ export function toFeatureFrontmatter(entity: RuntimeEntity): FeatureFrontmatter 
 	return fm;
 }
 
+/**
+ * Flatten a RuntimeEntity back to the loose flat-record view that
+ * `util/frontmatter.parseAnyFrontmatter` produced: system fields + custom
+ * fields + relationships + passthrough merged into one Record. Lossless by
+ * construction — EntityParser partitions every frontmatter key into exactly
+ * one of those buckets — so dynamic key reads (`fm[fieldName]`) keep working.
+ * Unlike the raw parser, system defaults (status/workstream/timestamps) are
+ * always present, which callers treat identically to reading them off a file
+ * that had them.
+ */
+export function toFlatFrontmatter(entity: RuntimeEntity): Record<string, unknown> {
+	return {
+		id: entity.id,
+		type: entity.type,
+		title: entity.title,
+		status: entity.status,
+		workstream: entity.workstream,
+		created_at: entity.created_at,
+		updated_at: entity.updated_at,
+		...(entity.archived ? { archived: entity.archived } : {}),
+		vault_path: entity.vault_path,
+		...(entity.canvas_source ? { canvas_source: entity.canvas_source } : {}),
+		...entity.fields,
+		...entity.relationships,
+		...(entity.passthrough ?? {}),
+	};
+}
+
 // =============================================================================
 // ItemFrontmatter → RuntimeEntity (inverse construction)
 // =============================================================================

@@ -196,9 +196,11 @@ numbers after Phase 2a (+45 pinning tests in `k2.project-index-extra`,
 > **0 unpositioned**; `build:plugin` + `build:mcp` pass. Expand `main.ts` integration coverage
 > (obsidian-mock harness) for each flow *before* touching it — `main.ts` is the untested risk.
 
-- **Phase 0 — Coverage floor.** Raise integration coverage on the entity read/create/update/scan
-  flows in `main.ts` that this refactor touches, so regressions are caught. (Extends the existing
-  12 `plugin-*.test.ts` suites.)
+- **Phase 0 — Coverage floor. ✅ DONE.** +44 integration tests / 5 new `plugin-*.test.ts`
+  suites (17 total) covering all Phase 2 call sites: notion-sync, canvas-create, populate +
+  V4 reposition, feature-canvas, note-modal. Includes explicit quirk pins of the legacy
+  defaults (`effort`→lane fallback, unknown-type→`task`) that Phase 2 deliberately changes —
+  those pins get updated in the same commit as the behavior change, never silently.
 - **Phase 1 — Mapper layer (pure, no behavior change). ✅ DONE.** `src/adapters/model-map.ts`:
   `toEntityData` (+`PositioningEntityData` extension carrying `documentedBy`/`decidedBy`,
   relationships-only), `toItemFrontmatter`/`toFeatureFrontmatter`, and
@@ -209,13 +211,17 @@ numbers after Phase 2a (+45 pinning tests in `k2.project-index-extra`,
   `parent`) into passthrough while the legacy positioning parser read them untyped. 51 tests
   in `tests/model-map.test.ts` (parity corpus, reconciled defaults, camelCase bridge,
   round-trips, priority synthesis). Nothing consumes the mappers yet.
-- **Phase 2 — Route reads through `EntityParser`.** Replace plugin-parser *usage* with
-  `facade.parseEntity(...) → RuntimeEntity → projection`, in this order: the single
-  `parseEntityFromFrontmatter` site (`main.ts:8396`), then the 12 `parseFrontmatter` sites,
-  then the 6 `main.ts` `parseAnyFrontmatter` sites. (`parseFrontmatterAndBody` at
-  `main.ts:2925` and the 3 direct `metadataCache` reads are addressed in Phase 3/4 as their
-  hosts migrate.) Reconcile parser defaults here; assert them in tests. Keep the old parser
-  files until Phase 5. Verify positioning + round-trip unchanged.
+- **Phase 2 — Route reads through `EntityParser`. ✅ DONE** (3 commits). All 20 `main.ts`
+  parser call sites now go through `getEntityCore()` (new lazy accessor — facade available
+  regardless of init order): the positioning read uses `parseEntity → toEntityData`; the 11
+  pure-read `parseFrontmatter` sites use a `parseItemFrontmatter` helper (legacy null
+  contract); the 7 `parseAnyFrontmatter` sites use `parseAnyEntityFrontmatter` →
+  `toFlatFrontmatter` (new lossless flatten in model-map); `updateLocalFileFromNotion` is a
+  full parse→mutate→serialize round-trip (passthrough survives; canonical `updated_at`
+  written, legacy `updated` key retired). Reconciled defaults asserted in updated quirk pins.
+  `main.ts` no longer imports `parseFrontmatter`/`parseAnyFrontmatter`.
+  (`parseFrontmatterAndBody` at its modal site and the 3 direct `metadataCache` reads move in
+  Phase 3/4 with their hosts.)
 - **Phase 2a — entity-core hardening (gate for Phase 3). ✅ DONE.** `project-index.ts` and
   `id-allocator.ts` at 100%, `schema-registry.ts` 99.5% line coverage; +45 behavior-pinning
   tests (secondary indexes, reverse-relationship map injection/swap, adjacency, allocator

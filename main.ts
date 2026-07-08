@@ -42,7 +42,7 @@ import {
 	replacePlaceholders,
 	replaceFeaturePlaceholders,
 } from "./util/template";
-import { parseAnyFrontmatter, parseFrontmatterAndBody, createWithFrontmatter, applyFrontmatterUpdates } from "./util/frontmatter";
+import { parseFrontmatterAndBody, createWithFrontmatter, applyFrontmatterUpdates } from "./util/frontmatter";
 import { EntityCoreFacade } from "./src/entity-core-facade";
 import { EntityIndexAdapter } from "./src/adapters/entity-index-adapter";
 import type { EntityIndex as CoreEntityIndex, RuntimeEntity } from "./src/entity-core/types";
@@ -83,7 +83,7 @@ import { loadSchemaOrDefault } from "./src/entity-core/schema-bootstrap.js";
 import { buildRelationshipRules } from "./src/entity-core/schema-derivation.js";
 import { ObsidianVaultAdapter } from "./src/adapters/obsidian-vault-adapter.js";
 import { generateNodeIdFromEntityId } from "./util/entityParser";
-import { toEntityData, toItemFrontmatter } from "./src/adapters/model-map";
+import { toEntityData, toItemFrontmatter, toFlatFrontmatter } from "./src/adapters/model-map";
 import { reconcileRelationships, cleanTransitiveDependencies, detectAndBreakCycles } from "./util/relationshipReconciler";
 
 const DEFAULT_NODE_HEIGHT = 242;  // 220 * 1.1
@@ -9247,6 +9247,22 @@ private registerCommands(): void {
 		}
 	}
 
+	/**
+	 * Canonical replacement for util/frontmatter.parseAnyFrontmatter: parse
+	 * via EntityParser and flatten back to the loose Record view (system +
+	 * fields + relationships + passthrough). Same null contract (no
+	 * frontmatter / bad YAML / missing id or type → null).
+	 */
+	private parseAnyEntityFrontmatter(content: string, path: string): Record<string, unknown> | null {
+		try {
+			const entity = this.getEntityCore().parseEntity(content, path);
+			if (!entity.id || !entity.type) return null;
+			return toFlatFrontmatter(entity);
+		} catch {
+			return null;
+		}
+	}
+
 	private async initializeEntityNavigator(): Promise<void> {
 		// Check for Dataview plugin
 		if (this.settings.entityNavigator.showDataviewWarning) {
@@ -9591,7 +9607,7 @@ private registerCommands(): void {
 		}
 
 		const content = await this.app.vault.read(file);
-		const fm = parseAnyFrontmatter(content);
+		const fm = this.parseAnyEntityFrontmatter(content, file.path);
 		if (!fm || fm.type !== "feature") {
 			new Notice("Current file is not a feature");
 			return;
@@ -9620,7 +9636,7 @@ private registerCommands(): void {
 		}
 
 		const content = await this.app.vault.read(file);
-		const fm = parseAnyFrontmatter(content);
+		const fm = this.parseAnyEntityFrontmatter(content, file.path);
 		if (!fm || fm.type !== "feature") {
 			new Notice("Current file is not a feature");
 			return;
@@ -9802,7 +9818,7 @@ private registerCommands(): void {
 			if (!(file instanceof TFile)) continue;
 
 			const content = await this.app.vault.read(file);
-			const fm = parseAnyFrontmatter(content);
+			const fm = this.parseAnyEntityFrontmatter(content, file.path);
 			if (!fm) continue;
 
 			const featureId = (fm.id as string) || "";
@@ -9907,7 +9923,7 @@ private registerCommands(): void {
 
 			// Read frontmatter
 			const content = await this.app.vault.read(file);
-			const fm = parseAnyFrontmatter(content);
+			const fm = this.parseAnyEntityFrontmatter(content, file.path);
 
 			const entityId = fm?.id || file.basename.match(/^(F-\d{3,})/)?.[1] || "";
 			const tier = (fm?.tier as string) || "OSS";
@@ -9968,7 +9984,7 @@ private registerCommands(): void {
 
 		// Read frontmatter
 		const content = await this.app.vault.read(activeFile);
-		const fm = parseAnyFrontmatter(content);
+		const fm = this.parseAnyEntityFrontmatter(content, activeFile.path);
 		if (!fm || !fm.id || !fm.type) {
 			new Notice("This file does not have valid entity frontmatter");
 			return;
@@ -9997,7 +10013,7 @@ private registerCommands(): void {
 			if (!file.basename.match(/^F-\d{3,}/)) continue;
 
 			const fileContent = await this.app.vault.read(file);
-			const fileFm = parseAnyFrontmatter(fileContent);
+			const fileFm = this.parseAnyEntityFrontmatter(fileContent, file.path);
 			if (!fileFm || !fileFm.id) continue;
 
 			availableFeatures.push({
@@ -10041,7 +10057,7 @@ private registerCommands(): void {
 		linkResult: LinkFeatureModalResult
 	): Promise<void> {
 		const content = await this.app.vault.read(entityFile);
-		const fm = parseAnyFrontmatter(content);
+		const fm = this.parseAnyEntityFrontmatter(content, entityFile.path);
 		if (!fm) return;
 
 		// Get current array for the relationship type
