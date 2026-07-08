@@ -16,16 +16,15 @@ and MCP.
 
 The `EntityCoreFacade` seam exists (`main.ts:9187`) and exposes `parseEntity`, `serializeEntity`,
 `validateEntity`, `allocateId`, `generateFilename`, `getTypeFolderPath`, `getSchema`,
-`initializeWithIndex`, and `getRelationshipGraph` (the last is a **stub** — every
-`relationship-graph.ts` method throws `NOT_IMPLEMENTED`). The plugin calls only the wiring
+`initializeWithIndex`, and `getRelationshipGraph`. The plugin calls only the wiring
 methods — `getSchema` (`main.ts:9199`) and `initializeWithIndex` (`main.ts:9203`) — plus a
 single engine operation: `allocateId` (`main.ts:9254`). Everything else still runs the
 plugin's `util/*` twin. The remaining duplication is not "missing engine code" — it is
 **five-plus parallel shapes for 'an entity'** plus three parser families plus a second index.
 Unifying them removes the last class of drift bugs (camelCase↔snake_case, dropped passthrough
 keys, hardcoded relationship-field lists) and lets the plugin inherit `entity-core` — whose
-parse/serialize path is well-tested (parser 91%, serializer 95%), though its index/registry
-layer is not yet (see §2a) and must be hardened before Phase 3.
+parse/serialize path is well-tested (parser 91%, serializer 95%) and whose index/allocator/
+registry layer is pinned at 99-100% line coverage as of Phase 2a (see §2a).
 
 ## 2. Current state (what diverges)
 
@@ -95,20 +94,24 @@ but Phase 5's deletion checklist must not orphan them.
 - A transitional shim already exists and is wired: `src/adapters/entity-index-adapter.ts`
   (`EntityIndexAdapter`, used at `main.ts:9199-9203`), including a bridge `buildAdjacency`.
 
-### §2a — entity-core coverage reality (per `coverage-tmp/report/coverage-summary.json`)
-| Module | Coverage |
-|---|---|
-| `types.ts` / `schema-derivation.ts` | 99% / 100% |
-| `serializer.ts` / `parser.ts` | 95% / 91% |
-| `schema-bootstrap.ts` / `validator.ts` | 83% / 74% |
-| `project-index.ts` / `path-resolver.ts` | 65% / 63% |
-| `schema-registry.ts` / `id-allocator.ts` | 55% / 53% |
-| `relationship-graph.ts` | **19% — stub; every method throws `NOT_IMPLEMENTED`** |
+### §2a — entity-core coverage (verified by live `vitest --coverage` run, Phase 2a)
+A first audit quoted the on-disk `coverage-tmp` report (~70% weighted, relationship-graph
+"19% stub") — that report was **stale**: it predated suites K/A2/E, and the "STUB" file-header
+comments in `relationship-graph.ts`/`schema-registry.ts` are leftover TDD-era notes. Live
+numbers after Phase 2a (+45 pinning tests in `k2.project-index-extra`,
+`e2.id-allocator-extra`, `a3.schema-registry-defaults`):
 
-Weighted average ≈ **70%**, not the previously claimed 97%. The parse/serialize path this
-refactor leans on in Phase 2 is solid; the index/registry layer Phase 3 adopts is not, and
-the relationship graph the facade nominally exposes does not exist yet. Phase 2a addresses
-this.
+| Module | Line coverage |
+|---|---|
+| `project-index.ts` / `id-allocator.ts` | **100% / 100%** |
+| `schema-registry.ts` / `relationship-graph.ts` | **99.5% / 99.6%** |
+| `serializer.ts` / `parser.ts` | 95% / 91% |
+
+`relationship-graph.ts` is fully implemented; the sole remaining `notImplemented` is
+`SchemaRegistry.getValidator` (pinned). Known allocator quirks pinned for Phase 3 awareness:
+`allocate()` ignores `reserve()`d ids (`id-allocator.ts:40` vs `:63`) and malformed ids like
+`T-007x` are parsed leniently into the max computation (`id-allocator.ts:47-49`).
+`repairDuplicates` does not rewrite inbound references (in-code TODO, `id-allocator.ts:139`).
 
 ## 3. Goals / non-goals
 
@@ -130,8 +133,9 @@ this.
 - No change to the on-disk format (already unified: title-only filenames, quote-when-needed
   serializer, bare folders). No vault migration.
 - No change to positioning *behavior* (guarded by the regression-lock).
-- No implementation of `relationship-graph.ts` — it stays out of scope; navigation queries go
-  through `ProjectIndex`'s built-in forward/reverse graph, not the stub module.
+- No new plugin dependency on `relationship-graph.ts`/`getRelationshipGraph` — navigation
+  queries go through `ProjectIndex`'s built-in forward/reverse graph. (Verified: no plugin
+  path reaches it today; only `tests/facade.test.ts` calls the getter.)
 - No new features; this is pure structural convergence.
 
 ## 4. Target architecture
@@ -204,11 +208,11 @@ this.
   `main.ts:2925` and the 3 direct `metadataCache` reads are addressed in Phase 3/4 as their
   hosts migrate.) Reconcile parser defaults here; assert them in tests. Keep the old parser
   files until Phase 5. Verify positioning + round-trip unchanged.
-- **Phase 2a — entity-core hardening (gate for Phase 3).** Bring `project-index.ts`,
-  `id-allocator.ts`, and `schema-registry.ts` to ≥90% line coverage with behavior-pinning
-  tests (secondary indexes, reverse-relationship map, adjacency, allocator concurrency/scan
-  edge cases). Decide nothing about `relationship-graph.ts` beyond confirming no plugin path
-  can reach the stub.
+- **Phase 2a — entity-core hardening (gate for Phase 3). ✅ DONE.** `project-index.ts` and
+  `id-allocator.ts` at 100%, `schema-registry.ts` 99.5% line coverage; +45 behavior-pinning
+  tests (secondary indexes, reverse-relationship map injection/swap, adjacency, allocator
+  gap/malformed-id/reservation semantics, registry defaults incl. `engineering`). Verified no
+  plugin path reaches `getRelationshipGraph`. Runs in parallel with Phases 0-2.
 - **Phase 3 — Adopt `ProjectIndex`.** Feed `EntityMetadata` from the vault scan into a
   `ProjectIndex`; rewrite `entityNavigator`'s public methods as `ProjectIndex` queries; keep
   the same method signatures so the sole consumer (`main.ts`) is unchanged. Retire
@@ -229,8 +233,7 @@ this.
 |---|---|
 | Positioning layout regresses (mapper drops/renames a field the engine reads) | Positioning regression-lock (`positioning-config` + `positioningV4Synthetic` + vault-validation 0-unpositioned) must stay green; the mapper is the single translation point, unit-tested. |
 | `main.ts` has no direct unit tests → silent behavior change | Phase 0 raises integration coverage on the touched flows first; each phase gated on green. |
-| entity-core index/allocator under-tested (65%/53%) → plugin inherits latent bugs | Phase 2a hardens them to ≥90% before Phase 3 adopts them. |
-| Facade's `getRelationshipGraph` is a `NOT_IMPLEMENTED` stub | Out of scope (§3 non-goals); navigation uses `ProjectIndex`'s built-in graph; assert no plugin path reaches the stub. |
+| entity-core index/allocator latent bugs surface when plugin adopts them | Phase 2a pinned them at 99-100% coverage; known quirks documented in §2a (`allocate()` vs `reserve()`, lenient id parsing) — Phase 3 must not allocate before the index is populated. |
 | Plugin-only fields lost on write | Round-trip corpus (`frontmatterRoundTrip.test.ts` — already covers all three fields) + passthrough modeling. |
 | Parser default divergence changes created entities (`task` coercion, `default`/`effort` workstream fallback) | Reconcile defaults explicitly in Phase 2; assert the chosen defaults in tests. |
 | Big-bang breakage | Strictly phased; each phase is independently shippable and reversible; duplicates deleted only in Phase 5. |
@@ -250,7 +253,7 @@ this.
       redundant `util/frontmatter` parsers, `EntityIndexEntry`, `EntityFrontmatter`,
       `entityNavigator` internals, and `EntityIndexAdapter` are deleted.
 - [ ] Plugin-only fields round-trip via passthrough.
-- [ ] `project-index.ts`, `id-allocator.ts`, `schema-registry.ts` ≥90% coverage.
+- [x] `project-index.ts`, `id-allocator.ts`, `schema-registry.ts` ≥90% coverage (100/100/99.5, Phase 2a).
 - [ ] Full suite green; positioning 0-unpositioned; `build:plugin` + `build:mcp` pass.
 - [ ] `main.ts` no longer imports `util/entityParser` or `util/entityNavigator`'s index.
 
