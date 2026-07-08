@@ -370,6 +370,8 @@ describe('MCP stdio server (mcp.ts) — portable integration suite', () => {
       expect(v.entities_checked).toBe(6);
       expect(v.violations_count).toBe(0);
       expect(v.violations).toEqual([]);
+      // The clean fixture is within all fan-out advisory limits too.
+      expect(v.advisories_count).toBe(0);
     });
 
     test('reconcile_relationships dry-run reports 0 changes on the consistent fixture', async () => {
@@ -1122,5 +1124,61 @@ describe('mcp.ts write/mutation paths — disposable fixture', () => {
     expect(wet.tasks_archived).toBeGreaterThanOrEqual(1);
     // Archive copies were written under archive/.
     expect(fs.existsSync(path.join(vault, 'archive'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fan-out advisories: soft guidelines surfaced by validate_project (NOT
+// enforced on writes) — document ≤2 documented features, decision ≤2 affected
+// documents, feature ≤3 implementers. Each advisory must carry a concrete
+// reorganization suggestion.
+describe('mcp.ts validate_project fan-out advisories — disposable fixture', () => {
+  let vault: string;
+  let c: McpClient;
+
+  beforeAll(async () => {
+    vault = makeVault(FIXTURE); // the clean 6-entity fixture
+    c = new McpClient(vault);
+    await c.start();
+  }, 120000);
+
+  afterAll(async () => {
+    if (c) await c.stop();
+    if (vault) fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test('fan-out beyond limits yields ADVISORIES with suggestions, never violations', async () => {
+    const mk = async (type: string, title: string, properties: Record<string, unknown>) => {
+      const res = await c.call('create_entity', { type, title, properties });
+      expect(res.isError).toBeFalsy();
+      return res.text!.match(/([A-Z]+-\d+)/)![1];
+    };
+    // Writes with over-limit fan-out succeed — the limits are advisory-only.
+    await mk('document', 'Fanout Doc', {
+      doc_type: 'spec', relationships: { documents: ['F-001', 'F-901', 'F-902'] },
+    });
+    await mk('decision', 'Fanout Decision', {
+      relationships: { affects: ['DOC-001', 'DOC-901', 'DOC-902'] },
+    });
+    await mk('feature', 'Fanout Feature', {
+      user_story: 'u', tier: 'OSS', phase: 'MVP',
+      relationships: { implemented_by: ['M-001', 'S-001', 'S-901', 'S-902'] },
+    });
+
+    const v = await c.callJson('validate_project');
+    // Fan-out never lands in violations.
+    expect((v.violations as Array<{ rule: string }>).every(x => !x.rule.includes('FANOUT'))).toBe(true);
+    const byRule = Object.fromEntries(
+      (v.advisories as Array<{ rule: string; entity: string; suggestion: string }>).map(a => [a.rule, a])
+    );
+    expect(byRule.DOCUMENT_FANOUT).toBeDefined();
+    expect(byRule.DECISION_FANOUT).toBeDefined();
+    expect(byRule.FEATURE_IMPLEMENTER_FANOUT).toBeDefined();
+    for (const a of v.advisories as Array<{ suggestion: string }>) {
+      expect(a.suggestion.length).toBeGreaterThan(20);
+    }
+    expect(v.advisory_note).toContain('non-blocking');
+    // AT the limit is fine: fixture DOC-001 documents exactly 1 feature → no advisory for it.
+    expect((v.advisories as Array<{ entity: string }>).some(a => a.entity.startsWith('DOC-001'))).toBe(false);
   });
 });

@@ -480,6 +480,12 @@ EXAMPLES:
 
 USE FOR: Finding missing relationships, ensuring entities are properly connected.
 
+Returns hard "violations" (invalid relationships/targets, orphans) plus soft
+"advisories" — fan-out guidelines that are NOT enforced on writes: a document
+should document ≤2 features, a decision should affect ≤2 documents, a feature
+should have ≤3 implementers. Each advisory carries a concrete reorganization
+suggestion; reconcile them gradually rather than treating them as errors.
+
 EXAMPLES:
 - "Are there any orphaned documents?"
 - "Validate backend workstream"`,
@@ -1664,6 +1670,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const violations: Array<{entity: string; rule: string; message: string}> = [];
 
+        // ADVISORIES — soft fan-out guidelines, deliberately NOT enforced on
+        // create/update writes. They flag entities whose relationship fan-out
+        // makes the canvas/graph hard to read, with concrete reorganization
+        // suggestions for the agent to reconcile over time.
+        const FANOUT_LIMITS = {
+          document_documents: 2,   // a document should document at most 2 features
+          decision_affects: 2,     // a decision should affect at most 2 documents
+          feature_implemented_by: 3, // a feature should have at most 3 implementers
+        };
+        const advisories: Array<{entity: string; rule: string; message: string; suggestion: string}> = [];
+
         // NOTE: index.getAll() returns EntityMetadata (flat parent_id, no
         // `relationships`/`fields`). The rules below need the full relationship
         // map, so re-parse each entity from disk exactly like get_entity does.
@@ -1736,6 +1753,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               });
             }
           }
+
+          // Advisory: document fan-out (documents → features)
+          if (entity.type === 'document') {
+            const targets = asList(relView['documents']);
+            if (targets.length > FANOUT_LIMITS.document_documents) {
+              advisories.push({
+                entity: `${entity.id} (${entity.title})`,
+                rule: 'DOCUMENT_FANOUT',
+                message: `document documents ${targets.length} features (limit ${FANOUT_LIMITS.document_documents}): ${targets.join(', ')}`,
+                suggestion: `Split into focused documents so each documents at most ${FANOUT_LIMITS.document_documents} features: keep the ${FANOUT_LIMITS.document_documents} features this document is primarily about in \`documents\`, and move the rest into new per-feature (or per-cohesive-pair) documents that can carry \`previous_version\`/body links back to this one. On the canvas a document anchors to its FIRST documents-target, so wide fan-out also strands the document between distant feature clusters.`,
+              });
+            }
+          }
+
+          // Advisory: decision fan-out (affects → documents)
+          if (entity.type === 'decision') {
+            const targets = asList(relView['affects']);
+            if (targets.length > FANOUT_LIMITS.decision_affects) {
+              advisories.push({
+                entity: `${entity.id} (${entity.title})`,
+                rule: 'DECISION_FANOUT',
+                message: `decision affects ${targets.length} documents (limit ${FANOUT_LIMITS.decision_affects}): ${targets.join(', ')}`,
+                suggestion: `Point \`affects\` at the ${FANOUT_LIMITS.decision_affects} documents that materially change because of this decision; for the others, record the impact in each document's body or split the decision into narrower per-scope decisions linked via \`supersedes\`/body references. Decisions position next to their first affected document, so long affects lists scatter meaning.`,
+              });
+            }
+          }
+
+          // Advisory: feature implementer fan-out (implemented_by → stories/milestones)
+          if (entity.type === 'feature') {
+            const targets = asList(relView['implemented_by']);
+            if (targets.length > FANOUT_LIMITS.feature_implemented_by) {
+              advisories.push({
+                entity: `${entity.id} (${entity.title})`,
+                rule: 'FEATURE_IMPLEMENTER_FANOUT',
+                message: `feature implemented_by ${targets.length} implementers (limit ${FANOUT_LIMITS.feature_implemented_by}): ${targets.join(', ')}`,
+                suggestion: `Consolidate to at most ${FANOUT_LIMITS.feature_implemented_by} implementers: either designate one umbrella story/milestone as the primary implementer (demote the others' \`implements\` to \`affects\` or body references), or split the feature into sub-features so each has a small, honest implementer set. Only the first implementer positions the feature on the canvas; the rest are edge-only.`,
+              });
+            }
+          }
         }
 
         return {
@@ -1746,6 +1802,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 entities_checked: entities.length,
                 violations_count: violations.length,
                 violations: violations.slice(0, 500),
+                advisories_count: advisories.length,
+                advisories: advisories.slice(0, 200),
+                advisory_note: advisories.length > 0
+                  ? 'Advisories are non-blocking fan-out guidelines (not enforced on writes). Reconcile them over time using each suggestion — prefer small, reviewable re-organizations over bulk edits.'
+                  : undefined,
               }, null, 2),
             },
           ],
