@@ -232,6 +232,8 @@ export class Workspace {
 	getLeavesOfType(): unknown[] {
 		return [];
 	}
+	/** No-op link opener (repositionCanvasNodesV4 reopens the canvas through this). */
+	async openLinkText(_linktext?: string, _sourcePath?: string, _newLeaf?: boolean): Promise<void> {}
 	on(): { unload: () => void } {
 		return { unload: () => {} };
 	}
