@@ -204,10 +204,12 @@ describe("repositionCanvasNodesV4 (integration via obsidian mock)", () => {
 		expect(origins.size).toBe(3);
 	});
 
-	it("falls back to the legacy `effort:` field for workstream lanes (quirk pin)", async () => {
+	it("ignores the legacy `effort:` field; missing workstream gets the schema default lane (§5.3 reconciled)", async () => {
 		const { plugin, vault, workspace } = makePlugin({
 			[CANVAS]: canvasWith(["A.md", "B.md"]),
-			// no workstream field; the parser must fall back to effort for lane assignment
+			// No workstream field. Pre-convergence, the legacy parser fell back to
+			// `effort:` (alpha/beta -> two lanes). The canonical EntityParser applies
+			// the schema default workstream instead, so both land in ONE lane.
 			"A.md": note({ type: "milestone", id: "M-1", effort: "alpha" }),
 			"B.md": note({ type: "milestone", id: "M-2", effort: "beta" }),
 		});
@@ -218,13 +220,22 @@ describe("repositionCanvasNodesV4 (integration via obsidian mock)", () => {
 		const canvas = JSON.parse(vault._files.get(CANVAS)!) as CanvasJson;
 		const a = canvas.nodes.find((n) => n.file === "A.md")!;
 		const b = canvas.nodes.find((n) => n.file === "B.md")!;
-		// different workstreams -> different horizontal lanes (different y)
-		expect(a.y).not.toBe(b.y);
+		// same (default 'engineering') workstream -> same horizontal lane, and
+		// both actually positioned by the engine
+		expect(a.y).toBe(b.y);
+		expect(a.width).toBeGreaterThan(1);
+		expect(b.width).toBeGreaterThan(1);
+		expect(a.x).not.toBe(b.x);
 	});
 
-	it("coerces an unknown entity type to task and still positions it (quirk pin)", async () => {
+	it("keeps an unknown entity type literal; the engine has no rules for it and leaves the node untouched (§5.3 reconciled)", async () => {
 		const { plugin, vault, workspace } = makePlugin({
 			[CANVAS]: canvasWith(["E.md"]),
+			// Pre-convergence, the legacy parser coerced unknown types to 'task'
+			// and positioned them. The canonical EntityParser keeps the literal
+			// type ('epic'); no positioning rules exist for it, so the node keeps
+			// its manual geometry (the validator, not the layout engine, is the
+			// component that flags unknown types).
 			"E.md": note({ type: "epic", id: "E-1", workstream: "core" }),
 		});
 		workspace._activeFile = new TFile(CANVAS);
@@ -233,9 +244,9 @@ describe("repositionCanvasNodesV4 (integration via obsidian mock)", () => {
 
 		const canvas = JSON.parse(vault._files.get(CANVAS)!) as CanvasJson;
 		const e = canvas.nodes.find((n) => n.file === "E.md")!;
-		// got a real engine position/size despite the unknown type
-		expect(e.width).toBeGreaterThan(1);
-		expect(e.height).toBeGreaterThan(1);
+		expect(e.x).toBe(0);
+		expect(e.y).toBe(0);
+		expect(e.width).toBe(1);
 	});
 
 	it("leaves nodes without an id in frontmatter untouched (parse returns null)", async () => {

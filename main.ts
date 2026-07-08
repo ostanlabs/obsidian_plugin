@@ -82,7 +82,8 @@ import { PositioningEngineV4, EntityData as EntityDataV4, RelationshipRule, Posi
 import { loadSchemaOrDefault } from "./src/entity-core/schema-bootstrap.js";
 import { buildRelationshipRules } from "./src/entity-core/schema-derivation.js";
 import { ObsidianVaultAdapter } from "./src/adapters/obsidian-vault-adapter.js";
-import { parseEntityFromFrontmatter, generateNodeIdFromEntityId } from "./util/entityParser";
+import { generateNodeIdFromEntityId } from "./util/entityParser";
+import { toEntityData } from "./src/adapters/model-map";
 import { reconcileRelationships, cleanTransitiveDependencies, detectAndBreakCycles } from "./util/relationshipReconciler";
 
 const DEFAULT_NODE_HEIGHT = 242;  // 220 * 1.1
@@ -8374,6 +8375,7 @@ private registerCommands(): void {
 			// ============================================================
 			// STEP 1: Parse node metadata using canonical entity parser
 			// ============================================================
+			const facade = this.getEntityCore();
 			const entities: EntityDataV4[] = [];
 
 			// Get canvas folder for resolving relative paths
@@ -8393,9 +8395,12 @@ private registerCommands(): void {
 					const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
 					if (!fmMatch) continue;
 
-					const entityData = parseEntityFromFrontmatter(fmMatch[1], node.id, node.file);
-					if (entityData) {
-						entities.push(entityData);
+					// Canonical read path: entity-core parser → positioning projection.
+					// Entities without an id are skipped (same contract as the legacy
+					// parser returning null); ParseError on bad YAML lands in catch.
+					const runtime = facade.parseEntity(content, node.file);
+					if (runtime.id) {
+						entities.push(toEntityData(runtime, node.file, node.id));
 					}
 				} catch (e) {
 					console.warn('Failed to read frontmatter for node:', node.id, e);
@@ -9170,6 +9175,29 @@ private registerCommands(): void {
 	// =========================================================================
 
 	/** Initialize the Entity Navigator index */
+	/**
+	 * Lazy accessor for the entity-core facade. Creating the facade has no
+	 * side effects (constructor wires parser/serializer/validator to the
+	 * schema; no I/O), so read paths (parseEntity, serializeEntity) may call
+	 * this at any time — only allocateId requires initializeWithIndex, which
+	 * happens in initializeEntityNavigator once the entity index is built.
+	 */
+	private getEntityCore(): EntityCoreFacade {
+		if (!this.entityCore) {
+			this.entityCore = new EntityCoreFacade({
+				vault: this.app.vault,
+				vaultPath: (this.app.vault.adapter as any).basePath || '',
+				// Bare type folders (milestones/, stories/, …) — no `entities/`
+				// prefix, matching the production vault. Empty prefix →
+				// PathResolver emits `milestones/Title.md`.
+				entitiesFolder: '',
+				archiveFolder: 'archive',
+				canvasFolder: 'projects',
+			});
+		}
+		return this.entityCore;
+	}
+
 	private async initializeEntityNavigator(): Promise<void> {
 		// Check for Dataview plugin
 		if (this.settings.entityNavigator.showDataviewWarning) {
@@ -9183,24 +9211,16 @@ private registerCommands(): void {
 		this.entityIndex = new EntityIndex(this.app, this.settings.entityNavigator);
 		await this.entityIndex.buildIndex();
 
-		// Initialize entity-core facade
-		this.entityCore = new EntityCoreFacade({
-			vault: this.app.vault,
-			vaultPath: (this.app.vault.adapter as any).basePath || '',
-			// Bare type folders (milestones/, stories/, …) — no `entities/` prefix,
-			// matching the production vault. Empty prefix → PathResolver emits
-			// `milestones/Title.md` (see path-resolver joinPath).
-			entitiesFolder: '',
-			archiveFolder: 'archive',
-			canvasFolder: 'projects',
-		});
+		// Initialize entity-core facade (lazy accessor so read paths work
+		// regardless of init order; only allocateId needs the index wiring below)
+		const entityCore = this.getEntityCore();
 
 		// Wire the entity index to entity-core using adapter
-		const indexAdapter = new EntityIndexAdapter(this.entityIndex, this.entityCore.getSchema());
+		const indexAdapter = new EntityIndexAdapter(this.entityIndex, entityCore.getSchema());
 		// EntityIndexAdapter implements only the engine index seam (the subset of
 		// EntityIndex that IDAllocator/RelationshipGraph actually call). The facade
 		// declares the full EntityIndex parameter type, so cast through the seam.
-		this.entityCore.initializeWithIndex(indexAdapter as unknown as CoreEntityIndex);
+		entityCore.initializeWithIndex(indexAdapter as unknown as CoreEntityIndex);
 
 		console.log("[Entity-Core] Initialized with facade and index adapter");
 
