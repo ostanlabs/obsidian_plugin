@@ -46,7 +46,8 @@ describe("updateDependsOnInFile (integration via obsidian mock)", () => {
 
 		expect(changed).toBe(true);
 		const content = vault._files.get("tasks/T-001.md")!;
-		expect(content).toMatch(/depends_on:\s*\["T-000"\]/);
+		// Canonical EntitySerializer format: block-sequence array, quoted item.
+		expect(content).toMatch(/depends_on:\n\s*-\s*"T-000"/);
 		// timestamp bookkeeping was applied
 		expect(content).toMatch(/updated_at:/);
 	});
@@ -97,8 +98,8 @@ describe("syncReverseRelationships (integration via obsidian mock)", () => {
 		await plugin.syncReverseRelationships({ path: CANVAS, name: "board.canvas" });
 
 		const b = vault._files.get("B.md")!;
-		expect(b).toMatch(/blocks:\s*\["A-1"\]/);
-		expect(b).toMatch(/children:\s*\["C-1"\]/);
+		expect(b).toMatch(/blocks:\n\s*-\s*"A-1"/);
+		expect(b).toMatch(/children:\n\s*-\s*"C-1"/);
 	});
 
 	it("writes implemented_by (reverse of implements) onto the feature file", async () => {
@@ -111,7 +112,7 @@ describe("syncReverseRelationships (integration via obsidian mock)", () => {
 
 		await plugin.syncReverseRelationships({ path: CANVAS, name: "board.canvas" });
 
-		expect(vault._files.get("F.md")!).toMatch(/implemented_by:\s*\["S-1"\]/);
+		expect(vault._files.get("F.md")!).toMatch(/implemented_by:\n\s*-\s*"S-1"/);
 	});
 
 	it("does not rewrite files whose reverse fields are already correct", async () => {

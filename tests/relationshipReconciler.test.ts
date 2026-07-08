@@ -20,6 +20,7 @@ import {
 	detectAndBreakCycles,
 	sanitizeEntityFilesForYaml,
 } from "../util/relationshipReconciler";
+import { parseRawFrontmatter } from "../util/frontmatter";
 
 // ---------------------------------------------------------------------------
 // In-memory vault harness.  Each entity is a frontmatter object stored by path.
@@ -50,8 +51,11 @@ function makeVault(entities: FM[]) {
 	const app = {
 		vault: {
 			read: async (file: any) => serialize(store.get(file.path) as FM),
-			modify: async () => {
-				/* processFrontMatter path is used, modify unused */
+			// applyFrontmatterUpdates now does read → merge → modify; parse the
+			// written content back into the store so assertions on the object see it.
+			modify: async (file: any, content: string) => {
+				const fm = parseRawFrontmatter(content);
+				if (fm) store.set(file.path, fm as FM);
 			},
 		},
 		fileManager: {
@@ -110,13 +114,53 @@ describe("reconcileRelationships", () => {
 		expect(store.get("S-001.md")!.parent).toBe("M-001");
 	});
 
-	it("syncs enables -> enabled_by", async () => {
+	it("does NOT carry the deprecated enables/enabled_by pair", async () => {
+		// `enables`/`enabled_by` is not in the schema; the reconciler no longer
+		// syncs it (it is not a source-of-truth relationship).
 		const { app, files, store } = makeVault([
 			{ id: "DEC-001", type: "decision", title: "D", enables: ["S-001"] },
 			{ id: "S-001", type: "story", title: "S" },
 		]);
 		await reconcileRelationships(app, files);
-		expect(store.get("S-001.md")!.enabled_by).toEqual(["DEC-001"]);
+		expect(store.get("S-001.md")!.enabled_by).toBeUndefined();
+	});
+
+	it("syncs affects -> decided_by (decision impacts a document)", async () => {
+		const { app, files, store } = makeVault([
+			{ id: "DEC-001", type: "decision", title: "D", affects: ["DOC-001"] },
+			{ id: "DOC-001", type: "document", title: "Doc" },
+		]);
+		await reconcileRelationships(app, files);
+		expect(store.get("DOC-001.md")!.decided_by).toEqual(["DEC-001"]);
+	});
+
+	it("syncs documents -> documented_by (document documents a feature)", async () => {
+		const { app, files, store } = makeVault([
+			{ id: "DOC-001", type: "document", title: "Doc", documents: ["F-001"] },
+			{ id: "F-001", type: "feature", title: "F" },
+		]);
+		await reconcileRelationships(app, files);
+		expect(store.get("F-001.md")!.documented_by).toEqual(["DOC-001"]);
+	});
+
+	it("syncs supersedes -> superseded_by as a scalar", async () => {
+		const { app, files, store } = makeVault([
+			{ id: "DEC-002", type: "decision", title: "new", supersedes: ["DEC-001"] },
+			{ id: "DEC-001", type: "decision", title: "old" },
+		]);
+		await reconcileRelationships(app, files);
+		// superseded_by is 'one' cardinality → written as a string, not an array
+		expect(store.get("DEC-001.md")!.superseded_by).toBe("DEC-002");
+	});
+
+	it("syncs previous_version -> next_version as a scalar", async () => {
+		const { app, files, store } = makeVault([
+			{ id: "DOC-002", type: "document", title: "v2", previous_version: ["DOC-001"] },
+			{ id: "DOC-001", type: "document", title: "v1" },
+		]);
+		await reconcileRelationships(app, files);
+		// next_version is 'one' cardinality → written as a string, not an array
+		expect(store.get("DOC-001.md")!.next_version).toBe("DOC-002");
 	});
 
 	it("ignores dangling targets not present in the vault", async () => {
@@ -138,15 +182,15 @@ describe("reconcileRelationships", () => {
 		expect(store.get("S-002.md")!.blocks).toEqual(["S-001"]);
 	});
 
-	it("does NOT reconcile documents/affects (not in the pair table)", async () => {
-		// Documents current behaviour: only implements/depends_on/enables/parent
-		// pairs are reconciled. documents<->documented_by is left untouched.
+	it("reconciles the reverse side too (documented_by -> documents)", async () => {
+		// The pair table carries both directions, derived from the schema, so a
+		// feature that already declares documented_by gets `documents` written back.
 		const { app, files, store } = makeVault([
-			{ id: "DOC-001", type: "document", title: "Doc", documents: ["F-001"] },
-			{ id: "F-001", type: "feature", title: "F" },
+			{ id: "F-001", type: "feature", title: "F", documented_by: ["DOC-001"] },
+			{ id: "DOC-001", type: "document", title: "Doc" },
 		]);
 		await reconcileRelationships(app, files);
-		expect(store.get("F-001.md")!.documented_by).toBeUndefined();
+		expect(store.get("DOC-001.md")!.documents).toEqual(["F-001"]);
 	});
 });
 

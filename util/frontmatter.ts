@@ -1,5 +1,6 @@
 import { App, TFile } from "obsidian";
-import { ItemFrontmatter, FeatureFrontmatter, ItemStatus, ItemPriority, FeatureTier, FeaturePhase, FeatureStatus } from "../types";
+import YAML from "yaml";
+import { ItemFrontmatter, FeatureFrontmatter } from "../types";
 import { sanitizeAllRelationships } from "./sanitizeRelationships";
 
 /**
@@ -11,6 +12,43 @@ type ParsedFrontmatter = Record<string, string | string[] | boolean | number | u
  * Generic frontmatter type that can be either ItemFrontmatter or FeatureFrontmatter
  */
 export type GenericFrontmatter = ItemFrontmatter | FeatureFrontmatter;
+
+/**
+ * Canonical YAML serialization options.
+ *
+ * These MUST stay byte-identical to entity-core's `EntitySerializer`
+ * (src/entity-core/serializer.ts) so that plugin-written and MCP-written entity
+ * files are indistinguishable:
+ *   - scalars are double-quoted        (defaultStringType: 'QUOTE_DOUBLE')
+ *   - arrays are YAML block sequences  (- "T-002")
+ *   - lines are never wrapped          (lineWidth: 0)
+ *   - keys stay plain/unquoted         (defaultKeyType: 'PLAIN')
+ *
+ * This is what removes the old `yamlSanitizer` / `sanitizeRelationships` bug
+ * class: values with colons (`title: "Component 3: Config Loader"`) are always
+ * quoted, so the plugin never emits YAML that its own reader can't parse.
+ */
+const YAML_STRINGIFY_OPTS = {
+	lineWidth: 0,
+	defaultStringType: "QUOTE_DOUBLE",
+	defaultKeyType: "PLAIN",
+} as const;
+
+/**
+ * Serialize a plain frontmatter object into a `---`-delimited YAML block in the
+ * canonical EntitySerializer format. `undefined`/`null` values are dropped
+ * (matching EntitySerializer, which only emits defined fields). The returned
+ * block ends with a trailing newline after the closing `---`.
+ */
+function serializeFrontmatterBlock(frontmatter: Record<string, unknown>): string {
+	const clean: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(frontmatter)) {
+		if (value === undefined || value === null) continue;
+		clean[key] = value;
+	}
+	const yaml = YAML.stringify(clean, YAML_STRINGIFY_OPTS as YAML.ToStringOptions);
+	return `---\n${yaml}---\n`;
+}
 
 /**
  * Parse a YAML value that might be a JSON array
@@ -35,15 +73,19 @@ function parseYamlValue(value: string): string | string[] | boolean | number {
 				return []; // Empty array
 			}
 			// Split by comma and trim each value
-			const items = inner.split(',').map(s => s.trim()).filter(s => s.length > 0);
+			const items = inner.split(',').map(s => s.trim().replace(/^['"]|['"]$/g, '')).filter(s => s.length > 0);
 			return items;
 		}
 	}
 
-	// Handle quoted strings (both single and double quotes)
-	if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-	    (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
-		return trimmed.slice(1, -1);
+	// Handle double-quoted strings, unescaping YAML escapes (\" and \\) so a value
+	// written by YAML.stringify (e.g. a title containing a quote) round-trips.
+	if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
+		return unescapeDoubleQuoted(trimmed.slice(1, -1));
+	}
+	// Handle single-quoted strings (YAML escapes '' -> ').
+	if (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) {
+		return trimmed.slice(1, -1).replace(/''/g, "'");
 	}
 
 	// Handle booleans
@@ -59,14 +101,116 @@ function parseYamlValue(value: string): string | string[] | boolean | number {
 }
 
 /**
- * Serialize a value for YAML frontmatter
- * Arrays are serialized as JSON: ["ACC-001", "ACC-002"]
+ * Unescape the body of a YAML double-quoted scalar. Handles the escapes our
+ * writer (YAML.stringify) actually emits: \" \\ \n \t \r \0.
  */
-function serializeYamlValue(value: unknown): string {
-	if (Array.isArray(value)) {
-		return JSON.stringify(value);
+function unescapeDoubleQuoted(s: string): string {
+	return s.replace(/\\(["\\ntr0])/g, (_m, ch) => {
+		switch (ch) {
+			case "n": return "\n";
+			case "t": return "\t";
+			case "r": return "\r";
+			case "0": return "\0";
+			default: return ch; // " or \
+		}
+	});
+}
+
+/**
+ * Strip a single layer of surrounding quotes from a block-sequence item,
+ * unescaping YAML double-quote escapes so the item round-trips.
+ */
+function stripQuotes(raw: string): string {
+	const t = raw.trim();
+	if (t.startsWith('"') && t.endsWith('"') && t.length >= 2) {
+		return unescapeDoubleQuoted(t.slice(1, -1));
 	}
-	return String(value);
+	if (t.startsWith("'") && t.endsWith("'") && t.length >= 2) {
+		return t.slice(1, -1).replace(/''/g, "'");
+	}
+	return t;
+}
+
+/**
+ * Lenient, line-based frontmatter-body parser.
+ *
+ * Understands BOTH the legacy inline format (`depends_on: ["T-1"]`,
+ * unquoted-colon titles) and the new canonical block format:
+ *
+ *   depends_on:
+ *     - "T-002"
+ *     - "S-1"
+ *
+ * It splits scalars on the FIRST colon (so legacy unquoted-colon values survive
+ * where a strict YAML parser would throw) while still collecting block sequences.
+ *
+ * @param parseValues when true, scalar values are coerced via parseYamlValue
+ *   (arrays/booleans/numbers/unquoted); when false they are kept as raw strings.
+ */
+function parseFrontmatterLines(
+	frontmatterText: string,
+	parseValues: boolean
+): ParsedFrontmatter {
+	const lines = frontmatterText.split("\n");
+	const frontmatter: ParsedFrontmatter = {};
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		const colonIndex = line.indexOf(":");
+		if (colonIndex === -1) continue;
+
+		const key = line.slice(0, colonIndex).trim();
+		if (!key) continue;
+
+		const rest = line.slice(colonIndex + 1).trim();
+
+		// Block sequence: `key:` followed by one or more `  - item` lines.
+		if (rest === "" && /^[ \t]*-[ \t]*/.test(lines[i + 1] ?? "")) {
+			const items: string[] = [];
+			while (i + 1 < lines.length && /^[ \t]*-[ \t]*/.test(lines[i + 1])) {
+				const itemRaw = lines[++i].replace(/^[ \t]*-[ \t]*/, "");
+				items.push(stripQuotes(itemRaw));
+			}
+			frontmatter[key] = items;
+			continue;
+		}
+
+		frontmatter[key] = parseValues ? parseYamlValue(rest) : rest;
+	}
+
+	return frontmatter;
+}
+
+/**
+ * Robustly split a markdown document into a frontmatter object + body.
+ *
+ * Prefers a strict `YAML.parse` (correct for the new canonical format and for
+ * well-formed legacy files) and falls back to the lenient line parser only when
+ * strict parsing throws (e.g. legacy files with unquoted colons in a value).
+ * Used by the write paths so a merge never loses/mangles existing fields.
+ */
+function robustSplitFrontmatter(content: string): {
+	frontmatter: Record<string, unknown>;
+	body: string;
+} {
+	const match = content.match(/^---\n([\s\S]*?)\n---\n?/);
+	if (!match) {
+		return { frontmatter: {}, body: content };
+	}
+
+	const frontmatterText = match[1];
+	const body = content.substring(match[0].length);
+
+	try {
+		const parsed = YAML.parse(frontmatterText);
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			return { frontmatter: parsed as Record<string, unknown>, body };
+		}
+	} catch {
+		// fall through to lenient parser
+	}
+
+	return { frontmatter: parseFrontmatterLines(frontmatterText, true), body };
 }
 
 /**
@@ -78,19 +222,7 @@ export function parseRawFrontmatter(content: string): ParsedFrontmatter | null {
 
 	if (!match) return null;
 
-	const frontmatterText = match[1];
-	const lines = frontmatterText.split("\n");
-	const frontmatter: ParsedFrontmatter = {};
-
-	for (const line of lines) {
-		const colonIndex = line.indexOf(":");
-		if (colonIndex === -1) continue;
-
-		const key = line.slice(0, colonIndex).trim();
-		const value = line.slice(colonIndex + 1).trim();
-
-		frontmatter[key] = parseYamlValue(value);
-	}
+	const frontmatter = parseFrontmatterLines(match[1], true);
 
 	// Convert boolean strings to actual booleans
 	if (frontmatter.inProgress !== undefined && typeof frontmatter.inProgress === 'string') {
@@ -184,21 +316,9 @@ export function parseFrontmatterAndBody(content: string): {
 		};
 	}
 
-	const frontmatterText = match[1];
-	const lines = frontmatterText.split("\n");
-	const frontmatter: ParsedFrontmatter = {};
-
-	for (const line of lines) {
-		const colonIndex = line.indexOf(":");
-		if (colonIndex === -1) continue;
-
-		const key = line.slice(0, colonIndex).trim();
-		const value = line.slice(colonIndex + 1).trim();
-
-		frontmatter[key] = value;
-	}
-
-	// Extract body (everything after frontmatter)
+	// Keep scalar values as raw strings (legacy behaviour) but understand block
+	// sequences so the new canonical array format survives a read.
+	const frontmatter = parseFrontmatterLines(match[1], false);
 	const body = content.substring(match[0].length);
 
 	return {
@@ -212,62 +332,21 @@ export function parseFrontmatterAndBody(content: string): {
  * @param content Full markdown content including frontmatter
  * @param updates Partial frontmatter updates (supports both ItemFrontmatter and FeatureFrontmatter fields)
  * @returns Updated markdown content
+ *
+ * Output is written in the canonical EntitySerializer format (double-quoted
+ * scalars, block-sequence arrays). The markdown body after the frontmatter is
+ * preserved verbatim.
  */
 export function updateFrontmatter(
 	content: string,
 	updates: Partial<ItemFrontmatter> | Partial<FeatureFrontmatter> | ParsedFrontmatter
 ): string {
-	const frontmatterRegex = /^---\n([\s\S]*?)\n---\n?/;
-	const match = content.match(frontmatterRegex);
+	const { frontmatter: existingFrontmatter, body } = robustSplitFrontmatter(content);
 
-	let body = content;
-	let existingFrontmatter: ParsedFrontmatter = {};
+	// Merge updates; undefined/null are dropped by serializeFrontmatterBlock.
+	const mergedFrontmatter: Record<string, unknown> = { ...existingFrontmatter, ...updates };
 
-	if (match) {
-		// Parse existing frontmatter
-		const frontmatterText = match[1];
-		const lines = frontmatterText.split("\n");
-
-		for (const line of lines) {
-			const colonIndex = line.indexOf(":");
-			if (colonIndex === -1) continue;
-
-			const key = line.slice(0, colonIndex).trim();
-			const value = line.slice(colonIndex + 1).trim();
-
-			existingFrontmatter[key] = parseYamlValue(value);
-		}
-
-		// Extract body
-		body = content.substring(match[0].length);
-	}
-
-	// Merge updates
-	const mergedFrontmatter = { ...existingFrontmatter, ...updates };
-
-	// Serialize new frontmatter
-	const newFrontmatterLines: string[] = ["---"];
-	for (const [key, value] of Object.entries(mergedFrontmatter)) {
-		if (value !== undefined && value !== null) {
-			// Handle arrays (like depends_on) - always include, even if empty
-			if (Array.isArray(value)) {
-				newFrontmatterLines.push(`${key}: ${JSON.stringify(value)}`);
-			} else if (typeof value === 'string') {
-				// Quote strings that contain colons, newlines, or other YAML special chars
-				// to avoid "Nested mappings are not allowed in compact mappings" errors
-				if (value.includes(':') || value.includes('\n') || value.includes('#')) {
-					newFrontmatterLines.push(`${key}: "${value.replace(/"/g, '\\"')}"`);
-				} else {
-					newFrontmatterLines.push(`${key}: ${value}`);
-				}
-			} else {
-				newFrontmatterLines.push(`${key}: ${value}`);
-			}
-		}
-	}
-	newFrontmatterLines.push("---");
-
-	return newFrontmatterLines.join("\n") + "\n" + body;
+	return serializeFrontmatterBlock(mergedFrontmatter) + body;
 }
 
 /**
@@ -275,53 +354,52 @@ export function updateFrontmatter(
  * @param body Markdown body without frontmatter
  * @param frontmatter Frontmatter object
  * @returns Full markdown content with frontmatter
+ *
+ * Output uses the canonical EntitySerializer format. Certain fields
+ * (`parent`, `notion_page_id`, `created_by_plugin`, `depends_on`) are always
+ * emitted even when empty, preserving the plugin's long-standing contract.
  */
 export function createWithFrontmatter(body: string, frontmatter: Partial<ItemFrontmatter>): string {
-	const frontmatterLines: string[] = ["---"];
-
-	// Define required fields that should always be written (even if empty)
+	// Fields that must appear in the block even when empty/undefined.
 	const alwaysInclude = ['parent', 'notion_page_id', 'created_by_plugin', 'depends_on'];
 
+	const out: Record<string, unknown> = {};
+
 	for (const [key, value] of Object.entries(frontmatter)) {
-		// Handle arrays (like depends_on) - always include, even if empty
 		if (Array.isArray(value)) {
-			frontmatterLines.push(`${key}: ${JSON.stringify(value)}`);
-		}
-		// Always include certain fields, even if undefined/null/empty
-		else if (alwaysInclude.includes(key)) {
-			if (value === undefined || value === null || value === "") {
-				frontmatterLines.push(`${key}:`); // Empty value
-			} else {
-				frontmatterLines.push(`${key}: ${value}`);
-			}
-		}
-		// Skip other undefined, null, or empty string values
-		else if (value !== undefined && value !== null && value !== "") {
-			// Properly quote strings that contain special characters
-			const stringValue = String(value);
-			if (stringValue.includes(':') || stringValue.includes('#') || stringValue.includes('\n')) {
-				frontmatterLines.push(`${key}: "${stringValue}"`);
-			} else {
-				frontmatterLines.push(`${key}: ${stringValue}`);
-			}
+			// Arrays (like depends_on) are always included, even if empty.
+			out[key] = value;
+		} else if (alwaysInclude.includes(key)) {
+			// Always include, even when empty — emit "" so the key is present.
+			out[key] = value === undefined || value === null ? "" : value;
+		} else if (value !== undefined && value !== null && value !== "") {
+			out[key] = value;
 		}
 	}
-	frontmatterLines.push("---");
 
-	return frontmatterLines.join("\n") + "\n" + body;
+	// Guarantee the always-include fields exist even if absent from the input.
+	for (const key of alwaysInclude) {
+		if (!(key in out)) {
+			out[key] = key === 'depends_on' ? [] : "";
+		}
+	}
+
+	return serializeFrontmatterBlock(out) + body;
 }
 
 /**
- * Apply frontmatter updates to a file using Obsidian's processFrontMatter API.
- * This is the safe, API-compliant replacement for the read→updateFrontmatter→modify pattern.
- * processFrontMatter handles all YAML escaping, comment preservation, and concurrent-write safety.
+ * Apply frontmatter updates to a file, writing in the canonical
+ * EntitySerializer format (double-quoted scalars, block-sequence arrays).
  *
- * WARNING: Obsidian's YAML parser has issues with unquoted colons in string values (e.g., "title: Component 3: Config Loader").
- * To work around this, we skip updates if the existing frontmatter would cause serialization errors.
+ * This is a read → merge-frontmatter → write round-trip on the SAME file, so
+ * the markdown body and any fields not mentioned in `updates` are preserved.
+ * Unlike Obsidian's `processFrontMatter` (which serializes via Obsidian's own
+ * writer — inline arrays, unquoted scalars) this gives us full control over the
+ * on-disk format so plugin-written files stay byte-consistent with MCP.
  *
  * @param app Obsidian App instance
  * @param file TFile to update
- * @param updates Fields to set/update. Pass null or undefined for a field to delete it.
+ * @param updates Fields to set/update. Pass null, undefined, or "" for a field to delete it.
  */
 export async function applyFrontmatterUpdates(
 	app: App,
@@ -332,76 +410,53 @@ export async function applyFrontmatterUpdates(
 	const sanitizedUpdates = { ...updates };
 	sanitizeAllRelationships(sanitizedUpdates);
 
-	try {
-		await app.fileManager.processFrontMatter(file, (fm) => {
-			for (const [key, value] of Object.entries(sanitizedUpdates)) {
-				if (value === undefined || value === null || value === "") {
-					delete fm[key];
-				} else {
-					fm[key] = value;
-				}
-			}
-		});
-	} catch (error) {
-		// If Obsidian's YAML parser fails (e.g., due to unquoted colons), fall back to manual update
-		console.warn(`[applyFrontmatterUpdates] processFrontMatter failed for ${file.path}, using manual update:`, error);
-		await manualFrontmatterUpdate(app, file, sanitizedUpdates);
-	}
-}
-
-/**
- * Manually update frontmatter by reading, parsing, updating, and writing the file.
- * This is a fallback for when Obsidian's processFrontMatter fails due to YAML issues.
- */
-async function manualFrontmatterUpdate(
-	app: App,
-	file: TFile,
-	updates: Record<string, unknown>
-): Promise<void> {
 	const content = await app.vault.read(file);
-	const updated = updateFrontmatter(content, updates);
-	await app.vault.modify(file, updated);
+	const { frontmatter, body } = robustSplitFrontmatter(content);
+
+	for (const [key, value] of Object.entries(sanitizedUpdates)) {
+		if (value === undefined || value === null || value === "") {
+			delete frontmatter[key];
+		} else {
+			frontmatter[key] = value;
+		}
+	}
+
+	const newContent = serializeFrontmatterBlock(frontmatter) + body;
+	await app.vault.modify(file, newContent);
 }
 
 /**
- * Serialize frontmatter object to YAML string
+ * Serialize a standard entity's frontmatter to a canonical YAML block string.
+ *
+ * Field order matches entity-core's EntitySerializer / MCP conventions, and the
+ * scalar quoting + block-array format is identical. Returns the `---`-delimited
+ * block (no body).
  */
 export function serializeFrontmatter(frontmatter: ItemFrontmatter): string {
-	const lines: string[] = ["---"];
-
-	lines.push(`type: ${frontmatter.type}`);
-	lines.push(`title: ${frontmatter.title}`);
-	lines.push(`id: ${frontmatter.id}`);
-
-	// MCP v2 spec: use workstream (with backwards compat fallback)
+	// MCP v2 spec: use workstream / created_at / updated_at (with legacy fallback)
 	const workstream = frontmatter.workstream ?? frontmatter.effort ?? 'default';
-	lines.push(`workstream: ${workstream}`);
-
-	lines.push(`status: ${frontmatter.status}`);
-	lines.push(`priority: ${frontmatter.priority}`);
-	lines.push(`inProgress: ${frontmatter.inProgress ?? false}`);
-	lines.push(`created_by_plugin: ${frontmatter.created_by_plugin ?? true}`);
-
-	// MCP v2 spec: use created_at/updated_at (with backwards compat fallback)
 	const created_at = frontmatter.created_at ?? frontmatter.created ?? '';
 	const updated_at = frontmatter.updated_at ?? frontmatter.updated ?? '';
-	lines.push(`created_at: ${created_at}`);
-	lines.push(`updated_at: ${updated_at}`);
 
-	lines.push(`canvas_source: ${frontmatter.canvas_source}`);
-	lines.push(`vault_path: ${frontmatter.vault_path}`);
+	const ordered: Record<string, unknown> = {
+		type: frontmatter.type,
+		title: frontmatter.title,
+		id: frontmatter.id,
+		workstream,
+		status: frontmatter.status,
+		priority: frontmatter.priority,
+		inProgress: frontmatter.inProgress ?? false,
+		created_by_plugin: frontmatter.created_by_plugin ?? true,
+		created_at,
+		updated_at,
+		canvas_source: frontmatter.canvas_source,
+		vault_path: frontmatter.vault_path,
+		depends_on: frontmatter.depends_on || [],
+		// Always emit notion_page_id (empty string when unset).
+		notion_page_id: frontmatter.notion_page_id ?? "",
+	};
 
-	// Always include depends_on (empty array if no dependencies)
-	lines.push(`depends_on: ${JSON.stringify(frontmatter.depends_on || [])}`);
-
-	if (frontmatter.notion_page_id) {
-		lines.push(`notion_page_id: ${frontmatter.notion_page_id}`);
-	} else {
-		lines.push(`notion_page_id:`);
-	}
-
-	lines.push("---");
-
-	return lines.join("\n");
+	// serializeFrontmatterBlock appends a trailing newline; historical callers of
+	// serializeFrontmatter expect just the block, so trim the trailing newline.
+	return serializeFrontmatterBlock(ordered).replace(/\n$/, "");
 }
-

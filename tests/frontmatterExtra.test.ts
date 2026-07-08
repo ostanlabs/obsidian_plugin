@@ -105,18 +105,20 @@ describe("frontmatter - parseFrontmatterAndBody", () => {
 });
 
 describe("frontmatter - updateFrontmatter", () => {
-	it("serializes arrays as JSON and quotes values with colons", () => {
+	it("serializes arrays as YAML block sequences and quotes scalars", () => {
 		const out = updateFrontmatter(`---\ntype: task\n---\nbody`, {
 			depends_on: ["A", "B"],
 			title: "Has: colon",
 		});
-		expect(out).toContain('depends_on: ["A","B"]');
+		// Canonical EntitySerializer format: block-sequence arrays, quoted scalars.
+		expect(out).toContain('depends_on:\n  - "A"\n  - "B"');
 		expect(out).toContain('title: "Has: colon"');
+		expect(out).toContain("body");
 	});
 
 	it("prepends frontmatter when the source has none", () => {
 		const out = updateFrontmatter("plain body", { title: "X" });
-		expect(out).toContain("title: X");
+		expect(out).toContain('title: "X"');
 		expect(out).toContain("plain body");
 	});
 
@@ -138,10 +140,10 @@ describe("frontmatter - createWithFrontmatter", () => {
 			parent: "",
 			notion_page_id: "",
 		} as Partial<ItemFrontmatter>);
+		// Empty arrays render as an inline flow list; empty scalars as "".
 		expect(out).toContain("depends_on: []");
-		// alwaysInclude fields present-but-empty are emitted with a bare key
-		expect(out).toMatch(/parent:\s*$/m);
-		expect(out).toMatch(/notion_page_id:\s*$/m);
+		expect(out).toMatch(/parent:\s*""\s*$/m);
+		expect(out).toMatch(/notion_page_id:\s*""\s*$/m);
 	});
 
 	it("emits alwaysInclude fields with their value when set", () => {
@@ -150,7 +152,7 @@ describe("frontmatter - createWithFrontmatter", () => {
 			title: "T",
 			parent: "M-001",
 		} as Partial<ItemFrontmatter>);
-		expect(out).toContain("parent: M-001");
+		expect(out).toContain('parent: "M-001"');
 	});
 
 	it("quotes string values containing special chars", () => {
@@ -184,10 +186,10 @@ describe("frontmatter - serializeFrontmatter", () => {
 			canvas_source: "c.canvas",
 			vault_path: "t.md",
 		} as unknown as ItemFrontmatter);
-		expect(out).toContain("workstream: Infra");
-		expect(out).toContain("created_at: 2025-01-01");
+		expect(out).toContain('workstream: "Infra"');
+		expect(out).toContain('created_at: "2025-01-01"');
 		expect(out).toContain("depends_on: []");
-		expect(out).toContain("notion_page_id:");
+		expect(out).toContain('notion_page_id: ""');
 	});
 
 	it("emits notion_page_id when present", () => {
@@ -205,8 +207,8 @@ describe("frontmatter - serializeFrontmatter", () => {
 			notion_page_id: "abc123",
 			depends_on: ["S-1"],
 		} as unknown as ItemFrontmatter);
-		expect(out).toContain("notion_page_id: abc123");
-		expect(out).toContain('depends_on: ["S-1"]');
+		expect(out).toContain('notion_page_id: "abc123"');
+		expect(out).toContain('depends_on:\n  - "S-1"');
 	});
 });
 
@@ -215,40 +217,42 @@ describe("frontmatter - applyFrontmatterUpdates", () => {
 		return { path, basename: path.replace(/\.md$/, "") } as any;
 	}
 
-	it("uses processFrontMatter to set and delete fields", async () => {
-		const store: Record<string, unknown> = { title: "Old", stale: "x" };
+	function makeApp(initial: string) {
+		let content = initial;
 		const app = {
-			fileManager: {
-				processFrontMatter: async (_file: any, fn: (fm: any) => void) => {
-					fn(store);
+			vault: {
+				read: async () => content,
+				modify: async (_file: any, next: string) => {
+					content = next;
 				},
 			},
 		} as any;
+		return { app, get: () => content };
+	}
+
+	it("sets and deletes fields via read-modify-write, preserving the body", async () => {
+		const { app, get } = makeApp(
+			`---\ntype: task\ntitle: Old\nstale: x\n---\n# Body\ntext`
+		);
 		await applyFrontmatterUpdates(app, makeFile("t.md"), {
 			title: "New",
 			stale: "", // empty -> delete
 		});
-		expect(store.title).toBe("New");
-		expect("stale" in store).toBe(false);
+		const out = get();
+		expect(out).toContain('title: "New"');
+		expect(out).not.toContain("stale");
+		// Body preserved verbatim.
+		expect(out).toContain("# Body");
+		expect(out).toContain("text");
 	});
 
-	it("falls back to manual update when processFrontMatter throws", async () => {
-		let written = "";
-		const app = {
-			fileManager: {
-				processFrontMatter: async () => {
-					throw new Error("YAML boom");
-				},
-			},
-			vault: {
-				read: async () => `---\ntype: task\ntitle: Old\n---\nbody`,
-				modify: async (_file: any, content: string) => {
-					written = content;
-				},
-			},
-		} as any;
-		await applyFrontmatterUpdates(app, makeFile("t.md"), { title: "New" });
-		expect(written).toContain("title: New");
-		expect(written).toContain("body");
+	it("writes the canonical format (quoted scalars, block arrays)", async () => {
+		const { app, get } = makeApp(`---\ntype: task\nid: T-1\n---\nbody`);
+		await applyFrontmatterUpdates(app, makeFile("t.md"), {
+			depends_on: ["T-2", "T-3"],
+		});
+		const out = get();
+		expect(out).toContain('depends_on:\n  - "T-2"\n  - "T-3"');
+		expect(out).toContain("body");
 	});
 });

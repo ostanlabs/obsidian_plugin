@@ -1,12 +1,51 @@
 import { App, TFile, Notice } from "obsidian";
 import { parseAnyFrontmatter, applyFrontmatterUpdates } from "./frontmatter";
 import { sanitizeYamlValue, hasUnsafeYamlChars } from "./yamlSanitizer";
+import { DEFAULT_SCHEMA } from "../src/entity-core/default-schema.js";
+import { buildReverseRelationMap } from "../src/entity-core/schema-derivation.js";
+
+// ---------------------------------------------------------------------------
+// Schema-derived relationship maps (refactor §3).
+//
+// SINGLE SOURCE OF TRUTH: the active schema (DEFAULT_SCHEMA) via
+// buildReverseRelationMap(). This replaces the previously hardcoded
+// RELATIONSHIP_PAIRS / REVERSE_FIELD_MAP / edge-field lists, which had drifted
+// from the schema — they carried the deprecated `enables`/`enabled_by` (not in
+// the schema) and were MISSING the decision/document/versioning inverses
+// (affects↔decided_by, documents↔documented_by, supersedes↔superseded_by,
+// previous_version↔next_version). Deriving here keeps the reconciler in
+// lock-step with the schema the MCP validator and positioning engine already use.
+// ---------------------------------------------------------------------------
+
+/** field name → inverse field name, both directions (e.g. depends_on↔blocks). */
+const REVERSE_RELATION_MAP: Record<string, string> = buildReverseRelationMap(DEFAULT_SCHEMA);
+
+/** field name → schema cardinality ('one' ⇒ scalar, 'many' ⇒ array). */
+const FIELD_CARDINALITY: Record<string, "one" | "many"> = (() => {
+	const card: Record<string, "one" | "many"> = {};
+	for (const rel of DEFAULT_SCHEMA.relationships) {
+		for (const p of rel.pairs) {
+			card[p.forward] = rel.cardinality.forward;
+			card[p.reverse] = rel.cardinality.reverse;
+		}
+	}
+	return card;
+})();
+
+/** A relationship field holds an array unless its schema cardinality is 'one'. */
+function isArrayField(field: string): boolean {
+	return FIELD_CARDINALITY[field] !== "one";
+}
 
 /**
  * Fields that must remain scalar (single string value) rather than an array.
- * When the reconciler adds a value to one of these fields it writes a string, not an array.
+ * When the reconciler adds a value to one of these fields it writes a string,
+ * not an array. Derived from schema cardinality — 'one' ⇒ scalar (e.g. `parent`,
+ * `supersedes`/`superseded_by`, `previous_version`/`next_version`).
  */
-const SCALAR_FIELDS = new Set(["parent"]);
+const SCALAR_FIELDS = new Set<string>(
+	Object.keys(FIELD_CARDINALITY).filter(f => !isArrayField(f))
+);
 
 /**
  * Sanitize entity files before reconciliation to fix YAML-unsafe values.
@@ -76,19 +115,13 @@ export async function sanitizeEntityFilesForYaml(
 }
 
 /**
- * Relationship pairs that should be bidirectional
- * Format: [forwardField, inverseField]
+ * Relationship pairs that should be bidirectional, DERIVED from the schema.
+ * Format: [forwardField, inverseField] for BOTH directions of every pair
+ * (e.g. implements→implemented_by and implemented_by→implements), matching the
+ * reconciler's existing usage — every field is treated as a "forward" and its
+ * inverse is synced onto the target.
  */
-const RELATIONSHIP_PAIRS: [string, string][] = [
-	["implements", "implemented_by"],
-	["implemented_by", "implements"],
-	["depends_on", "blocks"],
-	["blocks", "depends_on"],
-	["enables", "enabled_by"],
-	["enabled_by", "enables"],
-	["parent", "children"],
-	["children", "parent"],
-];
+const RELATIONSHIP_PAIRS: [string, string][] = Object.entries(REVERSE_RELATION_MAP);
 
 /**
  * Relationship fields that create ordering constraints (A must come before B)
@@ -224,14 +257,17 @@ export interface TransitiveCleanupResult {
 	}[];
 }
 
-// Mapping of fields to their reverse fields
-// When we remove X from entity.children, we also need to remove entity from X.parent
-const REVERSE_FIELD_MAP: Record<string, { field: string; isArray: boolean }> = {
-	"children": { field: "parent", isArray: false },
-	"depends_on": { field: "blocks", isArray: true },
-	"implemented_by": { field: "implements", isArray: true },
-	"enables": { field: "enabled_by", isArray: true },
-};
+// Mapping of fields to their reverse fields, DERIVED from the schema.
+// When we remove X from entity.children, we also need to remove entity from X.parent.
+// `isArray` reflects the reverse field's schema cardinality (parent is scalar,
+// blocks/implements are arrays). Only the edgeCreatingFields keys below are read.
+const REVERSE_FIELD_MAP: Record<string, { field: string; isArray: boolean }> = (() => {
+	const map: Record<string, { field: string; isArray: boolean }> = {};
+	for (const [field, reverse] of Object.entries(REVERSE_RELATION_MAP)) {
+		map[field] = { field: reverse, isArray: isArrayField(reverse) };
+	}
+	return map;
+})();
 
 /**
  * Clean up transitively implied relationships for ALL edge-creating fields.
@@ -264,12 +300,14 @@ export async function cleanTransitiveDependencies(
 		details: [],
 	};
 
-	// Fields that create edges and should have transitive cleanup applied
+	// Fields that create edges and should have transitive cleanup applied.
+	// Kept intentionally scoped to the dependency/hierarchy/implementation edges
+	// (the deprecated `enables` was dropped). Transitive cleanup is DELETION, so
+	// this list is deliberately NOT widened to the additive-only schema inverses.
 	const edgeCreatingFields = [
 		"depends_on",
 		"children",
 		"implemented_by",
-		"enables",
 	];
 
 	// Build entity map: entityId -> { file, frontmatter, dependsOn, children, etc. }

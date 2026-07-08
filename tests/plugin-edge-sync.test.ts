@@ -53,9 +53,10 @@ describe("syncEdgesToMdFiles (integration via obsidian mock)", () => {
 
 		await plugin.syncEdgesToMdFiles(new TFile(CANVAS));
 
-		expect(vault._files.get("B.md")!).toMatch(/depends_on:\s*\["A-1"\]/);
-		// source file gets no depends_on written
-		expect(vault._files.get("A.md")!).not.toMatch(/depends_on:\s*\["/);
+		// Canonical EntitySerializer format: block-sequence array, quoted item.
+		expect(vault._files.get("B.md")!).toMatch(/depends_on:\n\s*-\s*"A-1"/);
+		// source file gets no depends_on item written
+		expect(vault._files.get("A.md")!).not.toMatch(/depends_on:\n\s*-/);
 	});
 
 	it("aggregates multiple incoming edges into one depends_on array on the target", async () => {
