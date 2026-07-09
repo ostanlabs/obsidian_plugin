@@ -205,11 +205,15 @@ export class Vault {
 	}
 }
 
-/** A single fake workspace leaf; openFile records the file it was asked to open. */
+/** A single fake workspace leaf; openFile/setViewState record what they were asked to open. */
 export class MockLeaf {
 	openedFile: TFile | { path: string } | null = null;
+	viewState: Record<string, unknown> | null = null;
 	async openFile(file: TFile | { path: string }): Promise<void> {
 		this.openedFile = file;
+	}
+	async setViewState(state: Record<string, unknown>): Promise<void> {
+		this.viewState = state;
 	}
 }
 
@@ -231,6 +235,11 @@ export class Workspace {
 	}
 	getLeavesOfType(): unknown[] {
 		return [];
+	}
+	/** Every leaf passed to revealLeaf(), so tests can assert what was surfaced. */
+	revealedLeaves: unknown[] = [];
+	revealLeaf(leaf: unknown): void {
+		this.revealedLeaves.push(leaf);
 	}
 	/** No-op link opener (repositionCanvasNodesV4 reopens the canvas through this). */
 	async openLinkText(_linktext?: string, _sourcePath?: string, _newLeaf?: boolean): Promise<void> {}
@@ -366,7 +375,10 @@ export class Plugin {
 		this.app = app;
 		this.manifest = manifest;
 	}
+	/** Every command registered via addCommand(), so tests can assert the command surface. */
+	_commands: unknown[] = [];
 	addCommand<T>(cmd: T): T {
+		this._commands.push(cmd);
 		return cmd;
 	}
 	addRibbonIcon(): HTMLElement {

@@ -28,7 +28,7 @@ const COV_SERVER = path.join(COV_DIR, 'mcp-cov.mjs');
 // Keep in sync with package.json build:mcp externals.
 const EXTERNALS = [
   '@modelcontextprotocol/sdk', '@ostanlabs/md-retriever', 'onnxruntime-node',
-  '@xenova/transformers', 'better-sqlite3', 'faiss-node', 'yaml', 'zod', 'chokidar',
+  '@xenova/transformers', 'better-sqlite3', 'faiss-node', 'yaml', 'chokidar',
 ];
 
 function step(msg) { console.log(`\n\x1b[1m▶ ${msg}\x1b[0m`); }

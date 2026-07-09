@@ -428,6 +428,15 @@ private registerCommands(): void {
 			await this.reconcileAllRelationships();
 		},
 	});
+
+	// Command: Open the feature coverage view
+	this.addCommand({
+		id: "open-feature-coverage",
+		name: "Project canvas: open feature coverage",
+		callback: async () => {
+			await this.activateFeatureCoverageView();
+		},
+	});
 }
 
 	/**

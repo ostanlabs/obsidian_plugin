@@ -275,6 +275,20 @@ const server = new Server(
   }
 );
 
+/**
+ * Enum values of the feature `phase` field per the ACTIVE schema, so the
+ * get_feature_coverage tool advertises values that can actually match vault
+ * data. Falls back to the codified default (src/entity-core/default-schema.ts:
+ * MVP|0|1|2|3|4|5) if the active schema has no enum values for it.
+ */
+function featurePhaseEnumValues(): string[] {
+  const phaseField = schema.getFields('feature').find((f) => f.name === 'phase');
+  if (phaseField?.values && phaseField.values.length > 0) {
+    return phaseField.values;
+  }
+  return ['MVP', '0', '1', '2', '3', '4', '5'];
+}
+
 // Register tools
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -540,7 +554,7 @@ EXAMPLES:
       inputSchema: {
         type: 'object',
         properties: {
-          phase: { type: 'string', enum: ['MVP', 'V1', 'V2', 'Future'], description: 'Filter by phase' },
+          phase: { type: 'string', enum: featurePhaseEnumValues(), description: 'Filter by phase' },
           tier: { type: 'string', enum: ['OSS', 'Premium'], description: 'Filter by tier' },
         },
       },
@@ -1789,10 +1803,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
-        // Apply filters (from parsed fields)
+        // Apply filters (from parsed fields). Phase is compared as a string:
+        // YAML parses `phase: 4` as the number 4 while the schema enum and the
+        // tool argument are strings ("4"), and both forms appear in real vaults.
         let filtered = features;
-        if (phase) {
-          filtered = filtered.filter(f => f.fields?.phase === phase);
+        if (phase !== undefined && phase !== null) {
+          filtered = filtered.filter(f => String(f.fields?.phase) === String(phase));
         }
         if (tier) {
           filtered = filtered.filter(f => f.fields?.tier === tier);

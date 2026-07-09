@@ -230,6 +230,12 @@ class McpClient {
     return (r?.result?.tools ?? []).map((t: any) => t.name);
   }
 
+  /** Full tool definitions (name + description + inputSchema), not just names. */
+  async listToolDefs(): Promise<any[]> {
+    const r = await this.rpc('tools/list', {});
+    return r?.result?.tools ?? [];
+  }
+
   async call(name: string, args: Record<string, unknown> = {}): Promise<CallResult> {
     const r = await this.rpc('tools/call', { name, arguments: args });
     return {
@@ -670,7 +676,8 @@ const EDGE_FIXTURE: Record<string, string> = {
   'documents/DOC-101.md': ent({ id: 'DOC-101', type: 'document', title: 'Draft guide', status: 'Draft', workstream: 'engineering', doc_type: 'guide', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
   // features — one covered (impl+doc), one uncovered
   'features/F-100.md': ent({ id: 'F-100', type: 'feature', title: 'Covered feature', status: 'Planned', workstream: 'engineering', user_story: 'As a user I want X', tier: 'OSS', phase: 'MVP', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, implemented_by: ['S-100'], documented_by: ['DOC-100'] }),
-  'features/F-200.md': ent({ id: 'F-200', type: 'feature', title: 'Uncovered feature', status: 'Planned', workstream: 'engineering', user_story: 'As a user I want Y', tier: 'Premium', phase: '1', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+  // phase is deliberately a YAML number (real vaults contain both `phase: 1` and `phase: "1"`)
+  'features/F-200.md': ent({ id: 'F-200', type: 'feature', title: 'Uncovered feature', status: 'Planned', workstream: 'engineering', user_story: 'As a user I want Y', tier: 'Premium', phase: 1, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
 };
 
 describe('mcp.ts error/edge paths — read-mostly fixture', () => {
@@ -830,6 +837,19 @@ describe('mcp.ts error/edge paths — read-mostly fixture', () => {
       const r = await c.callJson('get_feature_coverage', { phase: 'MVP' });
       expect(r.total).toBe(1);
       expect(r.features[0].id).toBe('F-100');
+    });
+
+    test('string phase argument matches YAML-numeric phase values', async () => {
+      // F-200 stores `phase: 1` (number); the tool argument is always a string.
+      const r = await c.callJson('get_feature_coverage', { phase: '1' });
+      expect(r.total).toBe(1);
+      expect(r.features[0].id).toBe('F-200');
+    });
+
+    test('tools/list advertises the schema phase enum, not V1/V2/Future', async () => {
+      const tools = await c.listToolDefs();
+      const tool = tools.find((t: any) => t.name === 'get_feature_coverage');
+      expect(tool.inputSchema.properties.phase.enum).toEqual(['MVP', '0', '1', '2', '3', '4', '5']);
     });
 
     test('tier filter narrows results', async () => {

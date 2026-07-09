@@ -22,11 +22,11 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: 'npm'
           registry-url: 'https://registry.npmjs.org'
 
-      # Node 22 bundles npm 10.x; npm's OIDC Trusted Publishing needs a newer CLI.
+      # Node 24 bundles npm 11.x, but pin npm@11 explicitly: npm@12 is broken for this stack.
       - name: Update npm
         run: npm install -g npm@11
 
