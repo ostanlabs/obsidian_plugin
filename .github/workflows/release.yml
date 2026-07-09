@@ -57,3 +57,40 @@ jobs:
             manifest.json
             styles.css
 
+  # npm publish runs as a chained job rather than a release-triggered workflow:
+  # releases created with the default GITHUB_TOKEN do not emit events that
+  # trigger other workflows (GitHub recursion prevention), which is why the old
+  # publish.yml never fired. The quality gate already ran in `release` on this
+  # same commit, so this job only rebuilds the publish artifacts.
+  publish-npm:
+    needs: release
+    runs-on: ubuntu-latest
+    environment: prod  # npm Trusted Publishing (configure on npmjs.com: this repo, release.yml, prod)
+    permissions:
+      contents: read
+      id-token: write  # OIDC for npm provenance / Trusted Publishing
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+          registry-url: "https://registry.npmjs.org"
+
+      # Node 22 bundles npm 10.x; npm's OIDC Trusted Publishing needs a newer CLI.
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Build publish artifacts
+        run: npm run build
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+
