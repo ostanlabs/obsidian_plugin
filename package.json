@@ -1,6 +1,6 @@
 {
   "name": "@ostanlabs/canvas-project-manager",
-  "version": "1.8.98",
+  "version": "1.8.99",
   "description": "Visual project management on Obsidian Canvas - manage milestones, stories, tasks, decisions, documents, and features with dependencies and Notion sync",
   "main": "main.js",
   "files": [
@@ -12,13 +12,14 @@
     "settings.ts",
     "notion/",
     "ui/",
-    "util/"
+    "util/",
+    "bin/"
   ],
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "npm run build:plugin && npm run build:mcp",
     "build:plugin": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "build:mcp": "esbuild mcp.ts --bundle --outfile=bin/mcp-server.mjs --platform=node --format=esm --loader:.html=text --external:@modelcontextprotocol/sdk --external:@ostanlabs/md-retriever --external:onnxruntime-node --external:@xenova/transformers --external:better-sqlite3 --external:faiss-node --external:yaml --external:chokidar",
+    "build:mcp": "esbuild mcp.ts --bundle --outfile=bin/mcp-server.mjs --platform=node --format=esm --loader:.html=text --external:@modelcontextprotocol/sdk --external:@ostanlabs/md-retriever --external:onnxruntime-node --external:@xenova/transformers --external:better-sqlite3 --external:faiss-node --external:yaml --external:chokidar --banner:js='#!/usr/bin/env node'",
     "dev:mcp": "tsx watch mcp.ts",
     "typecheck": "tsc -noEmit -skipLibCheck",
     "version": "node version-bump.mjs && git add manifest.json versions.json",
@@ -77,5 +78,8 @@
     "@notionhq/client": "^2.2.15",
     "@ostanlabs/md-retriever": "^0.2.0",
     "yaml": "^2.3.4"
+  },
+  "bin": {
+    "obsidian-mcp": "bin/mcp-server.mjs"
   }
 }
