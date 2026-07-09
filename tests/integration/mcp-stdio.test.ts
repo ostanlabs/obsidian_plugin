@@ -1201,6 +1201,36 @@ describe('mcp.ts validate_project fan-out advisories — disposable fixture', ()
     // AT the limit is fine: fixture DOC-001 documents exactly 1 feature → no advisory for it.
     expect((v.advisories as Array<{ entity: string }>).some(a => a.entity.startsWith('DOC-001'))).toBe(false);
   });
+
+  test('feature documented_by fan-in beyond limit yields FEATURE_DOC_FANOUT (advisory, never a violation); exactly at the limit stays silent', async () => {
+    const mk = async (type: string, title: string, properties: Record<string, unknown>) => {
+      const res = await c.call('create_entity', { type, title, properties });
+      expect(res.isError).toBeFalsy();
+      return res.text!.match(/([A-Z]+-\d+)/)![1];
+    };
+    // 3 documents (> limit 2) → advisory; exactly 2 → silent.
+    const over = await mk('feature', 'Overdocumented Feature', {
+      user_story: 'u', tier: 'OSS', phase: 'MVP',
+      relationships: { documented_by: ['DOC-001', 'DOC-911', 'DOC-912'] },
+    });
+    const atLimit = await mk('feature', 'Welldocumented Feature', {
+      user_story: 'u', tier: 'OSS', phase: 'MVP',
+      relationships: { documented_by: ['DOC-001', 'DOC-911'] },
+    });
+
+    const v = await c.callJson('validate_project');
+    // Doc fan-in never lands in violations.
+    expect((v.violations as Array<{ rule: string }>).every(x => !x.rule.includes('FANOUT'))).toBe(true);
+    const fanIn = (v.advisories as Array<{ rule: string; entity: string; message: string; suggestion: string }>)
+      .filter(a => a.rule === 'FEATURE_DOC_FANOUT');
+    const hit = fanIn.find(a => a.entity.startsWith(`${over} `));
+    expect(hit).toBeDefined();
+    expect(hit!.message).toMatch(/feature documented_by 3 documents \(limit 2\)/);
+    expect(hit!.suggestion).toContain('Unify the documentation');
+    expect(hit!.suggestion.length).toBeGreaterThan(20);
+    // Exactly at the limit → no advisory for that feature.
+    expect(fanIn.some(a => a.entity.startsWith(`${atLimit} `))).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1416,3 +1446,256 @@ describe('mcp.ts write-path regressions (bugs 1-4) — disposable fixture', () =
     expect(e.fields.goal).toBe('updated goal');
   });
 });
+
+// ---------------------------------------------------------------------------
+// PRODUCTION-SHAKEDOWN WRITE-PATH BUGS (found 2026-07 while editing production):
+//   BUG A — update paths ignored `updates.body` AND destroyed the existing
+//           markdown body (serializer emits frontmatter only; nothing was
+//           re-attached on write)
+//   BUG B — invalid-for-type passthrough fields could not be updated or
+//           CLEARED (flat-key router dropped unknown keys at top level)
+//   BUG C — reconcile refilled forward links from STALE reverses, undoing
+//           explicit forward edits (fixed via forward-authoritative recency)
+// Own disposable vault + server; tests are order-dependent (BUG C's reconcile
+// runs after the A/B mutations and accounts for them).
+// ---------------------------------------------------------------------------
+const SHAKE_FIXTURE: Record<string, string> = {
+  // BUG A subjects (bodies matter here)
+  'milestones/M-801.md': ent({ id: 'M-801', type: 'milestone', title: 'Body milestone', status: 'In Progress', workstream: 'engineering', priority: 'High', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }, '# Objective\noriginal body line'),
+  'tasks/T-801.md': ent({ id: 'T-801', type: 'task', title: 'Batch body task', status: 'Not Started', workstream: 'engineering', goal: 'g', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }, '# Goal\nbatch original body'),
+  // BUG B subject — implemented_by / notion_page_id are NOT schema-valid for
+  // documents, so the parser parks them in entity.passthrough.
+  'documents/DOC-801.md': ent({ id: 'DOC-801', type: 'document', title: 'Passthrough doc', status: 'Draft', workstream: 'engineering', doc_type: 'spec', implemented_by: ['S-999'], notion_page_id: 'abc123', created_at: '2026-01-02T00:00:00Z', updated_at: '2026-01-02T00:00:00Z', archived: false }),
+  // BUG C shakedown trio: decision affects BOTH docs; both docs carry the reverse.
+  'decisions/DEC-801.md': ent({ id: 'DEC-801', type: 'decision', title: 'Shakedown decision', status: 'Decided', workstream: 'engineering', created_at: '2026-01-04T00:00:00Z', updated_at: '2026-01-04T00:00:00Z', archived: false, affects: ['DOC-802', 'DOC-803'] }),
+  'documents/DOC-802.md': ent({ id: 'DOC-802', type: 'document', title: 'Kept doc', status: 'Draft', workstream: 'engineering', doc_type: 'spec', decided_by: ['DEC-801'], created_at: '2026-01-05T00:00:00Z', updated_at: '2026-01-05T00:00:00Z', archived: false }),
+  'documents/DOC-803.md': ent({ id: 'DOC-803', type: 'document', title: 'Detached doc', status: 'Draft', workstream: 'engineering', doc_type: 'spec', decided_by: ['DEC-801'], created_at: '2026-01-05T00:00:00Z', updated_at: '2026-01-05T00:00:00Z', archived: false }),
+  // BUG C legit reverse-only authoring: the reverse-side file is NEWER.
+  'decisions/DEC-802.md': ent({ id: 'DEC-802', type: 'decision', title: 'Reverse-authored decision', status: 'Decided', workstream: 'engineering', created_at: '2026-01-04T00:00:00Z', updated_at: '2026-01-04T00:00:00Z', archived: false }),
+  'documents/DOC-804.md': ent({ id: 'DOC-804', type: 'document', title: 'Reverse-author doc', status: 'Draft', workstream: 'engineering', doc_type: 'spec', decided_by: ['DEC-802'], created_at: '2026-02-01T00:00:00Z', updated_at: '2026-02-01T00:00:00Z', archived: false }),
+  // BUG C tie (equal updated_at) → legacy fill behavior.
+  'decisions/DEC-803.md': ent({ id: 'DEC-803', type: 'decision', title: 'Tie decision', status: 'Decided', workstream: 'engineering', created_at: '2026-03-01T00:00:00Z', updated_at: '2026-03-01T00:00:00Z', archived: false }),
+  'documents/DOC-805.md': ent({ id: 'DOC-805', type: 'document', title: 'Tie doc', status: 'Draft', workstream: 'engineering', doc_type: 'spec', decided_by: ['DEC-803'], created_at: '2026-03-01T00:00:00Z', updated_at: '2026-03-01T00:00:00Z', archived: false }),
+};
+
+describe('mcp.ts production-shakedown bugs A/B/C — disposable fixture', () => {
+  let vault: string;
+  let c: McpClient;
+
+  const bodyOf = (rel: string): string => extractBodyForTest(fs.readFileSync(path.join(vault, rel), 'utf-8'));
+
+  beforeAll(async () => {
+    vault = makeVault(SHAKE_FIXTURE);
+    c = new McpClient(vault);
+    await c.start();
+  }, 120000);
+
+  afterAll(async () => {
+    if (c) await c.stop();
+    if (vault) fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  // ----------------------------------------------------------------- BUG A
+  test('BUG A: update_entity with a string `body` replaces the markdown body on disk', async () => {
+    const r = await c.call('update_entity', { id: 'M-801', updates: { body: '# Rewritten\nnew body: with a colon kept' } });
+    expect(r.isError).toBeFalsy();
+    const raw = fs.readFileSync(path.join(vault, 'milestones/M-801.md'), 'utf-8');
+    expect(raw).toContain('# Rewritten');
+    expect(raw).toContain('new body: with a colon kept'); // body is NOT colon-sanitized
+    expect(raw).not.toContain('original body line');
+    // Frontmatter untouched by a body-only update; body never leaks into it.
+    const e = await c.callJson('get_entity', { id: 'M-801' });
+    expect(e.title).toBe('Body milestone');
+    expect(e.status).toBe('In Progress');
+    expect(e.fields.body).toBeUndefined();
+    expect(raw).not.toMatch(/^body:/m);
+  });
+
+  test('BUG A: body + frontmatter update in one call does both', async () => {
+    const r = await c.call('update_entity', { id: 'M-801', updates: { status: 'Blocked', body: '# Combined\nboth updated' } });
+    expect(r.isError).toBeFalsy();
+    const e = await c.callJson('get_entity', { id: 'M-801' });
+    expect(e.status).toBe('Blocked');
+    const raw = fs.readFileSync(path.join(vault, 'milestones/M-801.md'), 'utf-8');
+    expect(raw).toContain('# Combined');
+    expect(raw).not.toContain('# Rewritten');
+  });
+
+  test('BUG A: omitting body leaves the existing body untouched (was destroyed entirely)', async () => {
+    const r = await c.call('update_entity', { id: 'M-801', updates: { status: 'In Progress' } });
+    expect(r.isError).toBeFalsy();
+    const e = await c.callJson('get_entity', { id: 'M-801' });
+    expect(e.status).toBe('In Progress');
+    // The body written by the previous test survived the frontmatter-only update.
+    expect(bodyOf('milestones/M-801.md')).toContain('# Combined');
+    expect(bodyOf('milestones/M-801.md')).toContain('both updated');
+    // Relationship/field keys never leak into the body.
+    expect(bodyOf('milestones/M-801.md')).not.toMatch(/status:|priority:/);
+  });
+
+  test('BUG A: entities batch update supports body (dry-run previews it, write persists it)', async () => {
+    const dry = await c.callJson('entities', {
+      action: 'batch',
+      options: { dry_run: true },
+      ops: [{ client_id: 'sa-dry', op: 'update', id: 'T-801', payload: { goal: 'updated goal', body: '# Batch Body\nreplaced' } }],
+    });
+    const ch = dry.results[0].changes.find((x: any) => x.field === 'body');
+    expect(ch).toBeDefined();
+    expect(String(ch.before)).toContain('batch original body'); // real current body, not undefined
+    expect(String(ch.after)).toContain('# Batch Body');
+    // Dry run wrote nothing.
+    expect(bodyOf('tasks/T-801.md')).toContain('batch original body');
+
+    const wet = await c.callJson('entities', {
+      action: 'batch',
+      ops: [{ client_id: 'sa-wet', op: 'update', id: 'T-801', payload: { goal: 'updated goal', body: '# Batch Body\nreplaced' } }],
+    });
+    expect(wet.results[0].success).toBe(true);
+    const raw = fs.readFileSync(path.join(vault, 'tasks/T-801.md'), 'utf-8');
+    expect(raw).toContain('# Batch Body');
+    expect(raw).not.toContain('batch original body');
+    expect(raw).not.toMatch(/^body:/m);
+    const e = await c.callJson('get_entity', { id: 'T-801' });
+    expect(e.fields.goal).toBe('updated goal');
+  });
+
+  // ----------------------------------------------------------------- BUG B
+  test('BUG B: clearing an invalid-for-type passthrough field with [] removes it from disk', async () => {
+    // Sanity: the field really is passthrough (invalid for documents).
+    const before = fs.readFileSync(path.join(vault, 'documents/DOC-801.md'), 'utf-8');
+    expect(before).toMatch(/implemented_by:/);
+
+    const r = await c.call('update_entity', { id: 'DOC-801', updates: { implemented_by: [] } });
+    expect(r.isError).toBeFalsy();
+    const raw = fs.readFileSync(path.join(vault, 'documents/DOC-801.md'), 'utf-8');
+    expect(raw).not.toMatch(/implemented_by/);
+    expect(raw).not.toContain('S-999');
+    const e = await c.callJson('get_entity', { id: 'DOC-801' });
+    expect(e.passthrough?.implemented_by).toBeUndefined();
+  });
+
+  test('BUG B: setting a passthrough key to a value updates it; null deletes it', async () => {
+    const r = await c.call('update_entity', { id: 'DOC-801', updates: { notion_page_id: 'xyz789' } });
+    expect(r.isError).toBeFalsy();
+    let raw = fs.readFileSync(path.join(vault, 'documents/DOC-801.md'), 'utf-8');
+    expect(raw).toMatch(/notion_page_id: xyz789/);
+
+    const r2 = await c.call('update_entity', { id: 'DOC-801', updates: { notion_page_id: null } });
+    expect(r2.isError).toBeFalsy();
+    raw = fs.readFileSync(path.join(vault, 'documents/DOC-801.md'), 'utf-8');
+    expect(raw).not.toMatch(/notion_page_id/);
+  });
+
+  test('BUG B: entities batch dry-run previews a passthrough clear as a change', async () => {
+    // notion_page_id is gone; seed a fresh passthrough key via direct file edit
+    // is unnecessary — use DOC-802 which never had one and instead preview the
+    // clear on a still-present passthrough field of a fresh fixture doc.
+    fs.writeFileSync(path.join(vault, 'documents/DOC-806.md'),
+      ent({ id: 'DOC-806', type: 'document', title: 'Preview doc', status: 'Draft', workstream: 'engineering', doc_type: 'spec', implemented_by: ['S-998'], created_at: '2026-01-02T00:00:00Z', updated_at: '2026-01-02T00:00:00Z', archived: false }), 'utf-8');
+    const dry = await c.callJson('entities', {
+      action: 'batch',
+      options: { dry_run: true },
+      ops: [{ client_id: 'sb-dry', op: 'update', id: 'DOC-806', payload: { implemented_by: [] } }],
+    });
+    const ch = dry.results[0].changes.find((x: any) => x.field === 'implemented_by');
+    expect(ch).toBeDefined();
+    expect(ch.before).toEqual(['S-998']); // read from the passthrough slot
+    expect(ch.after).toEqual([]);
+    // And the write path clears it.
+    const wet = await c.callJson('entities', {
+      action: 'batch',
+      ops: [{ client_id: 'sb-wet', op: 'update', id: 'DOC-806', payload: { implemented_by: [] } }],
+    });
+    expect(wet.results[0].success).toBe(true);
+    expect(fs.readFileSync(path.join(vault, 'documents/DOC-806.md'), 'utf-8')).not.toMatch(/implemented_by/);
+  });
+
+  // ----------------------------------------------------------------- BUG C
+  test('BUG C: reconcile does NOT resurrect an explicitly removed forward link and prunes the stale reverse', async () => {
+    // The shakedown flow: explicitly remove DOC-803 from the decision's affects
+    // (update_entity stamps DEC-801 with a fresh updated_at)…
+    const up = await c.call('update_entity', { id: 'DEC-801', updates: { affects: ['DOC-802'] } });
+    expect(up.isError).toBeFalsy();
+
+    // …then reconcile. Dry-run: no re-ADD of the forward, stale reverse flagged.
+    const dry = await c.callJson('reconcile_relationships', { dry_run: true });
+    const all = dry.changes.join('\n');
+    expect(all).not.toContain('DEC-801: Add DOC-803 to affects');
+    expect(all).toMatch(/DOC-803: Stale decided_by entry DEC-801 .*- removing/);
+    // Dry-run wrote nothing.
+    let doc803 = await c.callJson('get_entity', { id: 'DOC-803' });
+    expect(doc803.relationships.decided_by).toEqual(['DEC-801']);
+
+    // Write mode: forward stays as edited, stale reverse pruned on disk.
+    const wet = await c.callJson('reconcile_relationships', { dry_run: false });
+    expect(wet.dry_run).toBe(false);
+    const dec = await c.callJson('get_entity', { id: 'DEC-801' });
+    expect(dec.relationships.affects).toEqual(['DOC-802']);
+    doc803 = await c.callJson('get_entity', { id: 'DOC-803' });
+    expect(doc803.relationships.decided_by ?? []).toEqual([]);
+    // The untouched consistent pair survived.
+    const doc802 = await c.callJson('get_entity', { id: 'DOC-802' });
+    expect(doc802.relationships.decided_by).toEqual(['DEC-801']);
+    // And the pruned file kept its markdown body (BUG A in reconcile writes).
+    expect(bodyOf('documents/DOC-803.md')).toContain('# Body');
+  });
+
+  test('BUG C: legit reverse-only authoring still fills the forward (reverse newer, and on a timestamp tie)', async () => {
+    // The write-mode reconcile above already processed these pairs.
+    // DOC-804 (2026-02-01) is NEWER than DEC-802 (2026-01-04) → fill.
+    const dec802 = await c.callJson('get_entity', { id: 'DEC-802' });
+    expect(dec802.relationships.affects).toEqual(['DOC-804']);
+    // Equal stamps (DEC-803 == DOC-805) → legacy fill behavior preserved.
+    const dec803 = await c.callJson('get_entity', { id: 'DEC-803' });
+    expect(dec803.relationships.affects).toEqual(['DOC-805']);
+    // Fixpoint: nothing left to fix.
+    const again = await c.callJson('reconcile_relationships', { dry_run: true });
+    expect(again.changes_count).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PIN D — id-allocator archived-id reissue regression. Historical bug: the
+// index's archive scan was non-recursive, so ids living only on nested
+// archive/<type>/… files were invisible and create_entity REISSUED them.
+// scanIndex now walks archive/ recursively; this pins it end-to-end.
+// ---------------------------------------------------------------------------
+const ARCHIVE_ID_FIXTURE: Record<string, string> = {
+  'tasks/T-010.md': ent({ id: 'T-010', type: 'task', title: 'Live low id', status: 'Not Started', workstream: 'engineering', goal: 'g', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+  // The type's MAX id lives ONLY on a nested archive file (type/quarter layout).
+  'archive/tasks/2026-Q1/T-100.md': ent({ id: 'T-100', type: 'task', title: 'Archived high id', status: 'Completed', workstream: 'engineering', goal: 'done', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: true }),
+};
+
+describe('mcp.ts id-allocator archived-id regression pin — disposable fixture', () => {
+  let vault: string;
+  let c: McpClient;
+
+  beforeAll(async () => {
+    vault = makeVault(ARCHIVE_ID_FIXTURE);
+    c = new McpClient(vault);
+    await c.start();
+  }, 120000);
+
+  afterAll(async () => {
+    if (c) await c.stop();
+    if (vault) fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test('PIN D: create_entity never reissues an id that exists only under nested archive/', async () => {
+    const r = await c.call('create_entity', { type: 'task', title: 'Allocator regression task', properties: { goal: 'g' } });
+    expect(r.isError).toBeFalsy();
+    const m = r.text!.match(/Created task (T-(\d+))/);
+    expect(m).toBeTruthy();
+    // Higher than the ARCHIVED max (T-100), not live-max+1 (T-011).
+    expect(Number(m![2])).toBe(101);
+    // The archived entity itself is reachable through the recursive scan.
+    const archived = await c.callJson('get_entity', { id: 'T-100' });
+    expect(archived.archived).toBe(true);
+  });
+});
+
+/** Test-local mirror of mcp.ts extractBody (everything after the frontmatter). */
+function extractBodyForTest(content: string): string {
+  const m = content.match(/^---\n[\s\S]*?\n---\n?([\s\S]*)$/);
+  return m ? m[1] : '';
+}

@@ -112,6 +112,51 @@ function splitFlatRelationshipKeys(
   return { relationships, rest };
 }
 
+// ---------------------------------------------------------------------------
+// Markdown-body plumbing (BUG A, 2026-07 shakedown): the schema-driven
+// serializer emits FRONTMATTER ONLY, and every rewrite path wrote its output
+// verbatim — so rewriting an existing file silently destroyed its markdown
+// body, and an explicit `updates.body` was silently ignored. Every path that
+// rewrites an existing entity file now extracts the original body and
+// re-attaches it (or an explicit string replacement) after the frontmatter.
+// ---------------------------------------------------------------------------
+
+/** Everything after the frontmatter block (leading newline preserved verbatim). */
+function extractBody(content: string): string {
+  const m = content.match(/^---\n[\s\S]*?\n---\n?([\s\S]*)$/);
+  return m ? m[1] : '';
+}
+
+/**
+ * Normalize an explicit body replacement: blank-line separated from the
+ * frontmatter and newline-terminated. '' clears the body entirely.
+ */
+function normalizeBody(body: string): string {
+  if (body === '') return '';
+  return `\n${body.replace(/^\n+/, '').replace(/\n*$/, '')}\n`;
+}
+
+/** BUG B: explicit "clear this key" values for passthrough updates. */
+function isClearValue(v: unknown): boolean {
+  return v === null || (Array.isArray(v) && v.length === 0);
+}
+
+/**
+ * The EXPLICIT frontmatter `updated_at` of a raw file, in epoch ms — or null
+ * when the key is absent or unparseable. The parser defaults a missing
+ * updated_at to `now`, which must NOT feed the reconcile staleness rule
+ * (two files scanned ms apart would get arbitrary orderings), so this reads
+ * the raw frontmatter instead of the parsed entity.
+ */
+function explicitUpdatedAtMs(content: string): number | null {
+  const fm = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!fm) return null;
+  const m = fm[1].match(/^updated_at:\s*["']?([^"'\n]+?)["']?\s*$/m);
+  if (!m) return null;
+  const t = Date.parse(m[1]);
+  return Number.isFinite(t) ? t : null;
+}
+
 const config = {
   vaultPath: VAULT_PATH,
   entitiesFolder: '', // Scan top-level type folders (tasks/, stories/, etc.)
@@ -355,7 +400,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           updates: {
             type: 'object',
-            description: 'Fields to update (title, status, workstream, relationships, etc.)',
+            description: 'Fields to update (title, status, workstream, relationships, etc.). A string "body" key replaces the markdown body below the frontmatter ("" clears it). Setting a passthrough-only key (a field not valid for this type) to null or [] deletes it from the file.',
           },
         },
         required: ['id', 'updates'],
@@ -452,6 +497,15 @@ depends_on↔blocks, implements↔implemented_by, documents↔documented_by,
 affects↔decided_by, supersedes↔superseded_by, previous_version↔next_version):
 missing inverse edges are filled in BOTH directions, and entries pointing at
 entities that no longer exist are pruned.
+
+STALENESS RULE (forward side is authoritative when newer): a reverse-only edge
+(e.g. a document's decided_by with no matching affects on the decision) fills
+the missing FORWARD only when the reverse-side file's frontmatter updated_at is
+newer or equal — or when either timestamp is absent (reverse-only-authored
+vaults keep working). If the forward-side file is STRICTLY newer, its missing
+edge is treated as an explicit removal and the stale reverse entry is pruned
+instead, so editing a forward list then reconciling never resurrects removed
+links.
 
 EXAMPLES:
 - "Check for broken relationships" → dry_run: true
@@ -568,7 +622,8 @@ USE FOR: Finding missing relationships, ensuring entities are properly connected
 Returns hard "violations" (invalid relationships/targets, orphans) plus soft
 "advisories" — fan-out guidelines that are NOT enforced on writes: a document
 should document ≤2 features, a decision should affect ≤2 documents, a feature
-should have ≤3 implementers. Each advisory carries a concrete reorganization
+should have ≤3 implementers, a feature should be documented by ≤2 documents.
+Each advisory carries a concrete reorganization
 suggestion; reconcile them gradually rather than treating them as errors.
 
 EXAMPLES:
@@ -1009,9 +1064,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const content = await adapter.readFile(path);
         const entity = parser.parse(content, path);
 
+        // BUG A: `updates.body` addresses the markdown BODY, not frontmatter.
+        // Pull it out BEFORE sanitization (the YAML sanitizer would mangle
+        // colons in prose) and before routing (so it can never leak into
+        // frontmatter-side structures). Only a string replaces the body.
+        const { body: bodyUpdate, ...frontmatterUpdates } = updates as
+          Record<string, unknown> & { body?: unknown };
+
         // YAML SAFETY: Sanitize string values in updates
         const sanitizedUpdates: Record<string, unknown> = {};
-        for (const [key, value] of Object.entries(updates)) {
+        for (const [key, value] of Object.entries(frontmatterUpdates)) {
           if (typeof value === 'string') {
             // Replace colons and other unsafe YAML chars
             sanitizedUpdates[key] = value.replace(/:/g, ' -').replace(/\s{2,}/g, ' ').trim();
@@ -1050,6 +1112,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const topLevel: Record<string, unknown> = {};
         const relPatch: Record<string, unknown> = {};
         const fieldPatch: Record<string, unknown> = {};
+        const passthroughPatch: Record<string, unknown> = {};
         for (const [key, value] of Object.entries(sanitizedUpdates)) {
           if ((key === 'relationships' || key === 'fields') && value && typeof value === 'object' && !Array.isArray(value)) {
             for (const k of Object.keys(value)) touched.add(k);
@@ -1059,6 +1122,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             touched.add(key);
           } else if (customNames.has(key)) {
             fieldPatch[key] = value;
+            touched.add(key);
+          } else if (entity.passthrough && key in entity.passthrough) {
+            // BUG B: keys that only exist as PASSTHROUGH (e.g. a relationship
+            // field that is invalid for this type, left over from a schema
+            // change) were routed to topLevel where the schema-driven
+            // serializer dropped the assignment — the stale value was then
+            // re-emitted from passthrough, so the field could never be
+            // updated OR cleared. Route them to passthrough; null / empty
+            // array means DELETE the key (the only sane "clear" semantics).
+            passthroughPatch[key] = value;
             touched.add(key);
           } else {
             topLevel[key] = value;
@@ -1075,6 +1148,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         if (Object.keys(fieldPatch).length > 0) {
           entity.fields = { ...(entity.fields ?? {}), ...fieldPatch };
+        }
+        for (const [key, value] of Object.entries(passthroughPatch)) {
+          if (isClearValue(value)) delete entity.passthrough![key];
+          else entity.passthrough![key] = value;
         }
         entity.updated_at = new Date().toISOString();
 
@@ -1101,8 +1178,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           .filter(e => !blocking.includes(e))
           .map(e => `${e.field}: ${e.message}`);
 
-        // Serialize and write
-        const newContent = serializer.serialize(entity);
+        // Serialize and write, RE-ATTACHING the markdown body: replaced when
+        // the update carries a string `body`, otherwise preserved verbatim
+        // (BUG A — frontmatter-only writes destroyed it).
+        const body = typeof bodyUpdate === 'string' ? normalizeBody(bodyUpdate) : extractBody(content);
+        const newContent = serializer.serialize(entity) + body;
         await adapter.writeFile(path, newContent);
 
         return {
@@ -1435,13 +1515,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // applied in-memory in BOTH modes so dry-run reports exactly what write
         // mode persists; files are only written when !dry_run.
         const pending = new Map<string, RuntimeEntity>();
+        // id → original markdown body (re-attached on write; BUG A) and
+        // id → EXPLICIT frontmatter updated_at in ms (null when absent) for
+        // the forward-authoritative staleness rule (BUG C). Captured on first
+        // disk read; in-run mutations never change authorship stamps.
+        const bodies = new Map<string, string>();
+        const stamps = new Map<string, number | null>();
         const loadEntity = async (id: string): Promise<RuntimeEntity | null> => {
           const buffered = pending.get(id);
           if (buffered) return buffered;
           const p = index.getPathById(id);
           if (!p) return null;
           try {
-            return parser.parse(await adapter.readFile(p), p);
+            const raw = await adapter.readFile(p);
+            const parsed = parser.parse(raw, p);
+            bodies.set(id, extractBody(raw));
+            stamps.set(id, explicitUpdatedAtMs(raw));
+            return parsed;
           } catch {
             return null;
           }
@@ -1472,13 +1562,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
          * Reconcile one side of a pair on `entity`:
          *  - `field` is the side entity carries (pair.forward or pair.reverse),
          *  - `inverseField` the field expected on each target,
-         *  - `inverseCard` that field's cardinality.
+         *  - `inverseCard` that field's cardinality,
+         *  - `sideIsForward` whether `field` is the pair's FORWARD side.
+         *
+         * BUG C (2026-07 shakedown): the unconditional reverse→forward fill
+         * treated reverse-only edges as authored intent, so explicitly editing
+         * a forward list (e.g. removing DOC-X from a decision's affects) was
+         * UNDONE by the next reconcile, which re-added the forward from DOC-X's
+         * stale decided_by. Forward-authoritative staleness rule: fill the
+         * forward from a reverse only when the reverse-side file's EXPLICIT
+         * frontmatter updated_at is newer or equal — or when either stamp is
+         * absent (reverse-only-authored vaults without updated_at keep the
+         * legacy fill behavior). When the forward-side file is STRICTLY newer,
+         * its missing edge is an explicit removal → prune the stale reverse
+         * entry instead. Forward→reverse fills stay unconditional: a forward
+         * edge is authored intent by definition.
          */
         const reconcileSide = async (
           entity: RuntimeEntity,
           field: string,
           inverseField: string,
           inverseCard: 'one' | 'many',
+          sideIsForward: boolean,
         ): Promise<void> => {
           const val = entity.relationships?.[field];
           if (val === undefined || val === null) return;
@@ -1492,7 +1597,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               changes.push(danglingMsg(entity.id, field, targetId));
               continue;
             }
-            keep.push(targetId);
 
             // Fill the missing inverse edge — but only when the target's type
             // can CARRY the inverse field per the schema (the serializer would
@@ -1500,18 +1604,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             // a custom field, e.g. decision.decided_by). This deliberately
             // tolerates cross-pair targets like a task parented to a milestone,
             // matching the legacy children/blocks fill contract.
-            if (!relNamesFor(targetMeta.type).has(inverseField)) continue;
+            if (!relNamesFor(targetMeta.type).has(inverseField)) {
+              keep.push(targetId);
+              continue;
+            }
             const target = await loadEntity(targetId);
-            if (!target) continue;
+            if (!target) {
+              keep.push(targetId);
+              continue;
+            }
             target.relationships = target.relationships || {};
             const inverseVal = target.relationships[inverseField];
-            if (inverseCard === 'many') {
-              const inverseIds = asIds(inverseVal);
-              if (!inverseIds.includes(entity.id)) {
-                changes.push(`${target.id}: Add ${entity.id} to ${inverseField}`);
-                target.relationships[inverseField] = [...inverseIds, entity.id];
-                touch(target);
+            const inverseIds = asIds(inverseVal);
+            if (inverseIds.includes(entity.id)) {
+              keep.push(targetId); // consistent pair — nothing to do
+              continue;
+            }
+
+            // Inverse edge is missing. For a REVERSE side, apply the
+            // forward-authoritative staleness rule before filling.
+            if (!sideIsForward) {
+              const forwardStamp = stamps.get(targetId);
+              const reverseStamp = stamps.get(entity.id);
+              if (
+                typeof forwardStamp === 'number' &&
+                typeof reverseStamp === 'number' &&
+                forwardStamp > reverseStamp
+              ) {
+                changes.push(
+                  `${entity.id}: Stale ${field} entry ${targetId} (${targetId} was updated more recently and does not list ${entity.id} in ${inverseField}) - removing`,
+                );
+                continue; // dropped from keep → reverse entry pruned
               }
+            }
+
+            keep.push(targetId);
+            if (inverseCard === 'many') {
+              changes.push(`${target.id}: Add ${entity.id} to ${inverseField}`);
+              target.relationships[inverseField] = [...inverseIds, entity.id];
+              touch(target);
             } else if (inverseVal === undefined || inverseVal === null || inverseVal === '') {
               changes.push(`${target.id}: Add ${entity.id} to ${inverseField}`);
               target.relationships[inverseField] = entity.id;
@@ -1540,10 +1671,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           for (const rel of relationshipDefs) {
             for (const pair of rel.pairs) {
               if (pair.from === entity.type || pair.from === '*') {
-                await reconcileSide(entity, pair.forward, pair.reverse, rel.cardinality.reverse);
+                await reconcileSide(entity, pair.forward, pair.reverse, rel.cardinality.reverse, true);
               }
               if (pair.to === entity.type || pair.to === '*') {
-                await reconcileSide(entity, pair.reverse, pair.forward, rel.cardinality.forward);
+                await reconcileSide(entity, pair.reverse, pair.forward, rel.cardinality.forward, false);
               }
             }
           }
@@ -1552,7 +1683,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Write updates
         if (!dry_run && pending.size > 0) {
           for (const entity of pending.values()) {
-            const content = serializer.serialize(entity);
+            // Re-attach the file's original markdown body (BUG A: the
+            // frontmatter-only serializer output used to destroy it).
+            const content = serializer.serialize(entity) + (bodies.get(entity.id) ?? '');
             // Write back to the entity's existing file path; only fall back to a
             // generated <ID>_<title> path for entities not yet in the index.
             // Recomputing unconditionally forks a duplicate file whenever the
@@ -1882,6 +2015,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           document_documents: 2,   // a document should document at most 2 features
           decision_affects: 2,     // a decision should affect at most 2 documents
           feature_implemented_by: 3, // a feature should have at most 3 implementers
+          feature_documented_by: 2, // a feature should be documented by at most 2 documents
         };
         const advisories: Array<{entity: string; rule: string; message: string; suggestion: string}> = [];
 
@@ -1984,6 +2118,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
           }
 
+          // Advisory: feature documentation fan-in (documented_by → documents)
+          if (entity.type === 'feature') {
+            const targets = asList(relView['documented_by']);
+            if (targets.length > FANOUT_LIMITS.feature_documented_by) {
+              advisories.push({
+                entity: `${entity.id} (${entity.title})`,
+                rule: 'FEATURE_DOC_FANOUT',
+                message: `feature documented_by ${targets.length} documents (limit ${FANOUT_LIMITS.feature_documented_by}): ${targets.join(', ')}`,
+                suggestion: `Unify the documentation into at most ${FANOUT_LIMITS.feature_documented_by} documents: merge overlapping/partial specs into one current document, chain superseded versions via \`previous_version\` (a superseded document should drop its \`documents\` link to this feature), and keep only the documents this feature genuinely relies on (e.g. current spec + guide). Wide doc fan-in usually signals stale or duplicated specs rather than thorough coverage.`,
+              });
+            }
+          }
+
           // Advisory: feature implementer fan-out (implemented_by → stories/milestones)
           if (entity.type === 'feature') {
             const targets = asList(relView['implemented_by']);
@@ -2033,7 +2180,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           milestones = milestones.filter(m => m.id === milestone_id);
         }
 
-        const toArchive: RuntimeEntity[] = [];
+        // Each archive candidate carries its original markdown body so the
+        // archive copy keeps it (BUG A: frontmatter-only writes destroyed it).
+        const toArchive: Array<{ entity: RuntimeEntity; body: string }> = [];
         const stats = {
           milestones_processed: milestones.length,
           stories_archived: 0,
@@ -2052,9 +2201,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             if (child.status === 'Completed') {
               // Archiving re-serializes the entity, so load the full parsed form.
               const cp = index.getPathById(child.id);
-              const full = cp ? parser.parse(await adapter.readFile(cp), cp) : null;
-              if (!full) continue;
-              toArchive.push(full);
+              const raw = cp ? await adapter.readFile(cp) : null;
+              const full = raw && cp ? parser.parse(raw, cp) : null;
+              if (!full || !raw) continue;
+              toArchive.push({ entity: full, body: extractBody(raw) });
               if (child.type === 'story') stats.stories_archived++;
               if (child.type === 'task') stats.tasks_archived++;
             }
@@ -2062,9 +2212,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         if (!dry_run && toArchive.length > 0) {
-          for (const entity of toArchive) {
+          for (const { entity, body } of toArchive) {
             const updated = { ...entity, archived: true };
-            const content = serializer.serialize(updated);
+            const content = serializer.serialize(updated) + body;
 
             // Move to archive folder
             const archiveFolder = 'archive';
@@ -2557,13 +2707,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 const relNames = getRelationshipFieldNamesForType(entity.type);
                 const customNames = new Set(schema.getFields(entity.type).map(f => f.name));
                 const currentValue = (key: string): unknown =>
-                  key === 'relationships' || key === 'fields'
-                    ? (entity as unknown as Record<string, unknown>)[key]
-                    : relNames.has(key)
-                      ? entity.relationships?.[key]
-                      : customNames.has(key)
-                        ? entity.fields?.[key]
-                        : (entity as unknown as Record<string, unknown>)[key];
+                  key === 'body'
+                    ? extractBody(content)
+                    : key === 'relationships' || key === 'fields'
+                      ? (entity as unknown as Record<string, unknown>)[key]
+                      : relNames.has(key)
+                        ? entity.relationships?.[key]
+                        : customNames.has(key)
+                          ? entity.fields?.[key]
+                          : entity.passthrough && key in entity.passthrough
+                            ? entity.passthrough[key]
+                            : (entity as unknown as Record<string, unknown>)[key];
 
                 if (dryRun) {
                   // Preview against the value that will ACTUALLY be written
@@ -2589,8 +2743,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   const touched = new Set<string>();
 
                   // Apply updates (routed per the schema)
+                  // BUG A: a string `body` replaces the markdown body on write.
+                  let bodyUpdate: string | undefined;
                   for (const [key, value] of Object.entries(payload)) {
                     if (value === undefined) continue;
+                    if (key === 'body') {
+                      if (typeof value === 'string') bodyUpdate = value;
+                      continue; // never leaks into frontmatter structures
+                    }
                     if ((key === 'relationships' || key === 'fields') && value && typeof value === 'object' && !Array.isArray(value)) {
                       for (const k of Object.keys(value)) touched.add(k);
                       (entity as unknown as Record<string, unknown>)[key] = value;
@@ -2602,6 +2762,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                       touched.add(key);
                     } else if (customNames.has(key)) {
                       entity.fields = { ...(entity.fields ?? {}), [key]: value };
+                      touched.add(key);
+                    } else if (entity.passthrough && key in entity.passthrough) {
+                      // BUG B: update passthrough-only keys in place; null /
+                      // empty array DELETES the key (clear semantics).
+                      if (isClearValue(value)) delete entity.passthrough[key];
+                      else entity.passthrough[key] = value;
                       touched.add(key);
                     } else {
                       (entity as unknown as Record<string, unknown>)[key] = value;
@@ -2624,7 +2790,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     .filter(e => !blocking.includes(e))
                     .map(e => `${e.field}: ${e.message}`);
 
-                  const newContent = serializer.serialize(entity);
+                  // BUG A: re-attach (or replace) the markdown body.
+                  const newBody = bodyUpdate !== undefined ? normalizeBody(bodyUpdate) : extractBody(content);
+                  const newContent = serializer.serialize(entity) + newBody;
                   await adapter.writeFile(path, newContent);
 
                   results.push({
@@ -2662,7 +2830,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   entity.archived = true;
                   entity.updated_at = new Date().toISOString();
 
-                  const newContent = serializer.serialize(entity);
+                  // BUG A: preserve the markdown body across the archive rewrite.
+                  const newContent = serializer.serialize(entity) + extractBody(content);
                   await adapter.writeFile(path, newContent);
 
                   results.push({
