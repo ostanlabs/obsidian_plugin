@@ -71,29 +71,3 @@ export function notionBlocksToMarkdown(blocks: NotionBlock[]): string {
 	return lines.join("\n");
 }
 
-/**
- * Build markdown content from frontmatter and body.
- */
-export function buildMarkdownContent(frontmatter: ItemFrontmatter, body: string): string {
-	const yaml = [
-		"---",
-		`type: ${frontmatter.type}`,
-		`title: "${frontmatter.title.replace(/"/g, '\\"')}"`,
-		`effort: ${frontmatter.effort}`,
-		`id: ${frontmatter.id}`,
-		`status: "${frontmatter.status}"`,
-		`priority: ${frontmatter.priority}`,
-		`inProgress: ${frontmatter.inProgress ?? false}`,
-		frontmatter.time_estimate !== undefined ? `time_estimate: ${frontmatter.time_estimate}` : null,
-		frontmatter.depends_on?.length ? `depends_on: [${frontmatter.depends_on.map(d => `"${d}"`).join(", ")}]` : null,
-		`created_by_plugin: ${frontmatter.created_by_plugin ?? true}`,
-		`created_at: ${frontmatter.created_at ?? frontmatter.created ?? ''}`,
-		`updated_at: ${frontmatter.updated_at ?? frontmatter.updated ?? ''}`,
-		`canvas_source: "${frontmatter.canvas_source}"`,
-		`vault_path: "${frontmatter.vault_path}"`,
-		frontmatter.notion_page_id ? `notion_page_id: "${frontmatter.notion_page_id}"` : null,
-		"---",
-	].filter(line => line !== null).join("\n");
-
-	return `${yaml}\n\n${body}`;
-}

@@ -1,7 +1,7 @@
 /**
  * Integration: updateLocalFileFromNotion against the in-memory obsidian mock, with a
  * stubbed notionClient supplying page blocks. Exercises the Notion→local mapping path:
- * mapNotionStatusToLocal, notionBlocksToMarkdown, richTextToPlain, buildMarkdownContent,
+ * mapNotionStatusToLocal, notionBlocksToMarkdown, richTextToPlain,
  * plus the property→frontmatter projection and the vault.modify writeback. Also covers
  * the delegating pure wrappers directly.
  */

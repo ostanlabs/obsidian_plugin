@@ -2,7 +2,6 @@ import {
 	mapNotionStatusToLocal,
 	richTextToPlain,
 	notionBlocksToMarkdown,
-	buildMarkdownContent,
 } from "../util/notionMarkdown";
 import { ItemFrontmatter, NotionBlock, NotionRichText } from "../types";
 
@@ -105,101 +104,3 @@ describe("notionBlocksToMarkdown", () => {
 	});
 });
 
-describe("buildMarkdownContent", () => {
-	const base: ItemFrontmatter = {
-		type: "task",
-		title: "My Task",
-		effort: "engineering",
-		id: "T-001",
-		status: "In Progress",
-		priority: "High",
-		created_at: "2026-01-01",
-		updated_at: "2026-01-02",
-		canvas_source: "board.canvas",
-		vault_path: "tasks/T-001.md",
-	} as ItemFrontmatter;
-
-	it("assembles YAML frontmatter followed by the body", () => {
-		const out = buildMarkdownContent(base, "Body text");
-		expect(out).toBe(
-			[
-				"---",
-				"type: task",
-				'title: "My Task"',
-				"effort: engineering",
-				"id: T-001",
-				'status: "In Progress"',
-				"priority: High",
-				"inProgress: false",
-				"created_by_plugin: true",
-				"created_at: 2026-01-01",
-				"updated_at: 2026-01-02",
-				'canvas_source: "board.canvas"',
-				'vault_path: "tasks/T-001.md"',
-				"---",
-				"",
-				"Body text",
-			].join("\n"),
-		);
-	});
-
-	it("escapes double quotes in the title", () => {
-		const out = buildMarkdownContent({ ...base, title: 'A "quoted" title' }, "");
-		expect(out).toContain('title: "A \\"quoted\\" title"');
-	});
-
-	it("includes optional time_estimate, depends_on and notion_page_id when present", () => {
-		const out = buildMarkdownContent(
-			{
-				...base,
-				time_estimate: 4,
-				depends_on: ["T-000", "T-002"],
-				notion_page_id: "abc123",
-				inProgress: true,
-			},
-			"b",
-		);
-		expect(out).toContain("time_estimate: 4");
-		expect(out).toContain('depends_on: ["T-000", "T-002"]');
-		expect(out).toContain('notion_page_id: "abc123"');
-		expect(out).toContain("inProgress: true");
-	});
-
-	it("omits optional fields when absent and honors created/updated legacy fallbacks", () => {
-		const out = buildMarkdownContent(
-			{
-				...base,
-				created_at: undefined as unknown as string,
-				updated_at: undefined as unknown as string,
-				created: "legacy-created",
-				updated: "legacy-updated",
-				created_by_plugin: false,
-			},
-			"b",
-		);
-		expect(out).not.toContain("time_estimate:");
-		expect(out).not.toContain("depends_on:");
-		expect(out).not.toContain("notion_page_id:");
-		expect(out).toContain("created_at: legacy-created");
-		expect(out).toContain("updated_at: legacy-updated");
-		expect(out).toContain("created_by_plugin: false");
-	});
-
-	it("emits empty created_at/updated_at when neither new nor legacy fields exist", () => {
-		const out = buildMarkdownContent(
-			{
-				...base,
-				created_at: undefined as unknown as string,
-				updated_at: undefined as unknown as string,
-			},
-			"b",
-		);
-		expect(out).toContain("created_at: \n");
-		expect(out).toContain("updated_at: \n");
-	});
-
-	it("treats an empty depends_on array as absent", () => {
-		const out = buildMarkdownContent({ ...base, depends_on: [] }, "b");
-		expect(out).not.toContain("depends_on:");
-	});
-});

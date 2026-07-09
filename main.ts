@@ -71,7 +71,7 @@ import { normalizeWorkstream } from "./util/workstream";
 import { DEFAULT_SCHEMA } from "./src/entity-core/default-schema.js";
 import { normalizeStatus as normalizeStatusFn, normalizePriority as normalizePriorityFn } from "./util/normalize";
 import { buildCanvasMetadata as buildCanvasMetadataFn } from "./util/canvasMetadata";
-import { mapNotionStatusToLocal as mapNotionStatusToLocalFn, notionBlocksToMarkdown as notionBlocksToMarkdownFn, richTextToPlain as richTextToPlainFn, buildMarkdownContent as buildMarkdownContentFn } from "./util/notionMarkdown";
+import { mapNotionStatusToLocal as mapNotionStatusToLocalFn, notionBlocksToMarkdown as notionBlocksToMarkdownFn, richTextToPlain as richTextToPlainFn } from "./util/notionMarkdown";
 import { parseFutureFeatures as parseFutureFeaturesFn, mapCategoryToPhase as mapCategoryToPhaseFn, titleSimilarity as titleSimilarityFn } from "./util/featureParsing";
 import { generateUniqueFilename, isPluginCreatedNote, generateEntityFilename, stripQuotes, generateNodeIdFromEntityId } from "./util/fileNaming";
 import { addNodesToCanvasView, getCanvasView, hasInternalCanvasAPI, inspectCanvasAPI, addEdgesToCanvasView } from "./util/canvasView";
@@ -4449,11 +4449,6 @@ private registerCommands(): void {
 	/**
 	 * Build markdown content from frontmatter and body
 	 */
-	private buildMarkdownContent(frontmatter: ItemFrontmatter, body: string): string {
-		// Delegates to the pure util/notionMarkdown module (Phase 5 extraction).
-		return buildMarkdownContentFn(frontmatter, body);
-	}
-
 	/**
 	 * Move archived entity files to archive subfolders based on their type.
 	 * Archive structure: archive/milestones/, archive/stories/, archive/tasks/, etc.
