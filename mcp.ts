@@ -26,7 +26,6 @@ import { EntitySerializer } from './src/entity-core/serializer.js';
 import { EntityValidator } from './src/entity-core/validator.js';
 import { IDAllocator, getEntityTypeFromId } from './src/entity-core/id-allocator.js';
 import { PathResolver } from './src/entity-core/path-resolver.js';
-import { RelationshipGraph } from './src/entity-core/relationship-graph.js';
 import { SchemaMigrator } from './src/entity-core/migrator.js';
 import { ProjectIndex } from './src/entity-core/project-index.js';
 import type { RuntimeEntity, EntityType, EntityId, EntityMetadata } from './src/entity-core/types.js';
@@ -68,12 +67,76 @@ function applySchema(s: Schema): void {
   activeSchema = s;
 }
 
+// ---------------------------------------------------------------------------
+// Schema-driven write-path routing (BUG-1 fix: flat relationship keys were a
+// silent no-op — update assigned them outside entity.relationships and
+// create/batch destructuring parked them as inert custom fields; both were
+// then dropped by the schema-driven serializer).
+// ---------------------------------------------------------------------------
+
+/**
+ * Relationship field names an entity of `type` may carry per the ACTIVE schema:
+ * forward fields where the type is a pair's `from`, reverse fields where it is
+ * the `to`. Per-type CUSTOM FIELDS SHADOW same-named relationship fields (e.g.
+ * `decided_by` is a person string field on decisions, but the `affects` reverse
+ * on documents), so routing stays unambiguous per type.
+ */
+function getRelationshipFieldNamesForType(type: string): Set<string> {
+  const names = new Set<string>();
+  for (const rel of schema.getRelationshipsForType(type)) {
+    for (const pair of rel.pairs) {
+      if (pair.from === type || pair.from === '*') names.add(pair.forward);
+      if (pair.to === type || pair.to === '*') names.add(pair.reverse);
+    }
+  }
+  for (const f of schema.getFields(type)) names.delete(f.name);
+  return names;
+}
+
+/**
+ * Split a flat properties/payload object into relationship entries vs the rest,
+ * so flat relationship keys (e.g. `implements: [...]` at top level) are honored
+ * on create paths instead of silently becoming inert custom fields.
+ */
+function splitFlatRelationshipKeys(
+  type: string,
+  input: Record<string, unknown>,
+): { relationships: Record<string, unknown>; rest: Record<string, unknown> } {
+  const relNames = getRelationshipFieldNamesForType(type);
+  const relationships: Record<string, unknown> = {};
+  const rest: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (relNames.has(key)) relationships[key] = value;
+    else rest[key] = value;
+  }
+  return { relationships, rest };
+}
+
 const config = {
   vaultPath: VAULT_PATH,
   entitiesFolder: '', // Scan top-level type folders (tasks/, stories/, etc.)
   archiveFolder: 'archive',
   canvasFolder: 'projects',
 };
+
+/**
+ * Recursively list files under a folder (readDir-based; [] when the folder is
+ * missing). The archive folder nests by type/quarter (see archiveLayout and
+ * cleanup_completed, which writes archive/<type>/…), so the flat listFiles()
+ * scan silently missed archived entities in subfolders — BUG-3: they were then
+ * unreachable by id ("Entity not found") for reads and updates alike.
+ */
+async function listFilesRecursive(folder: string): Promise<string[]> {
+  const out: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await adapter.readDir(dir)) {
+      if (entry.isDirectory) await walk(entry.path);
+      else out.push(entry.path);
+    }
+  };
+  await walk(folder);
+  return out;
+}
 
 const pathResolver = new PathResolver(schema, config);
 
@@ -119,8 +182,11 @@ async function scanIndex(): Promise<void> {
   // Get all entity types from schema
   const entityTypes = ['task', 'story', 'milestone', 'decision', 'document', 'feature'];
 
-  // Build list of folders to scan: type folders + archive
-  const folders: string[] = [];
+  // Build list of folders to scan: archive + type folders.
+  // Archive is scanned FIRST so that when a stale duplicate of an entity exists
+  // in both a live type folder and archive/, the LIVE copy wins the id→path
+  // mapping (index.set is last-writer-wins per id).
+  const folders: string[] = [config.archiveFolder];
 
   // Add type-specific folders
   for (const type of entityTypes) {
@@ -136,13 +202,14 @@ async function scanIndex(): Promise<void> {
     folders.push(typeFolderName);
   }
 
-  // Add archive folder
-  folders.push(config.archiveFolder);
-
-  // Scan all folders
+  // Scan all folders. Type folders are flat; archive/ nests by type/quarter,
+  // so it is walked recursively — otherwise archived entities in subfolders
+  // are invisible to the index and unreachable by id (BUG 3).
   for (const folder of folders) {
     try {
-      const files = await adapter.listFiles(folder);
+      const files = folder === config.archiveFolder
+        ? await listFilesRecursive(folder)
+        : await adapter.listFiles(folder);
       for (const filePath of files) {
         if (!filePath.endsWith('.md')) continue;
         try {
@@ -366,7 +433,11 @@ EXAMPLES:
 
 USE FOR: Fixing broken relationships, ensuring consistency after manual edits.
 
-SYNCS: parent↔children, depends_on↔blocks, implements↔implemented_by
+SYNCS: every bidirectional pair in the active schema (parent↔children,
+depends_on↔blocks, implements↔implemented_by, documents↔documented_by,
+affects↔decided_by, supersedes↔superseded_by, previous_version↔next_version):
+missing inverse edges are filled in BOTH directions, and entries pointing at
+entities that no longer exist are pruned.
 
 EXAMPLES:
 - "Check for broken relationships" → dry_run: true
@@ -746,13 +817,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Separate base properties from custom fields and relationships
         const { workstream, status, relationships, ...customFields } = properties;
 
+        // BUG 1: flat relationship keys (e.g. `implements: [...]` given directly
+        // in properties) are routed into relationships instead of becoming inert
+        // custom fields. Explicit `relationships` entries win on conflict.
+        const split = splitFlatRelationshipKeys(type, customFields);
+        const mergedRelationships = {
+          ...split.relationships,
+          ...((relationships as Record<string, unknown>) ?? {}),
+        } as Record<string, EntityId | EntityId[]>;
+
         // YAML SAFETY: Sanitize title to prevent colon-related YAML errors
         // Replaces "Component 3: Config" → "Component 3 - Config"
         const sanitizedTitle = title.replace(/:/g, ' -').replace(/\s{2,}/g, ' ').trim();
 
         // YAML SAFETY: Sanitize string fields in customFields
         const sanitizedCustomFields: Record<string, unknown> = {};
-        for (const [key, value] of Object.entries(customFields)) {
+        for (const [key, value] of Object.entries(split.rest)) {
           if (typeof value === 'string') {
             sanitizedCustomFields[key] = value.replace(/:/g, ' -').replace(/\s{2,}/g, ' ').trim();
           } else {
@@ -772,7 +852,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           vault_path: '', // Will be set after write
           canvas_source: '',
           fields: sanitizedCustomFields, // Sanitized custom fields
-          relationships: (relationships as Record<string, EntityId | EntityId[]>) ?? {},
+          relationships: mergedRelationships,
         };
 
         // Validate
@@ -938,30 +1018,74 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Capture pre-existing validation errors so a partial update (e.g. setting
-        // only a relationship) is not blocked by unrelated required fields that
-        // were already missing on the stored entity.
+        // only a relationship) is not blocked by unrelated violations that were
+        // already present on the stored entity (BUG 4).
         const errorsBefore = validator.validate(entity);
         const beforeKeys = new Set(errorsBefore.map(e => `${e.code}:${e.field}`));
 
-        // Apply sanitized updates
-        Object.assign(entity, sanitizedUpdates);
+        // BUG 1: schema-driven routing — flat relationship keys go into
+        // entity.relationships and flat custom-field keys into entity.fields
+        // (Object.assign put both at top level, where the schema-driven
+        // serializer silently dropped them). Nested `relationships`/`fields`
+        // objects keep their existing whole-map-replace contract.
+        const relNames = getRelationshipFieldNamesForType(entity.type);
+        const customNames = new Set(schema.getFields(entity.type).map(f => f.name));
+        // BUG 4: track which fields this update actually touches (nested
+        // objects touch their inner keys) so only THOSE can block.
+        const touched = new Set<string>();
+        const topLevel: Record<string, unknown> = {};
+        const relPatch: Record<string, unknown> = {};
+        const fieldPatch: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(sanitizedUpdates)) {
+          if ((key === 'relationships' || key === 'fields') && value && typeof value === 'object' && !Array.isArray(value)) {
+            for (const k of Object.keys(value)) touched.add(k);
+            topLevel[key] = value;
+          } else if (relNames.has(key)) {
+            relPatch[key] = value;
+            touched.add(key);
+          } else if (customNames.has(key)) {
+            fieldPatch[key] = value;
+            touched.add(key);
+          } else {
+            topLevel[key] = value;
+            touched.add(key);
+          }
+        }
+
+        Object.assign(entity, topLevel);
+        if (Object.keys(relPatch).length > 0) {
+          entity.relationships = {
+            ...(entity.relationships ?? {}),
+            ...relPatch,
+          } as Record<string, EntityId | EntityId[]>;
+        }
+        if (Object.keys(fieldPatch).length > 0) {
+          entity.fields = { ...(entity.fields ?? {}), ...fieldPatch };
+        }
         entity.updated_at = new Date().toISOString();
 
-        // Validate — only fail on errors introduced by this update, not on
-        // pre-existing ones (so relationship recovery isn't blocked by legacy data).
-        const errors = validator.validate(entity)
-          .filter(e => !beforeKeys.has(`${e.code}:${e.field}`));
-        if (errors.length > 0) {
+        // BUG 4: validate the RESULTING entity, but only REJECT for problems in
+        // fields this update touched (or newly introduced elsewhere).
+        // Pre-existing violations in untouched fields become non-blocking
+        // warnings so legacy data can't hold unrelated repairs hostage.
+        const errorsAfter = validator.validate(entity);
+        const blocking = errorsAfter.filter(
+          e => touched.has(e.field) || !beforeKeys.has(`${e.code}:${e.field}`)
+        );
+        if (blocking.length > 0) {
           return {
             content: [
               {
                 type: 'text',
-                text: `Validation failed:\n${errors.map(e => `- ${e.field}: ${e.message}`).join('\n')}`,
+                text: `Validation failed:\n${blocking.map(e => `- ${e.field}: ${e.message}`).join('\n')}`,
               },
             ],
             isError: true,
           };
         }
+        const warnings = errorsAfter
+          .filter(e => !blocking.includes(e))
+          .map(e => `${e.field}: ${e.message}`);
 
         // Serialize and write
         const newContent = serializer.serialize(entity);
@@ -971,7 +1095,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: `Updated ${id}: ${entity.title}`,
+              text: warnings.length > 0
+                ? `Updated ${id}: ${entity.title}\n${JSON.stringify({ warnings }, null, 2)}`
+                : `Updated ${id}: ${entity.title}`,
             },
           ],
         };
@@ -1274,76 +1400,138 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const metas = index.getAll();
         const changes: string[] = [];
 
-        // Build relationship graph for reconciliation
-        const graph = new RelationshipGraph(schema, index);
-        // Single write buffer keyed by id: forward-drift fixes mutate the PARENT's
-        // `children` / the dependency's `blocks`, so those related entities must be
-        // loaded, mutated, and persisted too — not just the child/source `entity`.
-        // Keying by id lets multiple children accumulate onto one parent object and
-        // avoids a parent that is itself a `meta` being written twice with divergent
-        // state (last-writer-wins losing a mutation).
+        // BUG 2: the previous implementation hardcoded TWO pair handlers
+        // (parent→children fill, depends_on→blocks fill) so every other schema
+        // pair — implements↔implemented_by, documents↔documented_by,
+        // affects↔decided_by, supersedes↔superseded_by, versioning — was never
+        // reconciled (reported 0 changes with missing reverses on disk), and
+        // the "Dependency … removing" branch never actually removed the entry.
+        // Pairs are now DERIVED from the active schema, in both directions:
+        //   - forward edge present, reverse missing  → fill the reverse
+        //   - reverse edge present, forward missing  → fill the forward
+        //   - either side pointing at a non-existent entity → prune the entry
+        //     (keeps the legacy dangling-parent/-dependency contract)
+        //   - cardinality-'one' slots already occupied by a DIFFERENT id are
+        //     treated as conflicts and left untouched (never clobbered).
+        //
+        // Single write buffer keyed by id: fixes mutate RELATED entities (the
+        // parent's `children`, the feature's `implemented_by`, …), so those are
+        // loaded, mutated and persisted too. Keying by id lets multiple fixes
+        // accumulate onto one object (no last-writer-wins loss). Mutations are
+        // applied in-memory in BOTH modes so dry-run reports exactly what write
+        // mode persists; files are only written when !dry_run.
         const pending = new Map<string, RuntimeEntity>();
         const loadEntity = async (id: string): Promise<RuntimeEntity | null> => {
           const buffered = pending.get(id);
           if (buffered) return buffered;
           const p = index.getPathById(id);
-          return p ? parser.parse(await adapter.readFile(p), p) : null;
+          if (!p) return null;
+          try {
+            return parser.parse(await adapter.readFile(p), p);
+          } catch {
+            return null;
+          }
+        };
+        const touch = (e: RuntimeEntity) => pending.set(e.id, e);
+        const asIds = (v: unknown): string[] =>
+          Array.isArray(v)
+            ? (v.filter(x => typeof x === 'string') as string[])
+            : typeof v === 'string' && v !== '' ? [v] : [];
+        // Legacy message shapes (kept for contract/test stability).
+        const danglingMsg = (id: string, field: string, target: string): string =>
+          field === 'parent' ? `${id}: Parent ${target} not found - removing`
+          : field === 'depends_on' ? `${id}: Dependency ${target} not found - removing`
+          : `${id}: ${field} entry ${target} not found - removing`;
+
+        // type → relationship field names it may carry (memoized per call).
+        const relNamesByType = new Map<string, Set<string>>();
+        const relNamesFor = (type: string): Set<string> => {
+          let names = relNamesByType.get(type);
+          if (!names) {
+            names = getRelationshipFieldNamesForType(type);
+            relNamesByType.set(type, names);
+          }
+          return names;
         };
 
+        /**
+         * Reconcile one side of a pair on `entity`:
+         *  - `field` is the side entity carries (pair.forward or pair.reverse),
+         *  - `inverseField` the field expected on each target,
+         *  - `inverseCard` that field's cardinality.
+         */
+        const reconcileSide = async (
+          entity: RuntimeEntity,
+          field: string,
+          inverseField: string,
+          inverseCard: 'one' | 'many',
+        ): Promise<void> => {
+          const val = entity.relationships?.[field];
+          if (val === undefined || val === null) return;
+          const ids = asIds(val);
+          const keep: string[] = [];
+
+          for (const targetId of ids) {
+            const targetMeta = index.get(targetId);
+            if (!targetMeta) {
+              // Dangling entry: the other endpoint no longer exists → prune.
+              changes.push(danglingMsg(entity.id, field, targetId));
+              continue;
+            }
+            keep.push(targetId);
+
+            // Fill the missing inverse edge — but only when the target's type
+            // can CARRY the inverse field per the schema (the serializer would
+            // drop it otherwise; also skips types where the name is shadowed by
+            // a custom field, e.g. decision.decided_by). This deliberately
+            // tolerates cross-pair targets like a task parented to a milestone,
+            // matching the legacy children/blocks fill contract.
+            if (!relNamesFor(targetMeta.type).has(inverseField)) continue;
+            const target = await loadEntity(targetId);
+            if (!target) continue;
+            target.relationships = target.relationships || {};
+            const inverseVal = target.relationships[inverseField];
+            if (inverseCard === 'many') {
+              const inverseIds = asIds(inverseVal);
+              if (!inverseIds.includes(entity.id)) {
+                changes.push(`${target.id}: Add ${entity.id} to ${inverseField}`);
+                target.relationships[inverseField] = [...inverseIds, entity.id];
+                touch(target);
+              }
+            } else if (inverseVal === undefined || inverseVal === null || inverseVal === '') {
+              changes.push(`${target.id}: Add ${entity.id} to ${inverseField}`);
+              target.relationships[inverseField] = entity.id;
+              touch(target);
+            }
+            // else: 'one' slot occupied by another id → conflict, leave as-is.
+          }
+
+          if (keep.length !== ids.length) {
+            if (Array.isArray(val)) {
+              entity.relationships[field] = keep;
+            } else if (keep.length === 0) {
+              delete entity.relationships[field];
+            }
+            touch(entity);
+          }
+        };
+
+        const relationshipDefs = schema.getAllRelationships();
         for (const meta of metas) {
           // Reconciliation reads/writes relationship fields, which live only on
           // the full parsed entity (index metadata is flat).
           const entity = await loadEntity(meta.id);
-          if (!entity) continue;
-          let modified = false;
+          if (!entity || !entity.relationships) continue;
 
-          // Fix parent/children relationships
-          if (entity.relationships?.parent) {
-            const parentId = entity.relationships.parent as string;
-            const parent = await loadEntity(parentId);
-            if (parent) {
-              // Ensure parent has this entity in children (persist the addition).
-              const parentChildren = (parent.relationships?.children as string[]) || [];
-              if (!parentChildren.includes(entity.id)) {
-                changes.push(`${parent.id}: Add ${entity.id} to children`);
-                if (!dry_run) {
-                  parent.relationships = parent.relationships || {};
-                  parent.relationships.children = [...parentChildren, entity.id];
-                  pending.set(parent.id, parent);
-                }
+          for (const rel of relationshipDefs) {
+            for (const pair of rel.pairs) {
+              if (pair.from === entity.type || pair.from === '*') {
+                await reconcileSide(entity, pair.forward, pair.reverse, rel.cardinality.reverse);
               }
-            } else {
-              changes.push(`${entity.id}: Parent ${parentId} not found - removing`);
-              delete entity.relationships.parent;
-              modified = true;
-            }
-          }
-
-          // Fix depends_on/blocks relationships
-          if (entity.relationships?.depends_on) {
-            const deps = entity.relationships.depends_on as string[];
-            for (const depId of deps) {
-              const dep = await loadEntity(depId);
-              if (dep) {
-                // Ensure the dependency lists this entity in blocks (persist it).
-                const blocks = (dep.relationships?.blocks as string[]) || [];
-                if (!blocks.includes(entity.id)) {
-                  changes.push(`${dep.id}: Add ${entity.id} to blocks`);
-                  if (!dry_run) {
-                    dep.relationships = dep.relationships || {};
-                    dep.relationships.blocks = [...blocks, entity.id];
-                    pending.set(dep.id, dep);
-                  }
-                }
-              } else {
-                changes.push(`${entity.id}: Dependency ${depId} not found - removing`);
-                modified = true;
+              if (pair.to === entity.type || pair.to === '*') {
+                await reconcileSide(entity, pair.reverse, pair.forward, rel.cardinality.forward);
               }
             }
-          }
-
-          if (modified && !dry_run) {
-            pending.set(entity.id, entity);
           }
         }
 
@@ -2207,6 +2395,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             error?: string;
             entity?: RuntimeEntity;
             changes?: Array<{ field: string; before: unknown; after: unknown }>;
+            /** Pre-existing violations in fields this op did NOT touch (non-blocking). */
+            warnings?: string[];
           }> = [];
 
           let succeeded = 0;
@@ -2272,10 +2462,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
                   const { workstream, status, relationships, ...customFields } = resolvedPayload;
 
+                  // BUG 1: route flat relationship keys in the payload into
+                  // relationships (explicit `relationships` entries win).
+                  const split = splitFlatRelationshipKeys(type, customFields);
+                  const mergedRelationships = {
+                    ...split.relationships,
+                    ...((relationships as Record<string, unknown>) ?? {}),
+                  } as Record<string, EntityId | EntityId[]>;
+
                   // YAML sanitization
                   const sanitizedTitle = String(payload.title).replace(/:/g, ' -').replace(/\s{2,}/g, ' ').trim();
                   const sanitizedCustomFields: Record<string, unknown> = {};
-                  for (const [key, value] of Object.entries(customFields)) {
+                  for (const [key, value] of Object.entries(split.rest)) {
                     if (typeof value === 'string') {
                       sanitizedCustomFields[key] = value.replace(/:/g, ' -').replace(/\s{2,}/g, ' ').trim();
                     } else {
@@ -2295,7 +2493,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     vault_path: '',
                     canvas_source: '',
                     fields: sanitizedCustomFields,
-                    relationships: (relationships as Record<string, EntityId | EntityId[]>) ?? {},
+                    relationships: mergedRelationships,
                   };
 
                   const errors = validator.validate(entity);
@@ -2337,10 +2535,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
                 const changes: Array<{ field: string; before: unknown; after: unknown }> = [];
 
+                // BUG 1: schema-driven routing for flat payload keys — same
+                // rules as update_entity (relationship names → relationships,
+                // per-type custom fields → fields; nested objects replace).
+                const relNames = getRelationshipFieldNamesForType(entity.type);
+                const customNames = new Set(schema.getFields(entity.type).map(f => f.name));
+                const currentValue = (key: string): unknown =>
+                  key === 'relationships' || key === 'fields'
+                    ? (entity as unknown as Record<string, unknown>)[key]
+                    : relNames.has(key)
+                      ? entity.relationships?.[key]
+                      : customNames.has(key)
+                        ? entity.fields?.[key]
+                        : (entity as unknown as Record<string, unknown>)[key];
+
                 if (dryRun) {
-                  // Preview changes
+                  // Preview against the value that will ACTUALLY be written
+                  // (relationship/custom-field keys read their routed slot).
                   for (const [key, value] of Object.entries(payload)) {
-                    const before = (entity as unknown as Record<string, unknown>)[key];
+                    const before = currentValue(key);
                     if (JSON.stringify(before) !== JSON.stringify(value)) {
                       changes.push({ field: key, before, after: value });
                     }
@@ -2354,19 +2567,46 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   });
                   succeeded++;
                 } else {
-                  // Apply updates
+                  // BUG 4: capture pre-existing violations before applying.
+                  const errorsBefore = validator.validate(entity);
+                  const beforeKeys = new Set(errorsBefore.map(e => `${e.code}:${e.field}`));
+                  const touched = new Set<string>();
+
+                  // Apply updates (routed per the schema)
                   for (const [key, value] of Object.entries(payload)) {
-                    if (value !== undefined) {
+                    if (value === undefined) continue;
+                    if ((key === 'relationships' || key === 'fields') && value && typeof value === 'object' && !Array.isArray(value)) {
+                      for (const k of Object.keys(value)) touched.add(k);
                       (entity as unknown as Record<string, unknown>)[key] = value;
+                    } else if (relNames.has(key)) {
+                      entity.relationships = {
+                        ...(entity.relationships ?? {}),
+                        [key]: value,
+                      } as Record<string, EntityId | EntityId[]>;
+                      touched.add(key);
+                    } else if (customNames.has(key)) {
+                      entity.fields = { ...(entity.fields ?? {}), [key]: value };
+                      touched.add(key);
+                    } else {
+                      (entity as unknown as Record<string, unknown>)[key] = value;
+                      touched.add(key);
                     }
                   }
 
                   entity.updated_at = new Date().toISOString();
 
-                  const errors = validator.validate(entity);
-                  if (errors.length > 0) {
-                    throw new Error(`Validation failed: ${errors.map(e => `${e.field}: ${e.message}`).join(', ')}`);
+                  // BUG 4: reject only problems in touched fields (or newly
+                  // introduced); pre-existing untouched violations → warnings.
+                  const errorsAfter = validator.validate(entity);
+                  const blocking = errorsAfter.filter(
+                    e => touched.has(e.field) || !beforeKeys.has(`${e.code}:${e.field}`)
+                  );
+                  if (blocking.length > 0) {
+                    throw new Error(`Validation failed: ${blocking.map(e => `${e.field}: ${e.message}`).join(', ')}`);
                   }
+                  const warnings = errorsAfter
+                    .filter(e => !blocking.includes(e))
+                    .map(e => `${e.field}: ${e.message}`);
 
                   const newContent = serializer.serialize(entity);
                   await adapter.writeFile(path, newContent);
@@ -2375,6 +2615,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     client_id,
                     success: true,
                     id,
+                    ...(warnings.length > 0 && { warnings }),
                     ...(includeEntities && { entity }),
                   });
                   succeeded++;

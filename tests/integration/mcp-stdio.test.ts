@@ -1182,3 +1182,217 @@ describe('mcp.ts validate_project fan-out advisories — disposable fixture', ()
     expect((v.advisories as Array<{ entity: string }>).some(a => a.entity.startsWith('DOC-001'))).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// WRITE-PATH REGRESSIONS (bugs found 2026-07-08 while bulk-editing production):
+//   BUG 1 — flat relationship keys were a silent no-op (update/create/batch)
+//   BUG 2 — reconcile_relationships never filled missing reverses for most pairs
+//   BUG 3 — entities in archive/ subfolders were unreachable ("Entity not found")
+//   BUG 4 — pre-existing invalid fields blocked unrelated updates
+// Own disposable vault + server; tests within the block are order-dependent
+// (creates happen before the reconcile pass, bug-4 checks run last).
+// ---------------------------------------------------------------------------
+const WP_FIXTURE: Record<string, string> = {
+  'milestones/M-900.md': ent({ id: 'M-900', type: 'milestone', title: 'WP milestone', status: 'In Progress', workstream: 'engineering', priority: 'High', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+  'stories/S-900.md': ent({ id: 'S-900', type: 'story', title: 'Routing story', status: 'In Progress', workstream: 'engineering', priority: 'Medium', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'M-900' }),
+  // forward-only implements: F-900 has NO implemented_by back-edge (bug 2)
+  'stories/S-920.md': ent({ id: 'S-920', type: 'story', title: 'Forward-only implements', status: 'In Progress', workstream: 'engineering', priority: 'Medium', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, implements: ['F-900'] }),
+  // status 'Deferred' is INVALID for tasks (bug 4 seed)
+  'tasks/T-900.md': ent({ id: 'T-900', type: 'task', title: 'Deferred task', status: 'Deferred', workstream: 'engineering', goal: 'g', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'S-900' }),
+  'tasks/T-901.md': ent({ id: 'T-901', type: 'task', title: 'Dep target', status: 'Not Started', workstream: 'engineering', goal: 'g', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, parent: 'S-900' }),
+  // forward-only affects: DOC-900 has NO decided_by back-edge (bug 2)
+  'decisions/DEC-900.md': ent({ id: 'DEC-900', type: 'decision', title: 'Ambiguity decision', status: 'Decided', workstream: 'engineering', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, affects: ['DOC-900'] }),
+  // forward-only documents: F-900 has NO documented_by back-edge (bug 2)
+  'documents/DOC-900.md': ent({ id: 'DOC-900', type: 'document', title: 'Reconcile doc', status: 'Draft', workstream: 'engineering', doc_type: 'spec', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false, documents: ['F-900'] }),
+  'documents/DOC-901.md': ent({ id: 'DOC-901', type: 'document', title: 'Ambiguity doc', status: 'Draft', workstream: 'engineering', doc_type: 'spec', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+  'features/F-900.md': ent({ id: 'F-900', type: 'feature', title: 'Reverse-fill feature', status: 'Planned', workstream: 'engineering', user_story: 'u', tier: 'OSS', phase: 'MVP', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+  'features/F-901.md': ent({ id: 'F-901', type: 'feature', title: 'Second feature', status: 'Planned', workstream: 'engineering', user_story: 'u', tier: 'OSS', phase: 'MVP', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: false }),
+  // archived entity living in an archive/ SUBFOLDER (bug 3 — by-type layout)
+  'archive/stories/S-910.md': ent({ id: 'S-910', type: 'story', title: 'Archived story', status: 'Completed', workstream: 'engineering', priority: 'Medium', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', archived: true }),
+};
+
+describe('mcp.ts write-path regressions (bugs 1-4) — disposable fixture', () => {
+  let vault: string;
+  let c: McpClient;
+
+  beforeAll(async () => {
+    vault = makeVault(WP_FIXTURE);
+    c = new McpClient(vault);
+    await c.start();
+  }, 120000);
+
+  afterAll(async () => {
+    if (c) await c.stop();
+    if (vault) fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  // ----------------------------------------------------------------- BUG 1
+  test('BUG 1: flat `implements` on update_entity persists to disk (was a silent no-op)', async () => {
+    const r = await c.call('update_entity', { id: 'S-900', updates: { implements: ['F-900'] } });
+    expect(r.isError).toBeFalsy();
+    // Persisted to the file, not just claimed in the response.
+    const raw = fs.readFileSync(path.join(vault, 'stories/S-900.md'), 'utf-8');
+    expect(raw).toMatch(/implements:/);
+    expect(raw).toContain('F-900');
+    const e = await c.callJson('get_entity', { id: 'S-900' });
+    expect(e.relationships.implements).toEqual(['F-900']);
+    expect(e.fields.implements).toBeUndefined();
+  });
+
+  test('BUG 1: per-type ambiguity — decision.decided_by stays a custom field', async () => {
+    const r = await c.call('update_entity', { id: 'DEC-900', updates: { decided_by: 'Alice' } });
+    expect(r.isError).toBeFalsy();
+    const e = await c.callJson('get_entity', { id: 'DEC-900' });
+    expect(e.fields.decided_by).toBe('Alice');
+    expect(e.relationships.decided_by).toBeUndefined();
+    // And it actually persisted (custom fields at top level were dropped too).
+    const raw = fs.readFileSync(path.join(vault, 'decisions/DEC-900.md'), 'utf-8');
+    expect(raw).toMatch(/decided_by: Alice/);
+  });
+
+  test('BUG 1: per-type ambiguity — document.decided_by becomes a relationship', async () => {
+    const r = await c.call('update_entity', { id: 'DOC-901', updates: { decided_by: ['DEC-900'] } });
+    expect(r.isError).toBeFalsy();
+    const e = await c.callJson('get_entity', { id: 'DOC-901' });
+    expect(e.relationships.decided_by).toEqual(['DEC-900']);
+    expect(e.fields.decided_by).toBeUndefined();
+  });
+
+  test('BUG 1: batch update payload flat `implements` persists, and dry_run previews the routed value', async () => {
+    const dry = await c.callJson('entities', {
+      action: 'batch',
+      options: { dry_run: true },
+      ops: [{ client_id: 'wp-dry', op: 'update', id: 'S-900', payload: { implements: ['F-900', 'F-901'] } }],
+    });
+    const ch = dry.results[0].changes.find((x: any) => x.field === 'implements');
+    expect(ch).toBeDefined();
+    expect(ch.before).toEqual(['F-900']); // real current relationship value, not undefined
+    expect(ch.after).toEqual(['F-900', 'F-901']);
+
+    const wet = await c.callJson('entities', {
+      action: 'batch',
+      ops: [{ client_id: 'wp-wet', op: 'update', id: 'S-900', payload: { implements: ['F-900', 'F-901'] } }],
+    });
+    expect(wet.results[0].success).toBe(true);
+    const e = await c.callJson('get_entity', { id: 'S-900' });
+    expect(e.relationships.implements).toEqual(['F-900', 'F-901']);
+  });
+
+  test('BUG 1: create_entity routes flat relationship keys in properties', async () => {
+    const r = await c.call('create_entity', {
+      type: 'story',
+      title: 'Flat rel create',
+      properties: { priority: 'Medium', parent: 'M-900', implements: ['F-901'] },
+    });
+    expect(r.isError).toBeFalsy();
+    const id = r.text!.match(/Created story (S-\d+)/)![1];
+    const e = await c.callJson('get_entity', { id });
+    expect(e.relationships.parent).toBe('M-900');
+    expect(e.relationships.implements).toEqual(['F-901']);
+    expect(e.fields.implements).toBeUndefined();
+  });
+
+  test('BUG 1: batch create routes flat relationship keys in payload', async () => {
+    const r = await c.callJson('entities', {
+      action: 'batch',
+      ops: [{ client_id: 'wp-c', op: 'create', type: 'task', payload: { title: 'Flat rel batch task', goal: 'g', parent: 'S-900' } }],
+    });
+    expect(r.results[0].success).toBe(true);
+    const e = await c.callJson('get_entity', { id: r.results[0].id });
+    expect(e.relationships.parent).toBe('S-900');
+  });
+
+  // ----------------------------------------------------------------- BUG 3
+  test('BUG 3: archived entity in an archive/ subfolder is reachable and updated IN PLACE', async () => {
+    const e0 = await c.callJson('get_entity', { id: 'S-910' });
+    expect(e0.archived).toBe(true);
+
+    const r = await c.call('update_entity', { id: 'S-910', updates: { implements: ['F-901'] } });
+    expect(r.isError).toBeFalsy();
+
+    // The update landed in the archive file — no duplicate outside archive/.
+    const raw = fs.readFileSync(path.join(vault, 'archive/stories/S-910.md'), 'utf-8');
+    expect(raw).toContain('F-901');
+    expect(raw).toMatch(/archived: true/);
+    expect(fs.existsSync(path.join(vault, 'stories/S-910.md'))).toBe(false);
+
+    const e = await c.callJson('get_entity', { id: 'S-910' });
+    expect(e.relationships.implements).toEqual(['F-901']);
+    expect(e.archived).toBe(true);
+  });
+
+  // ----------------------------------------------------------------- BUG 2
+  test('BUG 2: reconcile dry-run surfaces missing reverses for implements/documents/affects pairs', async () => {
+    const r = await c.callJson('reconcile_relationships', { dry_run: true });
+    const all = r.changes.join('\n');
+    expect(all).toContain('F-900: Add S-920 to implemented_by');  // implements → implemented_by
+    expect(all).toContain('F-900: Add DOC-900 to documented_by'); // documents → documented_by
+    expect(all).toContain('DOC-900: Add DEC-900 to decided_by');  // affects → decided_by
+    // dry-run wrote nothing
+    const f = await c.callJson('get_entity', { id: 'F-900' });
+    expect(f.relationships.implemented_by).toBeUndefined();
+    expect(f.relationships.documented_by).toBeUndefined();
+  });
+
+  test('BUG 2: reconcile write mode fills missing reverses on disk (then reaches a fixpoint)', async () => {
+    const r = await c.callJson('reconcile_relationships', { dry_run: false });
+    expect(r.dry_run).toBe(false);
+    expect(r.changes_count).toBeGreaterThanOrEqual(3);
+
+    const f900 = await c.callJson('get_entity', { id: 'F-900' });
+    expect(f900.relationships.implemented_by).toEqual(expect.arrayContaining(['S-900', 'S-920']));
+    expect(f900.relationships.documented_by).toContain('DOC-900');
+    const doc = await c.callJson('get_entity', { id: 'DOC-900' });
+    expect(doc.relationships.decided_by).toContain('DEC-900');
+    // Reverse-only edges get their FORWARD filled too (DOC-901.decided_by was
+    // authored in the bug-1 test without touching DEC-900.affects).
+    const dec = await c.callJson('get_entity', { id: 'DEC-900' });
+    expect(dec.relationships.affects).toEqual(expect.arrayContaining(['DOC-900', 'DOC-901']));
+    // Archived entities participate: S-910.implements F-901 ↔ F-901.implemented_by.
+    const f901 = await c.callJson('get_entity', { id: 'F-901' });
+    expect(f901.relationships.implemented_by).toEqual(expect.arrayContaining(['S-910']));
+
+    // A second pass finds nothing left to fix.
+    const again = await c.callJson('reconcile_relationships', { dry_run: true });
+    expect(again.changes_count).toBe(0);
+  });
+
+  // ----------------------------------------------------------------- BUG 4
+  test('BUG 4: pre-existing invalid status does not block a relationships-only update (warning surfaced)', async () => {
+    const r = await c.call('update_entity', { id: 'T-900', updates: { depends_on: ['T-901'] } });
+    expect(r.isError).toBeFalsy();
+    expect(r.text).toMatch(/Updated T-900/);
+    expect(r.text).toContain('"warnings"');
+    // quotes inside the JSON warnings block are escaped (\"Deferred\")
+    expect(r.text).toMatch(/Invalid status \\?"Deferred\\?"/);
+    const e = await c.callJson('get_entity', { id: 'T-900' });
+    expect(e.relationships.depends_on).toEqual(['T-901']);
+    expect(e.status).toBe('Deferred'); // untouched field left as-is
+  });
+
+  test('BUG 4: an update that sets another invalid value in the bad field is still rejected', async () => {
+    const r = await c.call('update_entity', { id: 'T-900', updates: { status: 'Bogus' } });
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/Validation failed/);
+    const e = await c.callJson('get_entity', { id: 'T-900' });
+    expect(e.status).toBe('Deferred'); // nothing was written
+  });
+
+  test('BUG 4: batch update mirrors the touched-field semantics (warnings array, per-op reject)', async () => {
+    const r = await c.callJson('entities', {
+      action: 'batch',
+      ops: [
+        { client_id: 'wp-w1', op: 'update', id: 'T-900', payload: { goal: 'updated goal' } },
+        { client_id: 'wp-w2', op: 'update', id: 'T-900', payload: { status: 'Bogus2' } },
+      ],
+    });
+    expect(r.results[0].success).toBe(true);
+    expect(Array.isArray(r.results[0].warnings)).toBe(true);
+    expect(r.results[0].warnings.some((w: string) => /Invalid status/.test(w))).toBe(true);
+    expect(r.results[1].success).toBe(false);
+    expect(r.results[1].error).toMatch(/Validation failed/);
+    // The flat custom-field key routed into fields and persisted.
+    const e = await c.callJson('get_entity', { id: 'T-900' });
+    expect(e.fields.goal).toBe('updated goal');
+  });
+});
