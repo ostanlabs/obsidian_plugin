@@ -136,3 +136,4 @@ main.js.map
 
 # MCP coverage build/output (scripts/coverage-mcp.mjs)
 coverage-tmp/
+bin/
