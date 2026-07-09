@@ -307,11 +307,12 @@ async function getMsrlEngine(): Promise<MsrlEngine> {
   return msrlEngine;
 }
 
-// Create MCP server
+// Create MCP server (version bundled in from package.json at build time)
+import { version as PKG_VERSION } from './package.json';
 const server = new Server(
   {
     name: 'obsidian-unified',
-    version: '1.0.0',
+    version: PKG_VERSION,
   },
   {
     capabilities: {
