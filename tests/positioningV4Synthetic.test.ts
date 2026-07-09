@@ -334,3 +334,64 @@ describe("PositioningEngineV4 - chained deferred entities (regression-lock: DEC-
 		expect(res.positions.get("node-DOC-Y")).toBeDefined();
 	});
 });
+
+describe("PositioningEngineV4 - deferred placement collision avoidance", () => {
+	function rectsOverlap(
+		a: { x: number; y: number; width: number; height: number },
+		b: { x: number; y: number; width: number; height: number }
+	): boolean {
+		return a.x < b.x + b.width && a.x + a.width > b.x &&
+			a.y < b.y + b.height && a.y + a.height > b.y;
+	}
+
+	it("does not stack two deferred decisions with identical parent sets (DEC-003/DEC-051 shape)", () => {
+		const res = new PositioningEngineV4().calculatePositions([
+			ent({ entityId: "M-1", type: "milestone" }),
+			ent({ entityId: "F-1", type: "feature", implementedBy: ["M-1"] }),
+			ent({ entityId: "DOC-1", type: "document", documents: ["F-1"] }),
+			ent({ entityId: "DOC-2", type: "document", documents: ["F-1"] }),
+			ent({ entityId: "DEC-A", type: "decision", affects: ["DOC-1", "DOC-2"] }),
+			ent({ entityId: "DEC-B", type: "decision", affects: ["DOC-1", "DOC-2"] }),
+		]);
+		const a = res.positions.get("node-DEC-A")!;
+		const b = res.positions.get("node-DEC-B")!;
+		expect(a).toBeDefined();
+		expect(b).toBeDefined();
+		expect(rectsOverlap(a, b)).toBe(false);
+	});
+
+	it("deferred decision does not land on a normally-placed single-target decision (DEC-058/DEC-154 shape)", () => {
+		const res = new PositioningEngineV4().calculatePositions([
+			ent({ entityId: "M-1", type: "milestone" }),
+			ent({ entityId: "F-1", type: "feature", implementedBy: ["M-1"] }),
+			ent({ entityId: "DOC-1", type: "document", documents: ["F-1"] }),
+			ent({ entityId: "DOC-2", type: "document", documents: ["F-1"] }),
+			ent({ entityId: "DEC-SINGLE", type: "decision", affects: ["DOC-1"] }),
+			ent({ entityId: "DEC-MULTI", type: "decision", affects: ["DOC-1", "DOC-2"] }),
+		]);
+		const single = res.positions.get("node-DEC-SINGLE")!;
+		const multi = res.positions.get("node-DEC-MULTI")!;
+		expect(single).toBeDefined();
+		expect(multi).toBeDefined();
+		expect(rectsOverlap(single, multi)).toBe(false);
+	});
+
+	it("a whole cohort of same-parent deferred decisions all get distinct spots", () => {
+		const decisions = Array.from({ length: 6 }, (_, i) =>
+			ent({ entityId: `DEC-${i}`, type: "decision" as EntityType, affects: ["DOC-1", "DOC-2"] }));
+		const res = new PositioningEngineV4().calculatePositions([
+			ent({ entityId: "M-1", type: "milestone" }),
+			ent({ entityId: "F-1", type: "feature", implementedBy: ["M-1"] }),
+			ent({ entityId: "DOC-1", type: "document", documents: ["F-1"] }),
+			ent({ entityId: "DOC-2", type: "document", documents: ["F-1"] }),
+			...decisions,
+		]);
+		const rects = decisions.map(d => res.positions.get(`node-${d.entityId}`)!);
+		for (const r of rects) expect(r).toBeDefined();
+		for (let i = 0; i < rects.length; i++) {
+			for (let j = i + 1; j < rects.length; j++) {
+				expect(rectsOverlap(rects[i], rects[j])).toBe(false);
+			}
+		}
+	});
+});

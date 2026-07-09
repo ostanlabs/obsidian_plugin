@@ -3087,6 +3087,43 @@ export class PositioningEngineV4 {
 	}
 
 	/**
+	 * Deferred placements are formula-based (centered over the parent union /
+	 * band midpoint), so two entities with the same parents compute the same
+	 * spot, and the formula also knows nothing about satellites placed by the
+	 * normal pass. Walk sideways in alternating steps from the candidate spot
+	 * (then row by row in `dy` direction) until the rect clears every already
+	 * positioned node.
+	 */
+	private findFreeDeferredSpot(
+		x: number, y: number, width: number, height: number,
+		dy: -1 | 1, self: ProcessedNode
+	): { x: number; y: number } {
+		const pad = 20;
+		const collides = (cx: number, cy: number): boolean => {
+			for (const other of this.processedNodes.values()) {
+				if (other === self) continue;
+				const p = other.position;
+				if (!p) continue;
+				if (cx < p.x + p.width + pad && cx + width + pad > p.x &&
+					cy < p.y + p.height + pad && cy + height + pad > p.y) {
+					return true;
+				}
+			}
+			return false;
+		};
+		const stepX = width + pad;
+		for (let row = 0; row < 20; row++) {
+			const cy = y + dy * row * (height + pad);
+			for (let i = 0; i < 17; i++) {
+				const k = i === 0 ? 0 : (i % 2 === 1 ? (i + 1) / 2 : -(i / 2));
+				const cx = x + k * stepX;
+				if (!collides(cx, cy)) return { x: cx, y: cy };
+			}
+		}
+		return { x, y };
+	}
+
+	/**
 	 * Try to position a deferred (multi-parent) entity centered above its
 	 * parents. Returns false when NO parent has a position yet — the caller's
 	 * fixpoint loop retries it after other deferred entities (its potential
@@ -3137,9 +3174,14 @@ export class PositioningEngineV4 {
 
 		const nodeSize = this.config.nodeSizes[deferred.node.type];
 
+		const spot = this.findFreeDeferredSpot(
+			(minX + maxX) / 2 - nodeSize.width / 2,
+			minY - this.config.childGap - nodeSize.height,
+			nodeSize.width, nodeSize.height, -1, deferred.node
+		);
 		deferred.node.position = {
-			x: (minX + maxX) / 2 - nodeSize.width / 2,
-			y: minY - this.config.childGap - nodeSize.height,
+			x: spot.x,
+			y: spot.y,
 			width: nodeSize.width,
 			height: nodeSize.height,
 		};
@@ -3223,9 +3265,13 @@ export class PositioningEngineV4 {
 					x = (minX + maxX) / 2 - nodeSize.width / 2;
 				}
 
+				const spot = this.findFreeDeferredSpot(
+					x, bandY - nodeSize.height / 2,
+					nodeSize.width, nodeSize.height, -1, deferred.node
+				);
 				deferred.node.position = {
-					x,
-					y: bandY - nodeSize.height / 2,
+					x: spot.x,
+					y: spot.y,
 					width: nodeSize.width,
 					height: nodeSize.height,
 				};
