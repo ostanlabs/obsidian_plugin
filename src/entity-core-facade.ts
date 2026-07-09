@@ -6,7 +6,7 @@
  * for common operations.
  */
 
-import type { Vault } from 'obsidian';
+import type { Vault, FileManager } from 'obsidian';
 import { ObsidianVaultAdapter } from './adapters/obsidian-vault-adapter.js';
 import { SchemaRegistry } from './entity-core/schema-registry.js';
 import { DEFAULT_SCHEMA } from './entity-core/default-schema.js';
@@ -29,6 +29,8 @@ import type {
 
 export interface EntityCoreConfig {
   vault: Vault;
+  /** Optional: lets deletions respect the user's "Deleted files" preference. */
+  fileManager?: FileManager;
   vaultPath: string;
   entitiesFolder: string;
   archiveFolder: string;
@@ -74,7 +76,7 @@ export class EntityCoreFacade {
   private migrator?: SchemaMigrator;
 
   constructor(private readonly config: EntityCoreConfig) {
-    this.fs = new ObsidianVaultAdapter(config.vault);
+    this.fs = new ObsidianVaultAdapter(config.vault, config.fileManager);
     this.schema = new SchemaRegistry(DEFAULT_SCHEMA);
     this.parser = new EntityParser(this.schema);
     this.serializer = new EntitySerializer(this.schema);

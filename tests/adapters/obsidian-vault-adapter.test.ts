@@ -237,3 +237,34 @@ describe('ObsidianVaultAdapter', () => {
     expect(await adapter.readFile('entities/tasks/T-001_x.md')).toBe(payload);
   });
 });
+
+describe('ObsidianVaultAdapter — FileManager.trashFile preference', () => {
+  it('routes file deletion through fileManager.trashFile when provided', async () => {
+    const app = createTestApp({ 'doomed.md': 'x' });
+    const trashFile = jest.fn().mockResolvedValue(undefined);
+    const adapter = new ObsidianVaultAdapter(app.vault as any, { trashFile } as any);
+    await adapter.deleteFile('doomed.md');
+    expect(trashFile).toHaveBeenCalledTimes(1);
+    expect(trashFile.mock.calls[0][0].path).toBe('doomed.md');
+    // vault.delete was NOT used — the mock vault still holds the file
+    expect(await adapter.exists('doomed.md')).toBe(true);
+  });
+
+  it('routes folder deletion through fileManager.trashFile when provided', async () => {
+    const app = createTestApp({ 'dir/a.md': 'x', 'dir/b.md': 'y' });
+    const trashFile = jest.fn().mockResolvedValue(undefined);
+    const adapter = new ObsidianVaultAdapter(app.vault as any, { trashFile } as any);
+    // Register the folder so getAbstractFileByPath resolves it as TFolder.
+    await adapter.createFolder('dir');
+    await adapter.deleteFolder('dir');
+    expect(trashFile).toHaveBeenCalledTimes(1);
+    expect(trashFile.mock.calls[0][0].path).toBe('dir');
+  });
+
+  it('falls back to vault.delete without a fileManager (MCP/headless mode)', async () => {
+    const app = createTestApp({ 'doomed.md': 'x' });
+    const adapter = new ObsidianVaultAdapter(app.vault as any);
+    await adapter.deleteFile('doomed.md');
+    expect(await adapter.exists('doomed.md')).toBe(false);
+  });
+});

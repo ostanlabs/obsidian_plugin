@@ -8459,7 +8459,7 @@ private registerCommands(): void {
 			// failure here falls back to the compiled default rules (never crashes).
 			const engineConfig: Partial<PositioningConfig> & { relationshipRules?: RelationshipRule[] } = {};
 			try {
-				const fs = new ObsidianVaultAdapter(this.app.vault);
+				const fs = new ObsidianVaultAdapter(this.app.vault, this.app.fileManager);
 				// Resolve the project folder: walk up from the canvas file to the
 				// nearest ancestor folder that contains a schema.json (this is the
 				// folder the MCP treats as VAULT_PATH). Fall back to the canvas's
@@ -9228,6 +9228,7 @@ private registerCommands(): void {
 		if (!this.entityCore) {
 			this.entityCore = new EntityCoreFacade({
 				vault: this.app.vault,
+				fileManager: this.app.fileManager,
 				vaultPath: (this.app.vault.adapter as any).basePath || '',
 				// Bare type folders (milestones/, stories/, …) — no `entities/`
 				// prefix, matching the production vault. Empty prefix →

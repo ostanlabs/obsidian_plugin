@@ -2,11 +2,19 @@
  * ObsidianVaultAdapter — FileSystem implementation for plugin mode using Obsidian Vault API.
  */
 
-import { Vault, TFolder, TFile } from 'obsidian';
+import { Vault, TFolder, TFile, FileManager } from 'obsidian';
 import type { FileSystem, FileStat, FileEntry } from '../entity-core/types.js';
 
 export class ObsidianVaultAdapter implements FileSystem {
-  constructor(private readonly vault: Vault) {}
+  /**
+   * When a FileManager is provided, deletions go through trashFile() so they
+   * respect the user's "Deleted files" preference (system trash / .trash /
+   * permanent) instead of always deleting permanently via Vault.delete().
+   */
+  constructor(
+    private readonly vault: Vault,
+    private readonly fileManager?: FileManager
+  ) {}
 
   async readFile(path: string): Promise<string> {
     const file = this.vault.getAbstractFileByPath(path);
@@ -33,7 +41,11 @@ export class ObsidianVaultAdapter implements FileSystem {
   async deleteFile(path: string): Promise<void> {
     const file = this.vault.getAbstractFileByPath(path);
     if (file instanceof TFile) {
-      await this.vault.delete(file);
+      if (this.fileManager) {
+        await this.fileManager.trashFile(file);
+      } else {
+        await this.vault.delete(file);
+      }
     }
   }
 
@@ -79,7 +91,11 @@ export class ObsidianVaultAdapter implements FileSystem {
   async deleteFolder(path: string): Promise<void> {
     const folder = this.vault.getAbstractFileByPath(path);
     if (folder instanceof TFolder) {
-      await this.vault.delete(folder, true); // recursive
+      if (this.fileManager) {
+        await this.fileManager.trashFile(folder); // trashes recursively
+      } else {
+        await this.vault.delete(folder, true); // recursive
+      }
     }
   }
 
