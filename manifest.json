@@ -1,7 +1,7 @@
 {
 	"id": "canvas-project-manager",
 	"name": "Canvas Project Manager",
-	"version": "1.9.2",
+	"version": "2.0.0",
 	"minAppVersion": "1.4.0",
 	"description": "Visual project management on the Canvas — manage milestones, stories, tasks, decisions, documents, and features with dependencies, workstreams, and optional Notion sync.",
 	"author": "Ostan Labs",
