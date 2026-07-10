@@ -95,10 +95,12 @@ plugins**). After code changes: `npm run build` and copy the three files again.
 
 ### 3. Run the MCP server
 
-The server speaks MCP over **stdio** and targets one project folder via the
-`VAULT_PATH` environment variable — the folder that contains `milestones/`,
-`stories/`, `tasks/`, etc. On first run it bootstraps a `schema.json` there if
-none exists.
+The server speaks MCP over **stdio**. The simplest setup targets one project
+folder via the `VAULT_PATH` environment variable — the folder that contains
+`milestones/`, `stories/`, `tasks/`, etc. On first run it bootstraps a
+`schema.json` there if none exists. (`VAULT_PATH` is optional since the
+multi-vault release — see *Managing multiple vaults* below — but with it set,
+everything works with zero further configuration, exactly as before.)
 
 ```bash
 VAULT_PATH="/path/to/vault/Projects/YourProject" node bin/mcp-server.mjs
@@ -128,6 +130,57 @@ Or in a JSON MCP config (Claude Desktop and compatible clients):
 
 After rebuilding the server (`npm run build:mcp`), reconnect the MCP client
 (e.g. `/mcp` in Claude Code) to pick up the new binary.
+
+### 3b. Managing multiple vaults
+
+One server process can manage any number of vaults via the `list_vaults` /
+`add_vault` / `remove_vault` tools. Vault registrations live in a global config
+file the server owns:
+
+| Platform | Path |
+|---|---|
+| macOS / Linux | `~/.config/ostanlabs/mcp.json` (or `$XDG_CONFIG_HOME/ostanlabs/mcp.json`) |
+| Windows | `%APPDATA%\ostanlabs\mcp.json` |
+
+**⚠️ Required first step: set `allowedRoots` by hand.** Every agent-supplied
+path (`add_vault`, `add_workspace`) is confined to these roots, and the default
+is **deny-everything** — until you create this file, `add_vault` rejects every
+path. No MCP tool can widen the roots (that's the security model: prompt
+injection in vault content must not be able to grant itself filesystem reach),
+so create the file yourself:
+
+```json
+{
+  "version": 1,
+  "allowedRoots": ["/Users/you/Obsidian"],
+  "vaults": []
+}
+```
+
+Pick the narrowest directory that contains all your vaults. Then, from your
+MCP client:
+
+1. `add_vault {"path": "/Users/you/Obsidian/Projects/MyProject", "bootstrap": "auto"}`
+   — an empty/missing directory is **scaffolded** (schema.json, one folder per
+   entity type, `archive/`, `workspaces.json`, default canvas); an existing
+   vault is **adopted** with its real layout detected (top-level vs `entities/`
+   type folders, archive style). Adoption never creates files beside your data.
+2. `list_vaults` — shows the registered ids agents pass as the `vault` argument.
+3. `remove_vault {"id": "..."}` — deregisters only; **never deletes vault files**.
+
+Notes:
+
+- With **more than one** vault registered, mutating tools (`create_entity`,
+  `update_entity`, `set_schema`, …) require an explicit `vault` argument;
+  read-only tools default to the sole vault only when exactly one is registered.
+  Every result echoes the vault it acted on.
+- A configured `VAULT_PATH` is still honored: it's absorbed into the registry
+  automatically (id = folder-name slug) without touching the config file.
+- Schema changes that remove entity types **archive** the affected entities
+  (`archive/<type>/`, copy-then-delete — never destructive). Run `set_schema`
+  with `dryRun: true` first to see the exact plan. The server keeps small
+  sidecar files in each vault for this (`.mcp-applied-schema.json`,
+  `.mcp-tombstones.json`); leave them in place.
 
 ### 4. Test
 
