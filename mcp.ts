@@ -315,10 +315,23 @@ const server = new Server(
   },
   {
     capabilities: {
-      tools: {},
+      // listChanged: set_schema can alter the tool surface (entity-type enums
+      // are derived from the active schema), so clients are told to re-fetch.
+      tools: { listChanged: true },
     },
   }
 );
+
+/**
+ * Entity type names per the ACTIVE schema — used for the tool inputSchema
+ * enums (create_entity, list_entities, search_entities, entities, …) so the
+ * advertised types always match what the vault schema actually allows,
+ * including custom types added via set_schema. The ListTools handler runs per
+ * request, so these re-evaluate against the current schema every time.
+ */
+function entityTypeEnumValues(): string[] {
+  return activeSchema.entityTypes.map((e) => e.type);
+}
 
 /**
  * Enum values of the feature `phase` field per the ACTIVE schema, so the
@@ -339,13 +352,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'create_entity',
-      description: 'Create a new entity (milestone, story, task, decision, document, or feature)',
+      description: `Create a new entity (${entityTypeEnumValues().join(', ')})`,
       inputSchema: {
         type: 'object',
         properties: {
           type: {
             type: 'string',
-            enum: ['milestone', 'story', 'task', 'decision', 'document', 'feature'],
+            enum: entityTypeEnumValues(),
             description: 'The type of entity to create',
           },
           title: {
@@ -354,7 +367,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           properties: {
             type: 'object',
-            description: 'Additional entity properties (status, workstream, relationships, etc.)',
+            description: 'Additional entity properties (status, workstream, relationships, etc.). Valid relationship fields, their target types, and per-type custom fields are defined by the vault schema — call get_schema for the authoritative list.',
           },
         },
         required: ['type', 'title'],
@@ -368,7 +381,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           type: {
             type: 'string',
-            enum: ['milestone', 'story', 'task', 'decision', 'document', 'feature'],
+            enum: entityTypeEnumValues(),
             description: 'Optional: filter by entity type',
           },
         },
@@ -400,7 +413,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           updates: {
             type: 'object',
-            description: 'Fields to update (title, status, workstream, relationships, etc.). A string "body" key replaces the markdown body below the frontmatter ("" clears it). Setting a passthrough-only key (a field not valid for this type) to null or [] deletes it from the file.',
+            description: 'Fields to update (title, status, workstream, relationships, etc.). Valid relationship fields and target types are defined by the vault schema — call get_schema for the authoritative list. A string "body" key replaces the markdown body below the frontmatter ("" clears it). Setting a passthrough-only key (a field not valid for this type) to null or [] deletes it from the file.',
           },
         },
         required: ['id', 'updates'],
@@ -457,7 +470,7 @@ EXAMPLES:
           filters: {
             type: 'object',
             properties: {
-              type: { type: 'array', items: { type: 'string', enum: ['milestone', 'story', 'task', 'decision', 'document', 'feature'] } },
+              type: { type: 'array', items: { type: 'string', enum: entityTypeEnumValues() } },
               status: { type: 'array', items: { type: 'string' } },
               workstream: { type: 'array', items: { type: 'string' } },
               archived: { type: 'boolean', description: 'Include archived (default: false)' },
@@ -635,7 +648,7 @@ EXAMPLES:
           workstream: { type: 'string', description: 'Filter by workstream' },
           entity_types: {
             type: 'array',
-            items: { type: 'string', enum: ['milestone', 'story', 'task', 'decision', 'document', 'feature'] },
+            items: { type: 'string', enum: entityTypeEnumValues() },
             description: 'Filter to specific entity types',
           },
         },
@@ -836,7 +849,7 @@ EXAMPLES:
               properties: {
                 client_id: { type: 'string', description: 'Client-provided ID for idempotency' },
                 op: { type: 'string', enum: ['create', 'update', 'archive'], description: 'Operation type' },
-                type: { type: 'string', enum: ['milestone', 'story', 'task', 'decision', 'document', 'feature'], description: 'Entity type (for create)' },
+                type: { type: 'string', enum: entityTypeEnumValues(), description: 'Entity type (for create)' },
                 id: { type: 'string', description: 'Entity ID (for update/archive)' },
                 payload: { type: 'object', description: 'Operation payload (title, workstream, relationships, etc.)' },
               },
@@ -1251,6 +1264,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // If the new schema names a defaultCanvas that doesn't exist yet (or is
         // an empty file), bootstrap/repair it now — same step as server startup.
         await ensureDefaultCanvas();
+        // Tool inputSchemas embed schema-derived enums (entity types, feature
+        // phase values) — tell clients the tool surface may have changed.
+        try { await server.sendToolListChanged(); } catch { /* transport may not be connected */ }
         return {
           content: [{
             type: 'text',

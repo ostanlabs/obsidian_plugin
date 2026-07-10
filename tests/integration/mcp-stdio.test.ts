@@ -1893,6 +1893,15 @@ describe('mcp.ts set_schema hot-reload: custom types + schema-driven validation 
     expect(fs.existsSync(path.join(vault, 'risks'))).toBe(true);
   });
 
+  test('tools/list advertises the custom type in schema-derived enums (create_entity, list_entities)', async () => {
+    const defs = await c.listToolDefs();
+    const createDef = defs.find((t: any) => t.name === 'create_entity');
+    expect(createDef.inputSchema.properties.type.enum).toContain('risk');
+    expect(createDef.description).toContain('risk');
+    const listDef = defs.find((t: any) => t.name === 'list_entities');
+    expect(listDef.inputSchema.properties.type.enum).toContain('risk');
+  });
+
   test('the custom-type entity is found by get_entity and list/search after rescan (scanIndex schema-driven)', async () => {
     const e = await c.callJson('get_entity', { id: riskId });
     expect(e.type).toBe('risk');
