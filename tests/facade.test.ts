@@ -17,6 +17,7 @@ jest.mock('obsidian', () => require('./harness/obsidian-mock'), { virtual: true 
 
 import { EntityCoreFacade } from '../src/entity-core-facade';
 import { SchemaRegistry } from '../src/entity-core/schema-registry';
+import { DEFAULT_SCHEMA } from '../src/entity-core/default-schema';
 import { ObsidianVaultAdapter } from '../src/adapters/obsidian-vault-adapter';
 import { RelationshipGraph } from '../src/entity-core/relationship-graph';
 import { CanvasManager } from '../src/entity-core/canvas';
@@ -25,7 +26,7 @@ import { EntityIndex } from '../util/entityNavigator';
 import type { ProjectIndex } from '../src/entity-core/project-index';
 import { createTestApp } from './harness/obsidian-mock';
 import type { App } from './harness/obsidian-mock';
-import type { RuntimeEntity } from '../src/entity-core/types';
+import type { RuntimeEntity, Schema } from '../src/entity-core/types';
 
 function fm(fields: Record<string, unknown>): string {
   const lines = Object.entries(fields).map(([k, v]) =>
@@ -34,17 +35,23 @@ function fm(fields: Record<string, unknown>): string {
   return `---\n${lines.join('\n')}\n---\n`;
 }
 
-function makeFacade(seed: Record<string, string> = {}): { app: App; facade: EntityCoreFacade } {
+function makeFacade(
+  seed: Record<string, string> = {},
+  schema: SchemaRegistry = new SchemaRegistry(DEFAULT_SCHEMA)
+): { app: App; facade: EntityCoreFacade; schema: SchemaRegistry } {
   const app = createTestApp(seed);
+  // fs + schema are INJECTED (Phase 0, spec §5.1) — the facade no longer
+  // hardcodes ObsidianVaultAdapter/DEFAULT_SCHEMA; main.ts builds both.
   const facade = new EntityCoreFacade({
-    vault: app.vault as any,
+    fs: new ObsidianVaultAdapter(app.vault as any),
+    schema,
     vaultPath: '',
     // Canonical bare-folder layout: empty entitiesFolder prefix.
     entitiesFolder: '',
     archiveFolder: 'archive',
     canvasFolder: 'projects',
   });
-  return { app, facade };
+  return { app, facade, schema };
 }
 
 /** Build the plugin's real index for a seeded app and expose its core
@@ -149,6 +156,48 @@ describe('EntityCoreFacade', () => {
       await fs.writeFile('entities/tasks/T-001_x.md', 'hello');
       expect(app.vault._files.get('entities/tasks/T-001_x.md')).toBe('hello');
       expect(await fs.readFile('entities/tasks/T-001_x.md')).toBe('hello');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Injected schema (Phase 0, spec §5.1): the facade must reflect a
+  // NON-default schema everywhere — no DEFAULT_SCHEMA hardcode left behind.
+  // ---------------------------------------------------------------------------
+  describe('injected non-default schema', () => {
+    /** DEFAULT_SCHEMA with the milestone type re-homed + re-vocabularied. */
+    function customSchema(): Schema {
+      const s: Schema = JSON.parse(JSON.stringify(DEFAULT_SCHEMA));
+      const milestone = s.entityTypes.find((t) => t.type === 'milestone')!;
+      milestone.folder = 'custom_milestones';
+      milestone.statuses = ['Queued', 'Shipped'];
+      milestone.defaultStatus = 'Queued';
+      return s;
+    }
+
+    it('getSchema returns the exact injected registry instance', () => {
+      const registry = new SchemaRegistry(customSchema());
+      const { facade } = makeFacade({}, registry);
+      expect(facade.getSchema()).toBe(registry);
+    });
+
+    it('getTypeFolderPath honors a custom folder from the injected schema', () => {
+      const { facade } = makeFacade({}, new SchemaRegistry(customSchema()));
+      expect(facade.getTypeFolderPath('milestone')).toBe('custom_milestones');
+      // Types NOT customized keep their schema folder as usual.
+      expect(facade.getTypeFolderPath('feature')).toBe('features');
+    });
+
+    it('validateEntity uses the injected per-type status vocabulary', () => {
+      const { facade } = makeFacade({}, new SchemaRegistry(customSchema()));
+      const parse = (status: string) =>
+        facade.parseEntity(
+          fm({ id: 'M-001', type: 'milestone', title: 'M', status, priority: 'High' }),
+          'custom_milestones/M.md'
+        );
+      // 'In Progress' is valid under DEFAULT_SCHEMA but NOT under the custom vocabulary.
+      const errors = facade.validateEntity(parse('In Progress'));
+      expect(errors.some((e) => e.code === 'invalid_status' && e.field === 'status')).toBe(true);
+      expect(facade.validateEntity(parse('Queued'))).toEqual([]);
     });
   });
 

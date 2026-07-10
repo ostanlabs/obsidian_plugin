@@ -158,19 +158,49 @@ interface CallResult {
   raw: any;
 }
 
+/** Test-local mirror of the registry's kebabSlug (vault id of an absorbed
+ * VAULT_PATH = slug of the directory basename). */
+function slug(name: string): string {
+  const s = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return s || 'vault';
+}
+
+// Registry-global tools take no `vault` argument — never auto-inject one.
+const REGISTRY_GLOBAL_TOOLS = new Set(['list_vaults', 'add_vault', 'remove_vault']);
+
 class McpClient {
   private srv!: ChildProcessWithoutNullStreams;
   private pending = new Map<number, (m: any) => void>();
   private nextId = 1;
   public stderr = '';
   private exited: { code: number | null; signal: string | null } | null = null;
+  /** Isolated XDG_CONFIG_HOME so the developer's real ~/.config/ostanlabs/mcp.json
+   * can never leak extra vaults into the suite (the single-vault default and
+   * schema-derived enums both require EXACTLY one registered vault). */
+  private configHome: string | null = null;
 
-  constructor(private vault: string) {}
+  /** The registry id of the absorbed VAULT_PATH vault (undefined in registry-only mode). */
+  get vaultId(): string | undefined {
+    return this.vault ? slug(path.basename(this.vault)) : undefined;
+  }
+
+  constructor(
+    private vault: string | null,
+    private opts: { env?: Record<string, string>; autoVault?: boolean } = {},
+  ) {}
 
   async start(): Promise<void> {
-    this.srv = spawn('node', [SERVER_BIN], {
+    this.configHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-config-'));
+    const env: Record<string, string | undefined> = {
       // Inherit env so NODE_V8_COVERAGE (coverage harness) propagates to the child.
-      env: { ...process.env, VAULT_PATH: this.vault },
+      ...process.env,
+      XDG_CONFIG_HOME: this.configHome,
+      ...(this.opts.env ?? {}),
+    };
+    if (this.vault) env.VAULT_PATH = this.vault;
+    else delete env.VAULT_PATH;
+    this.srv = spawn('node', [SERVER_BIN], {
+      env: env as NodeJS.ProcessEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.srv.stderr.on('data', (d) => (this.stderr += d.toString()));
@@ -237,7 +267,20 @@ class McpClient {
   }
 
   async call(name: string, args: Record<string, unknown> = {}): Promise<CallResult> {
-    const r = await this.rpc('tools/call', { name, arguments: args });
+    // Multi-vault contract (spec D3): mutating tools hard-require `vault`.
+    // The suite runs single-vault via VAULT_PATH, so the client injects the
+    // absorbed vault's id on every vault-scoped call (tests can still pass an
+    // explicit `vault` — or set autoVault:false — to exercise the contract).
+    // (`vault: undefined` — key present — opts OUT of injection: JSON-RPC
+    // serialization drops it, so the server sees no vault argument at all.)
+    const finalArgs =
+      (this.opts.autoVault ?? true) &&
+      this.vaultId !== undefined &&
+      !REGISTRY_GLOBAL_TOOLS.has(name) &&
+      !('vault' in args)
+        ? { vault: this.vaultId, ...args }
+        : args;
+    const r = await this.rpc('tools/call', { name, arguments: finalArgs });
     return {
       text: r?.result?.content?.[0]?.text,
       isError: r?.result?.isError,
@@ -261,6 +304,10 @@ class McpClient {
       this.srv.kill('SIGTERM');
       await new Promise((r) => setTimeout(r, 400));
       if (!this.exited) this.srv.kill('SIGKILL');
+    }
+    if (this.configHome) {
+      fs.rmSync(this.configHome, { recursive: true, force: true });
+      this.configHome = null;
     }
   }
 }
@@ -305,18 +352,79 @@ describe('MCP stdio server (mcp.ts) — portable integration suite', () => {
       'get_schema', 'set_schema', 'get_schema_designer', 'search_entities',
       'validate_project', 'reconcile_relationships', 'get_project_overview',
       'rebuild_index',
+      // Multi-vault surface (spec §7/§8).
+      'list_vaults', 'add_vault', 'remove_vault',
+      'list_workspaces', 'add_workspace', 'remove_workspace',
     ]) {
       expect(tools).toContain(t);
     }
-    expect(tools.length).toBeGreaterThanOrEqual(20);
+    expect(tools.length).toBeGreaterThanOrEqual(26);
+  });
+
+  describe('multi-vault routing contract (single absorbed VAULT_PATH vault)', () => {
+    test('list_vaults shows the absorbed VAULT_PATH vault as transient', async () => {
+      const r = await client.callJson('list_vaults');
+      expect(r.count).toBe(1);
+      expect(r.vaults[0].id).toBe(client.vaultId);
+      expect(r.vaults[0].path).toBe(vault); // absorbed verbatim (path.resolve, no realpath)
+      expect(r.vaults[0].exists).toBe(true);
+      expect(r.vaults[0].transient).toBe(true);
+    });
+
+    test('mutating tools REQUIRE vault even with exactly one vault registered (D3)', async () => {
+      const r = await client.call('create_entity', {
+        vault: undefined,
+        type: 'task',
+        title: 'Should not be created',
+        properties: { goal: 'g' },
+      });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/create_entity requires an explicit 'vault'/);
+      expect(r.text).toMatch(/list_vaults/);
+    });
+
+    test('read-only tools default to the sole vault and every JSON result echoes it (D3)', async () => {
+      // No vault arg passed — resolves to the single registered vault.
+      const gs = await client.callJson('get_schema', { vault: undefined });
+      expect(gs.vault).toBe(client.vaultId);
+      const se = await client.callJson('search_entities', { vault: undefined, filters: { type: ['task'] } });
+      expect(se.vault).toBe(client.vaultId);
+      // Mutating tool with the explicit vault echoes it too.
+      const ri = await client.callJson('rebuild_index');
+      expect(ri.vault).toBe(client.vaultId);
+    });
+
+    test('an unregistered vault id errors with VaultNotFound-style guidance', async () => {
+      const r = await client.call('get_entity', { vault: 'no-such-vault', id: 'M-001' });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/'no-such-vault' is not registered/);
+      expect(r.text).toContain(client.vaultId!);
+    });
+
+    test('workspaces round-trip: add is confinement-gated, list reflects state', async () => {
+      // Out-of-allowedRoots path is rejected at registration (allowedRoots is
+      // empty in the isolated config → default-deny).
+      const bad = await client.call('add_workspace', { name: 'evil', path: '/etc' });
+      expect(bad.isError).toBe(true);
+      expect(bad.text).toMatch(/not within allowedRoots/);
+
+      const list = await client.callJson('list_workspaces');
+      expect(list.vault).toBe(client.vaultId);
+      expect(list.count).toBe(0);
+    });
   });
 
   describe('schema tools', () => {
-    test('get_schema bootstraps schema.json and reports the default source', async () => {
+    test('get_schema bootstraps schema.json and serves it as the source of truth', async () => {
       const gs = await client.callJson('get_schema');
       expect(gs.errors).toEqual([]);
-      // On first boot the schema was bootstrapped from the codified default.
-      expect(gs.source).toBe('default');
+      // Multi-vault contract change: the VAULT_PATH startup bootstrap writes
+      // schema.json (from the codified default) BEFORE the lazily-built engine
+      // reads it, so get_schema reports source 'file' — the file on disk is
+      // now the single source of truth. (Pre-W8 the same module state did
+      // both, so first boot reported 'default'.)
+      expect(gs.source).toBe('file');
+      expect(gs.vault).toBe(client.vaultId);
       expect(Array.isArray(gs.schema.relationships)).toBe(true);
       expect(gs.schema.relationships.length).toBeGreaterThan(0);
       expect(gs.schema.entityTypes.length).toBe(6);
@@ -433,14 +541,18 @@ describe('MCP stdio server (mcp.ts) — portable integration suite', () => {
       expect(fetched.fields.goal).toBe('Cover the MCP tools');
     });
 
-    test('create_entity with invalid status is rejected (validation isError)', async () => {
+    test('create_entity with invalid status is rejected (SchemaMismatch at dispatch, D8)', async () => {
       const res = await client.call('create_entity', {
         type: 'decision',
         title: 'Bad status decision',
         properties: { status: 'Totally Invalid Status' },
       });
       expect(res.isError).toBe(true);
-      expect(res.text).toMatch(/Validation failed|Invalid status/i);
+      // Accept-then-match: dispatch rejects with the resolved vault's identity
+      // and its valid values (was a generic "Validation failed" pre-multi-vault).
+      expect(res.text).toMatch(/does not match the schema of vault/i);
+      expect(res.text).toContain(`vault '${client.vaultId}'`);
+      expect(res.text).toMatch(/Pending/); // names the type's valid statuses
     });
 
     test('update_entity mutates a field and persists', async () => {
@@ -1005,13 +1117,15 @@ describe('mcp.ts error/edge paths — read-mostly fixture', () => {
       expect(r.results[3].error).toMatch(/Invalid operation/);
     });
 
-    test('batch create with an invalid status fails validation (per-op)', async () => {
+    test('batch create with an invalid status fails per-op (SchemaMismatch at dispatch, D8)', async () => {
       const r = await c.callJson('entities', {
         action: 'batch',
         ops: [{ client_id: 'v', op: 'create', type: 'task', payload: { title: 'x', goal: 'g', status: 'Nope' } }],
       });
       expect(r.results[0].success).toBe(false);
-      expect(r.results[0].error).toMatch(/Validation failed/);
+      // Per-item accept-then-match rejection naming the resolved vault
+      // (was the validator's generic "Validation failed" pre-multi-vault).
+      expect(r.results[0].error).toMatch(/status 'Nope'.*does not match the schema of vault/);
     });
 
     test('batch atomic mode aborts with isError on first failure', async () => {
@@ -1940,5 +2054,241 @@ describe('mcp.ts set_schema hot-reload: custom types + schema-driven validation 
     expect(hit!.suggestion).toContain('Point `affects` at the 5 documents');
     // Fan-out stays advisory-only.
     expect((v.violations as Array<{ rule: string }>).every(x => !x.rule.includes('FANOUT'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MULTI-VAULT END-TO-END (spec §6.4 acceptance): TWO registered vaults with
+// DIFFERENT schemas served by one process, NO VAULT_PATH — the registry comes
+// entirely from the global mcp.json. Verifies vault isolation, the >1-vault
+// plain-enum tool surface (D8 API layer), dispatch-time SchemaMismatch
+// (D8 authority), per-item batch matching, and result echo (D3).
+// Tests are order-dependent (vault B's custom schema is set first).
+// ---------------------------------------------------------------------------
+describe('multi-vault: two vaults with different schemas, no VAULT_PATH', () => {
+  let configHome: string;
+  let vaultA: string;
+  let vaultB: string;
+  let c: McpClient;
+
+  beforeAll(async () => {
+    vaultA = makeVault(FIXTURE); // the clean 6-entity fixture
+    vaultB = makeVault({});      // empty — engine bootstrap writes its schema.json
+    configHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-mv-config-'));
+    fs.mkdirSync(path.join(configHome, 'ostanlabs'), { recursive: true });
+    fs.writeFileSync(
+      path.join(configHome, 'ostanlabs', 'mcp.json'),
+      JSON.stringify({
+        version: 1,
+        allowedRoots: [],
+        vaults: [
+          { id: 'vault-a', name: 'Vault A', path: vaultA },
+          { id: 'vault-b', name: 'Vault B', path: vaultB },
+        ],
+      }, null, 2),
+      'utf-8',
+    );
+    c = new McpClient(null, { env: { XDG_CONFIG_HOME: configHome } });
+    await c.start();
+  }, 120000);
+
+  afterAll(async () => {
+    if (c) await c.stop();
+    for (const d of [vaultA, vaultB, configHome]) {
+      if (d) fs.rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  test('list_vaults sees both config vaults (neither transient)', async () => {
+    const r = await c.callJson('list_vaults');
+    expect(r.count).toBe(2);
+    const ids = r.vaults.map((v: any) => v.id).sort();
+    expect(ids).toEqual(['vault-a', 'vault-b']);
+    expect(r.vaults.every((v: any) => v.exists === true)).toBe(true);
+    expect(r.vaults.every((v: any) => v.transient === undefined)).toBe(true);
+  });
+
+  test('tools/list with >1 vault emits PLAIN strings for type enums (D8 API layer)', async () => {
+    const defs = await c.listToolDefs();
+    const createDef = defs.find((t: any) => t.name === 'create_entity');
+    expect(createDef.inputSchema.properties.type.enum).toBeUndefined();
+    expect(createDef.inputSchema.properties.type.description).toMatch(/get_schema\(\{vault\}\)/);
+    expect(createDef.inputSchema.required).toContain('vault');
+    const covDef = defs.find((t: any) => t.name === 'get_feature_coverage');
+    expect(covDef.inputSchema.properties.phase.enum).toBeUndefined();
+  });
+
+  test('read-only tool without vault errors listing the registered ids', async () => {
+    const r = await c.call('get_entity', { id: 'M-001' });
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/'vault' is required when more than one vault is registered/);
+    expect(r.text).toContain('vault-a');
+    expect(r.text).toContain('vault-b');
+  });
+
+  test('set_schema targets ONLY the named vault (B gains a custom type; A untouched)', async () => {
+    const gs = await c.callJson('get_schema', { vault: 'vault-b' });
+    expect(gs.vault).toBe('vault-b');
+    const custom = JSON.parse(JSON.stringify(gs.schema));
+    custom.entityTypes.push({
+      type: 'risk',
+      label: 'Risk',
+      idPrefix: 'RISK',
+      folder: 'risks',
+      statuses: ['Open', 'Mitigated', 'Accepted'],
+      defaultStatus: 'Open',
+      fields: [],
+    });
+    const res = await c.callJson('set_schema', { vault: 'vault-b', schema: custom });
+    expect(res.saved).toBe(true);
+    expect(res.vault).toBe('vault-b');
+    expect(res.entityTypes).toBe(7);
+
+    // Vault A's schema is untouched — independent engines per vault.
+    const gsA = await c.callJson('get_schema', { vault: 'vault-a' });
+    expect(gsA.vault).toBe('vault-a');
+    expect(gsA.schema.entityTypes.length).toBe(6);
+  });
+
+  test('accept-then-match: the type valid in B is created in B but rejected for A with SchemaMismatch', async () => {
+    const ok = await c.call('create_entity', { vault: 'vault-b', type: 'risk', title: 'B-only risk' });
+    expect(ok.isError).toBeFalsy();
+    expect(ok.text).toMatch(/Created risk RISK-\d+/);
+    expect(ok.text).toContain('Vault: vault-b');
+
+    const bad = await c.call('create_entity', { vault: 'vault-a', type: 'risk', title: 'Should fail' });
+    expect(bad.isError).toBe(true);
+    // Names the RESOLVED vault + its valid values, never falls back to B.
+    expect(bad.text).toMatch(/type 'risk' does not match the schema of vault 'vault-a'/);
+    expect(bad.text).toMatch(/milestone.*story.*task/s);
+    expect(bad.text).toContain(`get_schema({vault: 'vault-a'})`);
+  });
+
+  test('entities batch: PER-ITEM SchemaMismatch — valid sibling op still succeeds', async () => {
+    const r = await c.callJson('entities', {
+      vault: 'vault-a',
+      action: 'batch',
+      ops: [
+        { client_id: 'good', op: 'create', type: 'task', payload: { title: 'Valid in A', goal: 'g' } },
+        { client_id: 'bad', op: 'create', type: 'risk', payload: { title: 'Invalid in A' } },
+      ],
+    });
+    expect(r.vault).toBe('vault-a');
+    expect(r.summary.succeeded).toBe(1);
+    expect(r.summary.failed).toBe(1);
+    expect(r.results[0].success).toBe(true);
+    expect(r.results[0].id).toMatch(/^T-\d+/);
+    expect(r.results[1].success).toBe(false);
+    expect(r.results[1].error).toMatch(/type 'risk' does not match the schema of vault 'vault-a'/);
+  });
+
+  test('vault isolation: an entity of A is invisible in B; results echo the resolved id', async () => {
+    const inA = await c.callJson('get_entity', { vault: 'vault-a', id: 'M-001' });
+    expect(inA.vault).toBe('vault-a');
+    expect(inA.title).toBe('Q1 Launch');
+
+    const inB = await c.call('get_entity', { vault: 'vault-b', id: 'M-001' });
+    expect(inB.isError).toBe(true);
+    expect(inB.text).toMatch(/not found in vault 'vault-b'/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// add_vault / remove_vault LIFECYCLE (spec §7.3 acceptance): scaffold on an
+// empty dir creates exactly the schema-derived tree; confinement rejects
+// out-of-allowedRoots paths; "auto" refuses non-vault dirs; remove_vault
+// deregisters WITHOUT touching files.
+// ---------------------------------------------------------------------------
+describe('add_vault / remove_vault lifecycle — confined roots, no VAULT_PATH', () => {
+  let configHome: string;
+  let root: string; // the single allowedRoot new vaults must live under
+  let c: McpClient;
+
+  beforeAll(async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-vroot-'));
+    configHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-av-config-'));
+    fs.mkdirSync(path.join(configHome, 'ostanlabs'), { recursive: true });
+    fs.writeFileSync(
+      path.join(configHome, 'ostanlabs', 'mcp.json'),
+      JSON.stringify({ version: 1, allowedRoots: [root], vaults: [] }, null, 2),
+      'utf-8',
+    );
+    c = new McpClient(null, { env: { XDG_CONFIG_HOME: configHome } });
+    await c.start();
+  }, 120000);
+
+  afterAll(async () => {
+    if (c) await c.stop();
+    for (const d of [root, configHome]) {
+      if (d) fs.rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  test('add_vault rejects a path outside allowedRoots BEFORE touching anything', async () => {
+    const r = await c.call('add_vault', { path: path.join(os.homedir(), 'definitely-not-allowed-vault') });
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/not within allowedRoots/);
+  });
+
+  test('add_vault scaffolds a fresh vault: schema + type folders + archive + workspaces + canvas', async () => {
+    const target = path.join(root, 'fresh-vault');
+    const r = await c.callJson('add_vault', { path: target });
+    expect(r.mode).toBe('created');
+    expect(r.vault).toBe('fresh-vault');
+
+    // On-disk scaffold (D4): schema.json, per-type folders under entities/,
+    // archive/, workspaces.json = {}, default canvas.
+    expect(fs.existsSync(path.join(target, 'schema.json'))).toBe(true);
+    expect(fs.existsSync(path.join(target, 'archive'))).toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(target, 'workspaces.json'), 'utf-8'))).toEqual({});
+    expect(fs.existsSync(path.join(target, 'projects', 'Project.canvas'))).toBe(true);
+    const schema = JSON.parse(fs.readFileSync(path.join(target, 'schema.json'), 'utf-8'));
+    for (const t of schema.entityTypes) {
+      expect(fs.existsSync(path.join(target, 'entities', t.folder))).toBe(true);
+    }
+
+    // Registered and immediately usable (single vault → reads default to it).
+    const lv = await c.callJson('list_vaults');
+    expect(lv.vaults.map((v: any) => v.id)).toContain('fresh-vault');
+    const created = await c.call('create_entity', {
+      vault: 'fresh-vault', type: 'task', title: 'First task', properties: { goal: 'g' },
+    });
+    expect(created.isError).toBeFalsy();
+    expect(created.text).toMatch(/Created task T-\d+/);
+    expect(created.text).toContain('Path: entities/tasks/');
+  });
+
+  test('add_vault "auto" refuses a non-empty non-vault dir; "never" force-registers it', async () => {
+    const junk = path.join(root, 'not-a-vault');
+    fs.mkdirSync(junk, { recursive: true });
+    fs.writeFileSync(path.join(junk, 'random.txt'), 'hello', 'utf-8');
+
+    const refused = await c.call('add_vault', { path: junk });
+    expect(refused.isError).toBe(true);
+    expect(refused.text).toMatch(/does not look like a vault/);
+    expect(refused.text).toMatch(/bootstrap:"never"/);
+    // Refusal wrote nothing.
+    expect(fs.readdirSync(junk)).toEqual(['random.txt']);
+
+    const forced = await c.callJson('add_vault', { path: junk, bootstrap: 'never' });
+    expect(forced.mode).toBe('registered');
+    expect(forced.vault).toBe('not-a-vault');
+    // register-only: still nothing written.
+    expect(fs.readdirSync(junk)).toEqual(['random.txt']);
+  });
+
+  test('remove_vault deregisters WITHOUT deleting any files', async () => {
+    const junk = path.join(root, 'not-a-vault');
+    const r = await c.callJson('remove_vault', { id: 'not-a-vault' });
+    expect(r.removed).toBe(true);
+
+    const lv = await c.callJson('list_vaults');
+    expect(lv.vaults.map((v: any) => v.id)).not.toContain('not-a-vault');
+    // Files fully intact.
+    expect(fs.readFileSync(path.join(junk, 'random.txt'), 'utf-8')).toBe('hello');
+
+    const gone = await c.call('remove_vault', { id: 'not-a-vault' });
+    expect(gone.isError).toBe(true);
+    expect(gone.text).toMatch(/not registered/);
   });
 });

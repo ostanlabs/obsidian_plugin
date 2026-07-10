@@ -293,10 +293,16 @@ export async function buildVaultEngine(
 
 /**
  * Archive one entity: serialize a copy with `archived: true` (original markdown
- * body preserved) to the pathResolver's archive target, READ IT BACK to verify,
+ * body preserved) to the archive/<type-folder>/ target, READ IT BACK to verify,
  * and only then delete the original and update the index (archived flag + new
  * path). Throws — leaving the source fully intact — if the target already
  * exists (never overwrite) or the written copy fails verification.
+ *
+ * The archive target derives from the PARSED entity's `type`, not from the id
+ * prefix (pathResolver.getArchivePath → getTypeFromId throws "Cannot determine
+ * type from id" on legacy/custom-prefixed ids like SC-9 that real vaults
+ * contain — the frontmatter type is the authority, matching the pre-W8
+ * cleanup_completed path construction).
  *
  * Replaces cleanup_completed's buggy archive (copy written, original never
  * deleted, false comment — mcp.ts:2246) at the W8 integration wave.
@@ -316,7 +322,16 @@ export async function archiveEntity(
   const entity = eng.parser.parse(raw, sourcePath);
   const body = extractBody(raw);
 
-  const targetPath = eng.pathResolver.getArchivePath(entity.id, entity.title);
+  const typeDef = eng.schema.getEntityType(entity.type);
+  if (!typeDef) {
+    throw new Error(
+      `Entity ${id} has type '${entity.type}', which is not in this vault's schema — cannot resolve its archive folder.`
+    );
+  }
+  const archiveTypeFolder = eng.entry.archiveFolder
+    ? `${eng.entry.archiveFolder}/${typeDef.folder}`
+    : typeDef.folder;
+  const targetPath = `${archiveTypeFolder}/${eng.pathResolver.generateFilename(entity.id, entity.title)}`;
   if (targetPath === sourcePath) {
     throw new Error(`Entity ${id} is already at its archive path: ${sourcePath}`);
   }
