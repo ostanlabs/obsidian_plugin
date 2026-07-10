@@ -49,8 +49,17 @@ import type { RuntimeEntity, EntityType, EntityId, EntityMetadata } from './src/
 import type { MsrlEngine, QueryResult, IndexStatus } from '@ostanlabs/md-retriever';
 
 // Multi-vault machinery (src/mcp/* — Wave 1 modules wired here, W8)
-import { VaultNotFound } from './src/mcp/types.js';
-import type { VaultEntry } from './src/mcp/types.js';
+import { VaultNotFound, SchemaInvalid } from './src/mcp/types.js';
+import type { VaultEntry, ReconcileResult } from './src/mcp/types.js';
+// Transactional schema-change reconciler (D5/§9, W10 — wired here in W11):
+// set_schema routes STRUCTURAL diffs through it; reconcile_vault is the
+// catch-up path after a hand-edited schema.json.
+import {
+  reconcileVault,
+  diffSchemas,
+  hasStructuralChanges,
+  computeSchemaVersionBump,
+} from './src/mcp/reconcile.js';
 import {
   buildVaultEngine,
   archiveEntity,
@@ -400,13 +409,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'set_schema',
-        description: 'Configure the vault\'s relationships/schema. Writes <vault>/schema.json (the single source of truth for both the MCP validator and the plugin positioning) and hot-reloads all schema-derived machinery (path routing, index scanning, validation). The schema also carries validation rules (requiredForTypes parent rules, fan-out limits) that validate_project derives its rules from, positioning metadata, and settings.defaultCanvas (bootstrapped if missing after a successful save). Provide a full "schema" object, or a "relationships" array to merge into the current schema. Invalid schemas are rejected and not saved.',
+        description: 'Configure the vault\'s relationships/schema. Writes <vault>/schema.json (the single source of truth for both the MCP validator and the plugin positioning), bumps schemaVersion, and hot-reloads all schema-derived machinery (path routing, index scanning, validation). Provide a full "schema" object, or a "relationships" array to merge into the current schema. Invalid schemas are rejected and not saved. STRUCTURAL changes (entity types added/removed, type folders renamed, relationships added/removed) are reconciled against the vault\'s files transactionally: removing a type ARCHIVES its entities into archive/<old-folder>/ (copy-then-delete — entity files are never destroyed), folder renames move files with collision checks, and added relationships are inverse-backfilled. Pass dryRun: true to preview the exact change plan (folders to create, the entity ids to be archived, filename collisions, dangling refs left on survivors) WITHOUT writing anything. The schema also carries validation rules (requiredForTypes parent rules, fan-out limits) that validate_project derives its rules from, positioning metadata, and settings.defaultCanvas (bootstrapped if missing after a successful save). CAUTION: reconciling a vault currently open in Obsidian is best-effort — archival and folder renames change file inodes, so the plugin may miss those renames until Obsidian reloads.',
         inputSchema: {
           type: 'object',
           properties: {
             vault: vaultRequired,
             schema: { type: 'object', description: 'Full Schema object (entityTypes, relationships, settings, workstreams).' },
             relationships: { type: 'array', description: 'Relationships array to merge into the current schema (relationships-only edit).' },
+            dryRun: { type: 'boolean', description: 'Validate and diff only: return the reconcile plan (entities to archive, folders, collisions, dangling refs) without writing anything.', default: false },
+          },
+          required: ['vault'],
+        },
+      },
+      {
+        name: 'reconcile_vault',
+        description: 'Catch the vault\'s folders/entities up to a hand-edited <vault>/schema.json. Diffs the last-applied (active) schema against the schema.json currently on disk and reconciles the difference transactionally (same machinery as set_schema): removing a type ARCHIVES its entities into archive/<old-folder>/ (copy-then-delete — entity files are never destroyed), folder renames move files with collision checks, and added relationships are inverse-backfilled. Returns { upToDate: true } when the on-disk schema already matches the active one; an invalid on-disk schema.json is rejected with its validation errors (the last-good schema stays active). Pass dryRun: true to preview the exact change plan (folders to create, the entity ids to be archived, filename collisions, dangling refs left on survivors) WITHOUT writing anything. CAUTION: reconciling a vault currently open in Obsidian is best-effort — archival and folder renames change file inodes, so the plugin may miss those renames until Obsidian reloads.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultRequired,
+            dryRun: { type: 'boolean', description: 'Return the reconcile plan without writing anything.', default: false },
           },
           required: ['vault'],
         },
@@ -965,7 +987,7 @@ Scaffold writes schema.json (the default schema), one folder per entity type, ar
 // resolution so bogus names error as "Unknown tool", not as a vault problem).
 const VAULT_SCOPED_TOOLS = new Set<string>([
   'create_entity', 'list_entities', 'get_entity', 'update_entity',
-  'get_schema', 'set_schema', 'get_schema_designer',
+  'get_schema', 'set_schema', 'reconcile_vault', 'get_schema_designer',
   'search_entities', 'get_project_overview', 'reconcile_relationships',
   'rebuild_index', 'read_docs', 'update_doc', 'list_files',
   'analyze_project_state', 'get_feature_coverage', 'validate_project',
@@ -1596,12 +1618,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Accepts a FULL schema object, or a relationships[] array to merge into the
         // current schema (the designer UI edits relationships only).
         // NOTE: set_schema payloads are exempt from accept-then-match (they
-        // DEFINE the schema) but still gated by validateSchema. Folder
-        // reconciliation (D5) is wired in a follow-up wave — this stays
-        // reconcile-free for now.
-        const { schema: fullSchema, relationships } = args as {
+        // DEFINE the schema) but still gated by validateSchema.
+        //
+        // D5 (spec §9): STRUCTURAL diffs (types added/removed, folders renamed,
+        // relationships added/removed) go through the transactional reconciler,
+        // which OWNS the whole commit — it writes the bumped schema.json itself,
+        // hot-swaps the engine and rescans; we must NOT write the file a second
+        // time around it. Non-structural edits keep the direct fast path (write
+        // + applySchema) with the SAME schemaVersion bump rule as the reconciler.
+        const { schema: fullSchema, relationships, dryRun = false } = args as {
           schema?: Schema;
           relationships?: unknown[];
+          dryRun?: boolean;
         };
         let candidate: Schema;
         if (fullSchema) {
@@ -1623,27 +1651,157 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        // eng.fs is rooted at the vault → write the RELATIVE filename.
-        await eng.fs.writeFile(SCHEMA_FILENAME, serializeSchema(candidate));
-        console.error(`set_schema: wrote ${eng.entry.path}/${SCHEMA_FILENAME}`);
-        // Hot-reload the in-flight engine AND invalidate the registry cache so
-        // the next engine() rebuilds from the file (both stay consistent).
-        eng.applySchema(candidate);
+        const schemaPath = `${eng.entry.path}/${SCHEMA_FILENAME}`;
+        const diff = diffSchemas(eng.activeSchema, candidate);
+
+        if (!hasStructuralChanges(diff)) {
+          // FAST PATH — description/field/settings tweaks only: no files move.
+          const version = await computeSchemaVersionBump(eng.fs, eng.activeSchema, candidate);
+          if (dryRun) {
+            // Nothing structural → an empty plan: nothing to reconcile.
+            return jsonResult({
+              vault: eng.entry.id,
+              dryRun: true,
+              structuralChanges: false,
+              message: 'No structural changes (no types added/removed, folders renamed, or relationships added/removed) — nothing to reconcile. Re-run without dryRun to save.',
+              typesAdded: [],
+              typesRemoved: [],
+              foldersToCreate: [],
+              entitiesToArchive: [],
+              fileMoves: [],
+              collisions: [],
+              danglingRefs: [],
+              relsAdded: [],
+              relsRemoved: [],
+              schemaVersionFrom: version.from,
+              schemaVersionTo: version.to,
+            });
+          }
+          // eng.fs is rooted at the vault → write the RELATIVE filename.
+          const bumped: Schema = { ...candidate, schemaVersion: version.to };
+          await eng.fs.writeFile(SCHEMA_FILENAME, serializeSchema(bumped));
+          console.error(`set_schema: wrote ${schemaPath} (schemaVersion ${version.from} -> ${version.to})`);
+          // Hot-reload the in-flight engine AND invalidate the registry cache so
+          // the next engine() rebuilds from the file (both stay consistent).
+          eng.applySchema(bumped);
+          eng.schemaSource = 'file';
+          eng.schemaErrors = [];
+          registry.invalidate(eng.entry.id);
+          // If the new schema names a defaultCanvas that doesn't exist yet (or is
+          // an empty file), bootstrap/repair it now — same step as server startup.
+          await ensureDefaultCanvas(eng.fs, bumped);
+          // Tool inputSchemas embed schema-derived enums (entity types, feature
+          // phase values) — tell clients the tool surface may have changed.
+          try { await server.sendToolListChanged(); } catch { /* transport may not be connected */ }
+          return jsonResult({
+            vault: eng.entry.id,
+            saved: true,
+            path: schemaPath,
+            entityTypes: bumped.entityTypes.length,
+            relationships: bumped.relationships.length,
+            schemaVersion: { from: version.from, to: version.to },
+          });
+        }
+
+        // STRUCTURAL PATH — the reconciler. dryRun returns the plan and writes
+        // NOTHING (no lock, no files); apply archives/moves transactionally and
+        // writes the bumped schema.json + applySchema + rescan itself.
+        // The plan is built from eng.index — rescan first so it sees every file.
+        await eng.scanIndex();
+        const outcome = await reconcileVault(eng, eng.activeSchema, candidate, { dryRun });
+        if (dryRun) {
+          return jsonResult({
+            vault: eng.entry.id,
+            dryRun: true,
+            structuralChanges: true,
+            plan: outcome,
+          });
+        }
+        const result = outcome as ReconcileResult;
+        console.error(
+          `set_schema: reconciled ${schemaPath} (schemaVersion ${result.plan.schemaVersionFrom} -> ` +
+            `${result.plan.schemaVersionTo}; archived ${result.archived.length}, moved ${result.moved.length})`
+        );
+        // reconcileVault already hot-swapped the engine; keep registry + canvas
+        // + tool surface in step with it (same post-save steps as the fast path).
         eng.schemaSource = 'file';
         eng.schemaErrors = [];
         registry.invalidate(eng.entry.id);
-        // If the new schema names a defaultCanvas that doesn't exist yet (or is
-        // an empty file), bootstrap/repair it now — same step as server startup.
-        await ensureDefaultCanvas(eng.fs, candidate);
-        // Tool inputSchemas embed schema-derived enums (entity types, feature
-        // phase values) — tell clients the tool surface may have changed.
+        await ensureDefaultCanvas(eng.fs, eng.activeSchema);
         try { await server.sendToolListChanged(); } catch { /* transport may not be connected */ }
         return jsonResult({
           vault: eng.entry.id,
           saved: true,
-          path: `${eng.entry.path}/${SCHEMA_FILENAME}`,
-          entityTypes: candidate.entityTypes.length,
-          relationships: candidate.relationships.length,
+          path: schemaPath,
+          entityTypes: eng.activeSchema.entityTypes.length,
+          relationships: eng.activeSchema.relationships.length,
+          schemaVersion: { from: result.plan.schemaVersionFrom, to: result.plan.schemaVersionTo },
+          reconciled: {
+            typesAdded: result.plan.typesAdded,
+            typesRemoved: result.plan.typesRemoved,
+            archived: result.archived,
+            tombstoned: result.tombstoned,
+            moved: result.moved,
+            foldersCreated: result.foldersCreated,
+            foldersRemoved: result.foldersRemoved,
+            danglingRefs: result.plan.danglingRefs,
+          },
+        });
+      }
+
+      case 'reconcile_vault': {
+        // Catch-up after a hand-edited schema.json (spec §9.1): old = the
+        // engine's ACTIVE (last-applied) schema, new = the file on disk.
+        const { dryRun = false } = args as { dryRun?: boolean };
+        const loaded = await loadSchemaOrDefault(eng.fs, '');
+        if (loaded.errors.length > 0) {
+          // Present-but-invalid file → loud SchemaInvalid with the load errors;
+          // the last-good (active) schema stays in force.
+          throw new SchemaInvalid(loaded.errors);
+        }
+        if (JSON.stringify(loaded.schema) === JSON.stringify(eng.activeSchema)) {
+          return jsonResult({
+            vault: eng.entry.id,
+            upToDate: true,
+            schemaVersion: eng.activeSchema.schemaVersion,
+          });
+        }
+        // The plan is built from eng.index — rescan first so it sees every file.
+        await eng.scanIndex();
+        const outcome = await reconcileVault(eng, eng.activeSchema, loaded.schema, { dryRun });
+        if (dryRun) {
+          return jsonResult({
+            vault: eng.entry.id,
+            upToDate: false,
+            dryRun: true,
+            plan: outcome,
+          });
+        }
+        const result = outcome as ReconcileResult;
+        console.error(
+          `reconcile_vault: reconciled ${eng.entry.path}/${SCHEMA_FILENAME} (schemaVersion ` +
+            `${result.plan.schemaVersionFrom} -> ${result.plan.schemaVersionTo}; ` +
+            `archived ${result.archived.length}, moved ${result.moved.length})`
+        );
+        // Same post-apply steps as set_schema's structural path.
+        eng.schemaSource = 'file';
+        eng.schemaErrors = [];
+        registry.invalidate(eng.entry.id);
+        await ensureDefaultCanvas(eng.fs, eng.activeSchema);
+        try { await server.sendToolListChanged(); } catch { /* transport may not be connected */ }
+        return jsonResult({
+          vault: eng.entry.id,
+          upToDate: false,
+          applied: true,
+          schemaVersion: { from: result.plan.schemaVersionFrom, to: result.plan.schemaVersionTo },
+          typesAdded: result.plan.typesAdded,
+          typesRemoved: result.plan.typesRemoved,
+          archived: result.archived,
+          tombstoned: result.tombstoned,
+          moved: result.moved,
+          foldersCreated: result.foldersCreated,
+          foldersRemoved: result.foldersRemoved,
+          danglingRefs: result.plan.danglingRefs,
         });
       }
 

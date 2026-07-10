@@ -2292,3 +2292,213 @@ describe('add_vault / remove_vault lifecycle — confined roots, no VAULT_PATH',
     expect(gone.text).toMatch(/not registered/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// SCHEMA RECONCILIATION (spec §9, D5, W11): set_schema dryRun + transactional
+// type-removal reconcile, and reconcile_vault (catch-up after a hand-edited
+// schema.json). Own disposable fixture — type removal archives entity files,
+// which must not disturb the other suites. Tests are order-dependent:
+// dry-runs first, then the apply, then the hand-edit round.
+// ---------------------------------------------------------------------------
+describe('mcp.ts schema reconciliation: set_schema dryRun/apply + reconcile_vault — disposable fixture', () => {
+  let vault: string;
+  let c: McpClient;
+
+  /** The schema minus one entity type (and any relationships whose pairs
+   * reference it — validateSchema rejects pairs pointing at unknown types). */
+  function withoutType(schema: any, type: string): any {
+    const s = JSON.parse(JSON.stringify(schema));
+    s.entityTypes = s.entityTypes.filter((t: any) => t.type !== type);
+    s.relationships = s.relationships.filter((r: any) =>
+      r.pairs.every((p: any) => p.from !== type && p.to !== type),
+    );
+    return s;
+  }
+
+  beforeAll(async () => {
+    vault = makeVault(FIXTURE);
+    c = new McpClient(vault);
+    await c.start();
+  }, 120000);
+
+  afterAll(async () => {
+    if (c) await c.stop();
+    if (vault) fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test('tools/list exposes reconcile_vault + set_schema.dryRun; descriptions cover plan/archive/Obsidian caveat', async () => {
+    const defs = await c.listToolDefs();
+    const setDef = defs.find((t: any) => t.name === 'set_schema');
+    expect(setDef.inputSchema.properties.dryRun).toBeDefined();
+    expect(setDef.description).toMatch(/dryRun/);
+    expect(setDef.description).toMatch(/ARCHIVES/);
+    expect(setDef.description).toMatch(/never destroyed/);
+    expect(setDef.description).toMatch(/Obsidian.*best-effort/s);
+    const recDef = defs.find((t: any) => t.name === 'reconcile_vault');
+    expect(recDef).toBeDefined();
+    expect(recDef.inputSchema.required).toContain('vault');
+    expect(recDef.description).toMatch(/hand-edited/);
+    expect(recDef.description).toMatch(/ARCHIVES/);
+    expect(recDef.description).toMatch(/Obsidian.*best-effort/s);
+  });
+
+  test('reconcile_vault requires an explicit vault (MUTATING — never defaults)', async () => {
+    const r = await c.call('reconcile_vault', { vault: undefined });
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/reconcile_vault requires an explicit 'vault'/);
+  });
+
+  test('set_schema dryRun on a NON-structural edit returns an empty nothing-to-reconcile plan and writes nothing', async () => {
+    const gs = await c.callJson('get_schema');
+    const tweaked = JSON.parse(JSON.stringify(gs.schema));
+    tweaked.settings.defaultCanvas = 'projects/Tweaked.canvas';
+    const before = fs.readFileSync(path.join(vault, 'schema.json'), 'utf-8');
+
+    const r = await c.callJson('set_schema', { schema: tweaked, dryRun: true });
+    expect(r.vault).toBe(c.vaultId);
+    expect(r.dryRun).toBe(true);
+    expect(r.structuralChanges).toBe(false);
+    expect(r.message).toMatch(/nothing to reconcile/i);
+    expect(r.entitiesToArchive).toEqual([]);
+    expect(r.typesRemoved).toEqual([]);
+    expect(r.schemaVersionTo).toBe(r.schemaVersionFrom + 1);
+    // Wrote nothing: schema.json byte-identical, new canvas NOT bootstrapped.
+    expect(fs.readFileSync(path.join(vault, 'schema.json'), 'utf-8')).toBe(before);
+    expect(fs.existsSync(path.join(vault, 'projects', 'Tweaked.canvas'))).toBe(false);
+  });
+
+  test('set_schema dryRun with a type removal returns the archive plan and writes NOTHING', async () => {
+    const gs = await c.callJson('get_schema');
+    const candidate = withoutType(gs.schema, 'feature');
+    const schemaBefore = fs.readFileSync(path.join(vault, 'schema.json'), 'utf-8');
+    const entityBefore = fs.readFileSync(path.join(vault, 'features', 'F-001_login.md'), 'utf-8');
+
+    const r = await c.callJson('set_schema', { schema: candidate, dryRun: true });
+    expect(r.vault).toBe(c.vaultId);
+    expect(r.dryRun).toBe(true);
+    expect(r.structuralChanges).toBe(true);
+    expect(r.plan.vault).toBe(c.vaultId);
+    expect(r.plan.typesRemoved).toEqual(['feature']);
+    // The plan names the EXACT entity ids + archive targets.
+    expect(r.plan.entitiesToArchive).toEqual([
+      expect.objectContaining({
+        id: 'F-001',
+        type: 'feature',
+        sourcePath: 'features/F-001_login.md',
+        targetPath: 'archive/features/F-001_login.md',
+      }),
+    ]);
+    expect(r.plan.collisions).toEqual([]);
+    // Survivors still referencing F-001 are REPORTED, never stripped.
+    expect(r.plan.danglingRefs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ fromId: 'DOC-001', toId: 'F-001' })]),
+    );
+    expect(r.plan.schemaVersionTo).toBe(r.plan.schemaVersionFrom + 1);
+
+    // Byte-for-byte untouched: schema + entity intact, no archive/lock/journal.
+    expect(fs.readFileSync(path.join(vault, 'schema.json'), 'utf-8')).toBe(schemaBefore);
+    expect(fs.readFileSync(path.join(vault, 'features', 'F-001_login.md'), 'utf-8')).toBe(entityBefore);
+    expect(fs.existsSync(path.join(vault, 'archive'))).toBe(false);
+    expect(fs.existsSync(path.join(vault, '.mcp.lock'))).toBe(false);
+    expect(fs.existsSync(path.join(vault, '.mcp-reconcile-journal.json'))).toBe(false);
+  });
+
+  test('set_schema APPLY removing the type archives its entities (copy-then-delete) and survivors stay readable', async () => {
+    const gs = await c.callJson('get_schema');
+    const versionBefore = gs.schema.schemaVersion;
+    const candidate = withoutType(gs.schema, 'feature');
+
+    const r = await c.callJson('set_schema', { schema: candidate });
+    expect(r.vault).toBe(c.vaultId);
+    expect(r.saved).toBe(true);
+    expect(r.entityTypes).toBe(5);
+    expect(r.schemaVersion).toEqual({ from: versionBefore, to: versionBefore + 1 });
+    expect(r.reconciled.typesRemoved).toEqual(['feature']);
+    expect(r.reconciled.archived).toEqual(['F-001']);
+    expect(r.reconciled.tombstoned).toEqual(['F-001']);
+    expect(r.reconciled.foldersRemoved).toContain('features');
+
+    // Copy-then-delete: archive copy holds archived: true AND the body; source gone.
+    const archived = fs.readFileSync(path.join(vault, 'archive', 'features', 'F-001_login.md'), 'utf-8');
+    expect(archived).toMatch(/archived: true/);
+    expect(archived).toContain('Login feature.');
+    expect(fs.existsSync(path.join(vault, 'features'))).toBe(false);
+    // schema.json lacks the type and carries the bumped version.
+    const onDisk = JSON.parse(fs.readFileSync(path.join(vault, 'schema.json'), 'utf-8'));
+    expect(onDisk.entityTypes.map((t: any) => t.type)).not.toContain('feature');
+    expect(onDisk.schemaVersion).toBe(versionBefore + 1);
+    // Tombstone index records the archival.
+    const tomb = JSON.parse(fs.readFileSync(path.join(vault, '.mcp-tombstones.json'), 'utf-8'));
+    expect(tomb).toEqual([
+      expect.objectContaining({ id: 'F-001', archivedTo: 'archive/features/F-001_login.md' }),
+    ]);
+    // No lock/journal left behind.
+    expect(fs.existsSync(path.join(vault, '.mcp.lock'))).toBe(false);
+    expect(fs.existsSync(path.join(vault, '.mcp-reconcile-journal.json'))).toBe(false);
+
+    // Survivors readable through the hot-swapped engine.
+    const doc = await c.callJson('get_entity', { id: 'DOC-001' });
+    expect(doc.title).toBe('Auth Spec');
+    const listed = await c.call('list_entities', {});
+    expect(listed.isError).toBeFalsy();
+    expect(listed.text).toContain('M-001');
+    const gs2 = await c.callJson('get_schema');
+    expect(gs2.source).toBe('file');
+    expect(gs2.schema.entityTypes.map((t: any) => t.type)).not.toContain('feature');
+  });
+
+  test('reconcile_vault when in-sync returns upToDate (nothing to do)', async () => {
+    const r = await c.callJson('reconcile_vault', {});
+    expect(r.vault).toBe(c.vaultId);
+    expect(r.upToDate).toBe(true);
+  });
+
+  test('reconcile_vault dryRun after HAND-EDITING schema.json returns the plan without writing', async () => {
+    // Hand-edit directly on disk: remove the 'decision' type.
+    const onDisk = JSON.parse(fs.readFileSync(path.join(vault, 'schema.json'), 'utf-8'));
+    const edited = withoutType(onDisk, 'decision');
+    fs.writeFileSync(path.join(vault, 'schema.json'), JSON.stringify(edited, null, 2) + '\n', 'utf-8');
+
+    const r = await c.callJson('reconcile_vault', { dryRun: true });
+    expect(r.vault).toBe(c.vaultId);
+    expect(r.upToDate).toBe(false);
+    expect(r.dryRun).toBe(true);
+    expect(r.plan.typesRemoved).toEqual(['decision']);
+    expect(r.plan.entitiesToArchive.map((i: any) => i.id)).toEqual(['DEC-001']);
+    // Dry-run wrote nothing: source intact, no archive copy.
+    expect(fs.existsSync(path.join(vault, 'decisions', 'DEC-001_db.md'))).toBe(true);
+    expect(fs.existsSync(path.join(vault, 'archive', 'decisions'))).toBe(false);
+  });
+
+  test('reconcile_vault APPLY catches the vault up to the hand-edited schema (then reports upToDate)', async () => {
+    const r = await c.callJson('reconcile_vault', {});
+    expect(r.vault).toBe(c.vaultId);
+    expect(r.upToDate).toBe(false);
+    expect(r.applied).toBe(true);
+    expect(r.typesRemoved).toEqual(['decision']);
+    expect(r.archived).toEqual(['DEC-001']);
+    expect(r.tombstoned).toEqual(['DEC-001']);
+
+    // Copy-then-delete on disk.
+    expect(fs.existsSync(path.join(vault, 'archive', 'decisions', 'DEC-001_db.md'))).toBe(true);
+    expect(fs.existsSync(path.join(vault, 'decisions'))).toBe(false);
+    // The engine hot-swapped to the hand-edited schema...
+    const gs = await c.callJson('get_schema');
+    expect(gs.schema.entityTypes.map((t: any) => t.type)).not.toContain('decision');
+    // ...and a second reconcile_vault is a no-op.
+    const again = await c.callJson('reconcile_vault', {});
+    expect(again.upToDate).toBe(true);
+  });
+
+  test('reconcile_vault rejects an INVALID on-disk schema.json with its load errors (last-good kept)', async () => {
+    const good = fs.readFileSync(path.join(vault, 'schema.json'), 'utf-8');
+    fs.writeFileSync(path.join(vault, 'schema.json'), '{ not json', 'utf-8');
+    const bad = await c.call('reconcile_vault', {});
+    expect(bad.isError).toBe(true);
+    expect(bad.text).toMatch(/Schema rejected.*not valid JSON/s);
+    // The active (last-good) schema is untouched — restore and verify in-sync.
+    fs.writeFileSync(path.join(vault, 'schema.json'), good, 'utf-8');
+    const ok = await c.callJson('reconcile_vault', {});
+    expect(ok.upToDate).toBe(true);
+  });
+});

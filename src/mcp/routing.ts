@@ -40,6 +40,7 @@ export const MUTATING_TOOLS = new Set<string>([
   'update_entity',
   'entities',
   'set_schema',
+  'reconcile_vault',
   'update_doc',
   'manage_documents',
   'reconcile_relationships',

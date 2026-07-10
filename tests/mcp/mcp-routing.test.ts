@@ -83,6 +83,7 @@ describe('tool classification', () => {
         'manage_documents',
         'rebuild_index',
         'reconcile_relationships',
+        'reconcile_vault',
         'remove_workspace',
         'set_schema',
         'update_doc',

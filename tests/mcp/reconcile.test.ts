@@ -19,6 +19,8 @@ import { buildVaultEngine } from '../../src/mcp/vault-engine.js';
 import {
   reconcileVault,
   diffSchemas,
+  hasStructuralChanges,
+  computeSchemaVersionBump,
   readTombstones,
   RECONCILE_LOCK_FILENAME,
   RECONCILE_JOURNAL_FILENAME,
@@ -234,6 +236,76 @@ describe('diffSchemas', () => {
     ]);
     expect(diff3.typesAdded).toEqual([]);
     expect(diff3.typesRemoved).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hasStructuralChanges + computeSchemaVersionBump — the set_schema fast-path
+// contract (W11): non-structural edits skip the reconciler but must share its
+// exact schemaVersion bump rule.
+// ---------------------------------------------------------------------------
+
+describe('hasStructuralChanges', () => {
+  it('is false for an identical schema and for non-structural edits (settings/status tweaks)', () => {
+    expect(hasStructuralChanges(diffSchemas(SCHEMA_V1, SCHEMA_V1))).toBe(false);
+
+    const tweaked: Schema = structuredClone(SCHEMA_V1);
+    tweaked.settings.defaultCanvas = 'projects/Other.canvas';
+    tweaked.entityTypes[0].statuses = ['New', 'Doing', 'Done'];
+    expect(hasStructuralChanges(diffSchemas(SCHEMA_V1, tweaked))).toBe(false);
+  });
+
+  it('is true for each structural axis: type add/remove, folder rename, rel add/remove', () => {
+    expect(hasStructuralChanges(diffSchemas(SCHEMA_V1, SCHEMA_NO_GADGET))).toBe(true); // -type, -rel
+    expect(hasStructuralChanges(diffSchemas(SCHEMA_WIDGET_ONLY, SCHEMA_ADDED))).toBe(true); // +types, +rel
+    expect(hasStructuralChanges(diffSchemas(SCHEMA_V1, SCHEMA_RENAMED))).toBe(true); // folder rename
+
+    const relOnly: Schema = structuredClone(SCHEMA_V1);
+    relOnly.relationships = [];
+    expect(hasStructuralChanges(diffSchemas(SCHEMA_V1, relOnly))).toBe(true); // -rel only
+  });
+});
+
+describe('computeSchemaVersionBump', () => {
+  it('bumps from the ON-DISK schema.json version when content changed', async () => {
+    const fs = memFs(makeSchema({ version: 7, types: [WIDGET, GADGET], rels: [LINKAGE] }), {});
+    const tweaked: Schema = structuredClone(SCHEMA_V1);
+    tweaked.settings.defaultCanvas = 'projects/Other.canvas';
+    // oldSchema argument deliberately carries a DIFFERENT version: the file wins.
+    expect(await computeSchemaVersionBump(fs, SCHEMA_V1, tweaked)).toEqual({ from: 7, to: 8 });
+  });
+
+  it('keeps the version when content is identical to the on-disk file (idempotent re-save)', async () => {
+    const fs = memFs(makeSchema({ version: 3, types: [WIDGET, GADGET], rels: [LINKAGE] }), {});
+    const resave = makeSchema({ version: 999, types: [WIDGET, GADGET], rels: [LINKAGE] });
+    // schemaVersion itself is ignored by the content comparison.
+    expect(await computeSchemaVersionBump(fs, SCHEMA_V1, resave)).toEqual({ from: 3, to: 3 });
+  });
+
+  it('falls back to the in-memory old schema (and bumps) when no schema.json exists', async () => {
+    const fs = new InMemoryFileSystem({});
+    const old = makeSchema({ version: 5, types: [WIDGET] });
+    expect(await computeSchemaVersionBump(fs, old, SCHEMA_V1)).toEqual({ from: 5, to: 6 });
+  });
+
+  it('treats a non-numeric version as 0', async () => {
+    const raw = JSON.parse(serializeSchema(SCHEMA_V1));
+    raw.schemaVersion = 'one';
+    const fs = new InMemoryFileSystem({ 'schema.json': JSON.stringify(raw, null, 2) + '\n' });
+    const { from, to } = await computeSchemaVersionBump(fs, SCHEMA_V1, SCHEMA_NO_GADGET);
+    expect(from).toBe(0);
+    expect(to).toBe(1);
+  });
+
+  it('matches the version recorded by a reconcileVault dry-run plan (shared rule)', async () => {
+    const fs = memFs(makeSchema({ version: 4, types: [WIDGET, GADGET], rels: [LINKAGE] }), removalVaultFiles());
+    const eng = await makeEngine(fs);
+    const plan = (await reconcileVault(eng, eng.activeSchema, SCHEMA_NO_GADGET, {
+      dryRun: true,
+    })) as ExtendedReconcilePlan;
+    const bump = await computeSchemaVersionBump(fs, eng.activeSchema, SCHEMA_NO_GADGET);
+    expect({ from: plan.schemaVersionFrom, to: plan.schemaVersionTo }).toEqual(bump);
+    expect(bump).toEqual({ from: 4, to: 5 });
   });
 });
 

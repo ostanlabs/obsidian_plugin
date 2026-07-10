@@ -292,6 +292,44 @@ export async function readTombstones(fs: FileSystem): Promise<TombstoneEntry[]> 
 // diffSchemas
 // =============================================================================
 
+/**
+ * True when the diff has folder-level consequences that need the reconciler:
+ * types added/removed, type folders renamed, relationships added/removed.
+ * Non-structural edits (descriptions, fields, statuses, settings, positioning)
+ * can be applied by writing schema.json directly — no files move.
+ */
+export function hasStructuralChanges(diff: SchemaDiff): boolean {
+  return (
+    diff.typesAdded.length > 0 ||
+    diff.typesRemoved.length > 0 ||
+    diff.foldersRenamed.length > 0 ||
+    diff.relsAdded.length > 0 ||
+    diff.relsRemoved.length > 0
+  );
+}
+
+/**
+ * The schemaVersion bump rule, shared by the reconciler's plan and set_schema's
+ * non-structural fast path (the two write paths must agree — spec §9.1):
+ * `from` is the vault's on-disk schema.json version when present (the file is
+ * the source of truth), else the in-memory old schema's. Integer bump; content
+ * identical to the on-disk file (ignoring schemaVersion — e.g. an idempotent
+ * re-save or a roll-forward re-run) keeps the version instead of re-bumping.
+ */
+export async function computeSchemaVersionBump(
+  fs: FileSystem,
+  oldSchema: Schema,
+  newSchema: Schema
+): Promise<{ from: number; to: number }> {
+  const loaded = await loadSchemaOrDefault(fs, '');
+  const current = loaded.source === 'file' ? loaded.schema : oldSchema;
+  const fromRaw = current.schemaVersion;
+  const from = typeof fromRaw === 'number' && Number.isFinite(fromRaw) ? Math.floor(fromRaw) : 0;
+  const unchanged =
+    loaded.source === 'file' && schemaContentKey(current) === schemaContentKey(newSchema);
+  return { from, to: unchanged ? from : from + 1 };
+}
+
 export function diffSchemas(oldSchema: Schema, newSchema: Schema): SchemaDiff {
   const oldTypes = new Map(oldSchema.entityTypes.map((t) => [t.type, t]));
   const newTypes = new Map(newSchema.entityTypes.map((t) => [t.type, t]));
@@ -460,17 +498,8 @@ export async function buildReconcilePlan(
     if (!foldersToCreate.includes(folder)) foldersToCreate.push(folder);
   }
 
-  // --- schemaVersion from/to ---------------------------------------------------
-  // From the vault's schema.json when present (the file is the source of truth),
-  // else the in-memory old schema. Integer bump; identical content (a roll-forward
-  // re-run) keeps the version — re-runs must not bump twice.
-  const loaded = await loadSchemaOrDefault(fs, '');
-  const current = loaded.source === 'file' ? loaded.schema : oldSchema;
-  const fromRaw = current.schemaVersion;
-  const from = typeof fromRaw === 'number' && Number.isFinite(fromRaw) ? Math.floor(fromRaw) : 0;
-  const unchanged =
-    loaded.source === 'file' && schemaContentKey(current) === schemaContentKey(newSchema);
-  const to = unchanged ? from : from + 1;
+  // --- schemaVersion from/to (shared bump rule — see computeSchemaVersionBump) --
+  const { from, to } = await computeSchemaVersionBump(fs, oldSchema, newSchema);
 
   return {
     vault: eng.entry.id,
