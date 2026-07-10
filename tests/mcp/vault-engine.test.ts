@@ -10,6 +10,8 @@ import {
   buildVaultEngine,
   archiveEntity,
   ensureDefaultCanvas,
+  ensureDataviewInstalled,
+  enableCommunityPlugins,
 } from '../../src/mcp/vault-engine.js';
 import type { VaultEntry } from '../../src/mcp/types.js';
 import { DEFAULT_SCHEMA } from '../../src/entity-core/default-schema.js';
@@ -476,5 +478,80 @@ describe('ensureDefaultCanvas', () => {
     expect(await fs.readFile('projects/Other.canvas')).toBe(
       '{"nodes":[{"id":"x"}],"edges":[]}'
     );
+  });
+});
+
+describe('enableCommunityPlugins + ensureDataviewInstalled', () => {
+  const DV_MANIFEST = JSON.stringify({ id: 'dataview', version: '0.5.68' });
+
+  function stubFetcher(map: Record<string, string | null>) {
+    const calls: string[] = [];
+    const fetcher = async (url: string): Promise<string | null> => {
+      calls.push(url);
+      const name = url.slice(url.lastIndexOf('/') + 1);
+      return name in map ? map[name] : null;
+    };
+    return { fetcher, calls };
+  }
+
+  it('enableCommunityPlugins merges ids and preserves existing entries (idempotent)', async () => {
+    const fs = new InMemoryFileSystem({
+      '.obsidian/community-plugins.json': JSON.stringify(['some-other-plugin']),
+    });
+    await enableCommunityPlugins(fs, ['dataview']);
+    await enableCommunityPlugins(fs, ['dataview']); // idempotent
+    expect(JSON.parse(await fs.readFile('.obsidian/community-plugins.json'))).toEqual([
+      'some-other-plugin',
+      'dataview',
+    ]);
+  });
+
+  it('downloads Dataview via the fetcher, writes the plugin files, and enables it', async () => {
+    const fs = new InMemoryFileSystem({
+      '.obsidian/community-plugins.json': JSON.stringify(['canvas-project-manager']),
+    });
+    const { fetcher, calls } = stubFetcher({
+      'manifest.json': DV_MANIFEST,
+      'main.js': 'dv-main',
+      'styles.css': 'dv-css',
+    });
+    await ensureDataviewInstalled(fs, fetcher);
+    expect(calls).toHaveLength(3);
+    expect(await fs.readFile('.obsidian/plugins/dataview/manifest.json')).toBe(DV_MANIFEST);
+    expect(await fs.readFile('.obsidian/plugins/dataview/main.js')).toBe('dv-main');
+    expect(await fs.readFile('.obsidian/plugins/dataview/styles.css')).toBe('dv-css');
+    expect(JSON.parse(await fs.readFile('.obsidian/community-plugins.json'))).toEqual([
+      'canvas-project-manager',
+      'dataview',
+    ]);
+  });
+
+  it('already installed → no network calls, but still ensures it is enabled', async () => {
+    const fs = new InMemoryFileSystem({
+      '.obsidian/plugins/dataview/manifest.json': DV_MANIFEST,
+    });
+    const { fetcher, calls } = stubFetcher({});
+    await ensureDataviewInstalled(fs, fetcher);
+    expect(calls).toHaveLength(0);
+    expect(JSON.parse(await fs.readFile('.obsidian/community-plugins.json'))).toEqual(['dataview']);
+  });
+
+  it('download failure (offline) → warns and skips, writes nothing, does not throw', async () => {
+    const fs = new InMemoryFileSystem({});
+    const { fetcher } = stubFetcher({ 'manifest.json': null, 'main.js': null, 'styles.css': null });
+    await expect(ensureDataviewInstalled(fs, fetcher)).resolves.toBeUndefined();
+    expect(await fs.exists('.obsidian/plugins/dataview/manifest.json')).toBe(false);
+    expect(await fs.exists('.obsidian/community-plugins.json')).toBe(false);
+  });
+
+  it('rejects a downloaded manifest whose id is not dataview (tamper/redirect guard)', async () => {
+    const fs = new InMemoryFileSystem({});
+    const { fetcher } = stubFetcher({
+      'manifest.json': JSON.stringify({ id: 'evil-plugin', version: '1.0.0' }),
+      'main.js': 'evil',
+      'styles.css': '',
+    });
+    await ensureDataviewInstalled(fs, fetcher);
+    expect(await fs.exists('.obsidian/plugins/dataview/manifest.json')).toBe(false);
   });
 });

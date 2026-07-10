@@ -195,6 +195,8 @@ class McpClient {
       // Inherit env so NODE_V8_COVERAGE (coverage harness) propagates to the child.
       ...process.env,
       XDG_CONFIG_HOME: this.configHome,
+      // Dataview install downloads from GitHub — never in tests.
+      MCP_SKIP_DATAVIEW: '1',
       ...(this.opts.env ?? {}),
     };
     if (this.vault) env.VAULT_PATH = this.vault;
@@ -2276,12 +2278,14 @@ describe('add_vault / remove_vault lifecycle — confined roots, no VAULT_PATH',
     expect(r.vault).toBe('fresh-vault');
 
     // On-disk scaffold (D4): schema.json, per-type folders under entities/,
-    // archive/, workspaces.json = {}, default canvas.
+    // archive/, workspaces.json = {}, default canvas NAMED AFTER THE VAULT
+    // (basename here — no explicit name passed) with schema.json agreeing.
     expect(fs.existsSync(path.join(target, 'schema.json'))).toBe(true);
     expect(fs.existsSync(path.join(target, 'archive'))).toBe(true);
     expect(JSON.parse(fs.readFileSync(path.join(target, 'workspaces.json'), 'utf-8'))).toEqual({});
-    expect(fs.existsSync(path.join(target, 'projects', 'Project.canvas'))).toBe(true);
+    expect(fs.existsSync(path.join(target, 'projects', 'fresh-vault.canvas'))).toBe(true);
     const schema = JSON.parse(fs.readFileSync(path.join(target, 'schema.json'), 'utf-8'));
+    expect(schema.settings.defaultCanvas).toBe('projects/fresh-vault.canvas');
     for (const t of schema.entityTypes) {
       expect(fs.existsSync(path.join(target, 'entities', t.folder))).toBe(true);
     }

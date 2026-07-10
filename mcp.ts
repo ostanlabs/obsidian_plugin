@@ -67,6 +67,7 @@ import {
   archiveEntity,
   ensureDefaultCanvas,
   ensurePluginInstalled,
+  ensureDataviewInstalled,
   type NodeVaultEngine,
 } from './src/mcp/vault-engine.js';
 import { VaultRegistry, kebabSlug } from './src/mcp/vault-registry.js';
@@ -1130,7 +1131,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const scaffold = async (): Promise<void> => {
             // Scaffold (D4/§7.2 step 3) — schema-bootstrap owns the schema file.
             await nodeFsp.mkdir(confined, { recursive: true });
-            const schema = DEFAULT_SCHEMA;
+            // Personalize the default canvas after the vault (matches the
+            // established convention, e.g. AgentPlatform.canvas) instead of the
+            // generic Project.canvas — much easier to find on first open.
+            const displayName = (vaultName ?? nodePath.basename(confined))
+              .replace(/[\\/:*?"<>|]/g, '-')
+              .trim();
+            const schema: Schema = {
+              ...DEFAULT_SCHEMA,
+              settings: {
+                ...DEFAULT_SCHEMA.settings,
+                defaultCanvas: `${layout.canvasFolder}/${displayName || 'Project'}.canvas`,
+              },
+            };
             const schemaErrs = validateSchema(schema);
             if (schemaErrs.length > 0) {
               throw new Error(`Scaffold schema failed validation (nothing written): ${schemaErrs.join('; ')}`);
@@ -1152,6 +1165,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               const artifactsDir = await findPluginSourceDir();
               if (artifactsDir) await ensurePluginInstalled(vfs, artifactsDir);
               else console.error('WARNING: installPlugin requested but plugin artifacts not found next to the MCP server — skipped.');
+              // Dataview is a runtime dependency of the plugin's views —
+              // install + enable it too (warn-and-skip when offline).
+              await ensureDataviewInstalled(vfs);
             }
           };
 
@@ -3609,6 +3625,9 @@ async function bootstrapVaultPath(): Promise<void> {
   } else {
     console.error('WARNING: plugin artifacts (manifest.json/main.js) not found next to the MCP server — skipping plugin install.');
   }
+  // Dataview is a runtime dependency of the plugin's views — install/enable it
+  // too (no-op when present; warn-and-skip when offline).
+  await ensureDataviewInstalled(fs);
 }
 
 // Start the server

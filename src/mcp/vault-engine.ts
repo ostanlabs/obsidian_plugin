@@ -483,22 +483,113 @@ export async function ensurePluginInstalled(fs: FileSystem, artifactsDir: string
       await fs.writeFile(`${pluginDir}/styles.css`, await nodeReadFile(join(artifactsDir, 'styles.css'), 'utf8'));
     } catch { /* styles.css is optional */ }
 
-    // Register in community-plugins.json so Obsidian enables it on next load
-    // (preserving any other enabled plugins).
-    const communityPath = '.obsidian/community-plugins.json';
-    let enabled: string[] = [];
-    if (await fs.exists(communityPath)) {
-      try {
-        const parsed = JSON.parse(await fs.readFile(communityPath));
-        if (Array.isArray(parsed)) enabled = parsed;
-      } catch { /* malformed → rewrite with just our id below */ }
-    }
-    if (!enabled.includes(manifest.id)) {
-      enabled.push(manifest.id);
-      await fs.writeFile(communityPath, JSON.stringify(enabled, null, 2) + '\n');
-    }
+    // Register in community-plugins.json so Obsidian enables it on next load.
+    await enableCommunityPlugins(fs, [manifest.id]);
     console.error(`Installed plugin ${manifest.id} v${manifest.version} into ${pluginDir} (and enabled it in community-plugins.json).`);
   } catch (e) {
     console.error(`WARNING: could not install the bundled plugin: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * Merge plugin ids into `.obsidian/community-plugins.json` (Obsidian's
+ * enabled-plugins list), preserving whatever else is already enabled.
+ * Malformed existing content is rewritten with just the requested ids.
+ */
+export async function enableCommunityPlugins(fs: FileSystem, ids: string[]): Promise<void> {
+  const communityPath = '.obsidian/community-plugins.json';
+  let enabled: string[] = [];
+  if (await fs.exists(communityPath)) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(communityPath));
+      if (Array.isArray(parsed)) enabled = parsed;
+    } catch { /* malformed → rewrite below */ }
+  }
+  let changed = false;
+  for (const id of ids) {
+    if (!enabled.includes(id)) {
+      enabled.push(id);
+      changed = true;
+    }
+  }
+  if (changed) {
+    await fs.writeFile(communityPath, JSON.stringify(enabled, null, 2) + '\n');
+  }
+}
+
+/** Downloads one release asset; returns null on any failure (offline etc.). */
+export type AssetFetcher = (url: string) => Promise<string | null>;
+
+const DATAVIEW_RELEASE_BASE =
+  'https://github.com/blacksmithgu/obsidian-dataview/releases/latest/download';
+
+async function defaultAssetFetcher(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) return null;
+    return await res.text();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Install the Dataview community plugin (a runtime dependency of the
+ * canvas-project-manager views) into `.obsidian/plugins/dataview/` and enable
+ * it. Assets come from the project's GitHub latest-release download URLs.
+ *
+ * Deliberately conservative:
+ *  - already installed (any version) → untouched, no network (we never
+ *    auto-upgrade a third-party plugin);
+ *  - offline / download failure → WARN and skip; the vault stays usable and
+ *    the user can install Dataview from Obsidian's plugin browser instead;
+ *  - `MCP_SKIP_DATAVIEW=1` skips entirely (tests, air-gapped setups).
+ */
+export async function ensureDataviewInstalled(
+  fs: FileSystem,
+  fetcher: AssetFetcher = defaultAssetFetcher
+): Promise<void> {
+  if (process.env.MCP_SKIP_DATAVIEW === '1') return;
+  try {
+    const pluginDir = '.obsidian/plugins/dataview';
+    if (await fs.exists(`${pluginDir}/manifest.json`)) {
+      // Present in any version → only make sure it's enabled.
+      await enableCommunityPlugins(fs, ['dataview']);
+      return;
+    }
+
+    const [manifestRaw, mainJs, stylesCss] = await Promise.all([
+      fetcher(`${DATAVIEW_RELEASE_BASE}/manifest.json`),
+      fetcher(`${DATAVIEW_RELEASE_BASE}/main.js`),
+      fetcher(`${DATAVIEW_RELEASE_BASE}/styles.css`),
+    ]);
+    if (!manifestRaw || !mainJs) {
+      console.error(
+        'WARNING: could not download the Dataview plugin (offline or GitHub unreachable) — skipped. ' +
+          'Install it from Obsidian\'s community-plugin browser instead.'
+      );
+      return;
+    }
+    let version = 'unknown';
+    try {
+      const m = JSON.parse(manifestRaw) as { id?: string; version?: string };
+      if (m.id !== 'dataview') {
+        console.error(`WARNING: downloaded Dataview manifest has unexpected id '${m.id}' — skipped.`);
+        return;
+      }
+      version = m.version ?? version;
+    } catch {
+      console.error('WARNING: downloaded Dataview manifest is not valid JSON — skipped.');
+      return;
+    }
+
+    await fs.createDir(pluginDir, { recursive: true });
+    await fs.writeFile(`${pluginDir}/manifest.json`, manifestRaw);
+    await fs.writeFile(`${pluginDir}/main.js`, mainJs);
+    if (stylesCss) await fs.writeFile(`${pluginDir}/styles.css`, stylesCss);
+    await enableCommunityPlugins(fs, ['dataview']);
+    console.error(`Installed Dataview v${version} into ${pluginDir} (and enabled it).`);
+  } catch (e) {
+    console.error(`WARNING: could not install Dataview: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
