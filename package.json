@@ -1,6 +1,6 @@
 {
   "name": "@ostanlabs/canvas-project-manager",
-  "version": "1.9.2",
+  "version": "2.0.0",
   "description": "Visual project management on Obsidian Canvas - manage milestones, stories, tasks, decisions, documents, and features with dependencies and Notion sync",
   "main": "main.js",
   "files": [

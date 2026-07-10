@@ -78,6 +78,7 @@ import { addNodesToCanvasView, getCanvasView, hasInternalCanvasAPI, inspectCanva
 import { EntityIndex, EntityIndexEntry, getEntityTypeFromId } from "./util/entityNavigator";
 import { PositioningEngineV4, EntityData as EntityDataV4, RelationshipRule, PositioningConfig } from "./util/positioningV4";
 import { loadSchemaOrDefault } from "./src/entity-core/schema-bootstrap.js";
+import { SchemaRegistry } from "./src/entity-core/schema-registry.js";
 import { buildRelationshipRules } from "./src/entity-core/schema-derivation.js";
 import { ObsidianVaultAdapter } from "./src/adapters/obsidian-vault-adapter.js";
 import { toEntityData, toItemFrontmatter, toFlatFrontmatter } from "./src/adapters/model-map";
@@ -126,6 +127,10 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 	private entityIndex: EntityIndex | null = null;
 	// Entity-Core facade (unified engine)
 	private entityCore: EntityCoreFacade | null = null;
+	// Vault schema.json, loaded READ-ONLY in onload (the MCP server owns
+	// bootstrapping/writing schema.json). Injected into the facade; null
+	// until loaded → getEntityCore falls back to DEFAULT_SCHEMA.
+	private entityCoreSchema: SchemaRegistry | null = null;
 	// Debug logging — replaced with no-op when debugMode is false
 	private _origConsoleDebug = console.debug.bind(console);
 	private _origConsoleLog   = console.log.bind(console);
@@ -201,6 +206,25 @@ export default class CanvasStructuredItemsPlugin extends Plugin {
 			await this.app.vault.adapter.remove('operation-log.txt');
 		} catch (e) {
 			// File doesn't exist, that's fine
+		}
+
+		// Load the vault's schema.json for the entity-core facade. READ-ONLY:
+		// the plugin never bootstrap-writes schema.json — that is the MCP
+		// server's job (same contract as the positioning loader below), so
+		// loadSchemaOrDefault (never loadOrBootstrapSchema). Awaited here,
+		// before any command/view/event that could touch the facade is
+		// registered, so getEntityCore() sees the vault schema; on any
+		// failure the facade falls back to the compiled DEFAULT_SCHEMA.
+		try {
+			const schemaFs = new ObsidianVaultAdapter(this.app.vault, this.app.fileManager);
+			const schemaResult = await loadSchemaOrDefault(schemaFs, '');
+			if (schemaResult.errors.length > 0) {
+				console.warn('[Entity-Core] schema.json invalid — using default schema:', schemaResult.errors);
+			}
+			this.entityCoreSchema = new SchemaRegistry(schemaResult.schema);
+			this.logger.info(`Entity-core schema source: ${schemaResult.source}`);
+		} catch (e) {
+			console.warn('[Entity-Core] Failed to load schema.json — using default schema:', e);
 		}
 
 		// Initialize Notion client
@@ -9227,8 +9251,10 @@ private registerCommands(): void {
 	private getEntityCore(): EntityCoreFacade {
 		if (!this.entityCore) {
 			this.entityCore = new EntityCoreFacade({
-				vault: this.app.vault,
-				fileManager: this.app.fileManager,
+				fs: new ObsidianVaultAdapter(this.app.vault, this.app.fileManager),
+				// Vault schema.json (loaded read-only in onload); DEFAULT_SCHEMA
+				// only if the facade is somehow touched before onload finishes.
+				schema: this.entityCoreSchema ?? new SchemaRegistry(DEFAULT_SCHEMA),
 				vaultPath: (this.app.vault.adapter as any).basePath || '',
 				// Bare type folders (milestones/, stories/, …) — no `entities/`
 				// prefix, matching the production vault. Empty prefix →

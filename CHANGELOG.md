@@ -5,6 +5,26 @@ All notable changes to the Canvas Project Manager plugin will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-07-10
+
+### 🚀 Multi-Vault MCP (major — tool contracts changed)
+
+One MCP server process now manages **any number of vaults**. Existing single-vault setups keep working unchanged (`VAULT_PATH` is absorbed into the registry automatically), but the tool surface changed shape — hence the major bump.
+
+- **Vault registry**: global config at `~/.config/ostanlabs/mcp.json` (`%APPDATA%` on Windows) with hand-edited `allowedRoots` confinement (deny-by-default; no tool can widen it); per-call config re-reads; lock-safe mutation; MCP client `roots` and `VAULT_PATH` absorbed as transient vaults
+- **New tools**: `list_vaults`, `add_vault` (scaffold a fresh vault or adopt an existing one with on-disk layout detection — never creates a competing tree), `remove_vault` (deregister only, never deletes files), `list_workspaces`/`add_workspace`/`remove_workspace`, `reconcile_vault`
+- **`vault` argument** on every tool: hard-required for mutating tools; read-only tools default to the sole vault only when exactly one is registered; every result echoes the resolved vault id
+- **Accept-then-match validation**: with one vault, tool schemas carry that vault's enums (unchanged); with several, the API layer accepts any registered schema's values and dispatch rejects mismatches with a `SchemaMismatch` naming the vault and its valid values (per-item in `entities` batches)
+- **Transactional schema reconciliation**: `set_schema` (+ `dryRun`, `collisionPolicy: refuse|suffix`) and `reconcile_vault` archive removed-type entities copy-then-delete with verification, a crash-safe roll-forward journal, tombstones, and an on-disk applied-schema baseline so hand-edits made while the server is down are still caught
+- **Bootstrap**: scaffolded vaults get schema.json, typed folders, `workspaces.json`, a root-level canvas named after the vault, and the bundled plugin **plus its Dataview dependency** installed and pre-enabled (`installPlugin: false` to skip; Dataview needs network and degrades to a warning offline)
+- **Security**: every agent-supplied path is realpath-confined to `allowedRoots` at registration AND access time (symlink/TOCTOU defenses); workspace doc reads restricted to `.md`/`.canvas`
+- **Fixes along the way**: `cleanup_completed` now actually deletes originals after verified archive copies; `entities` batch `{{client_id}}` refs resolve inside `relationships` (previously written literally); duplicate-id repair rewrites inbound references; per-vault MSRL indexes
+
+### ⚠️ Breaking
+
+- With more than one vault registered, mutating tools **require** the `vault` argument and tool schemas no longer embed entity-type/status enums (call `get_schema({vault})`)
+- `create_entity`/`entities` type/status violations now surface as `SchemaMismatch` errors naming the target vault (previously generic "Validation failed" on the create path)
+
 ## [1.9.2] - 2026-07-09
 
 ### 🩹 Release Fix

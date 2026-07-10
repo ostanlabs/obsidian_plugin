@@ -1,8 +1,16 @@
 /**
  * MCP Server Mode Entry Point
- * 
+ *
  * This file provides the MCP protocol server powered by entity-core.
  * Run with: npm run dev:mcp or npm run build:mcp
+ *
+ * MULTI-VAULT (spec §6/§7/§8, W8): one server process serves N vaults. The
+ * module-level engine singletons are gone — a VaultRegistry (global mcp.json ∪
+ * VAULT_PATH ∪ MCP client roots, re-read per call) lazily builds one
+ * VaultEngine per vault, and every tool call resolves `registry.engine(vault)`
+ * and operates on that bundle. VAULT_PATH is OPTIONAL: when set it is absorbed
+ * as a transient vault (existing single-vault setups keep working unchanged);
+ * when unset the server starts with whatever the registry knows.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -11,87 +19,100 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { fileURLToPath } from 'node:url';
+import * as nodePath from 'node:path';
+import * as nodeFsp from 'node:fs/promises';
 import { NodeFsAdapter } from './src/adapters/node-fs-adapter.js';
-import { SchemaRegistry } from './src/entity-core/schema-registry.js';
 import { DEFAULT_SCHEMA } from './src/entity-core/default-schema.js';
 import {
-  buildValidationAllowList,
-  buildReverseRelationMap,
   getAllRelationshipFieldNames,
   getRequiredParentRules,
   getFanoutRules,
 } from './src/entity-core/schema-derivation.js';
-import { loadOrBootstrapSchema, serializeSchema, validateSchema, SCHEMA_FILENAME } from './src/entity-core/schema-bootstrap.js';
+import {
+  loadOrBootstrapSchema,
+  loadSchemaOrDefault,
+  serializeSchema,
+  validateSchema,
+  SCHEMA_FILENAME,
+} from './src/entity-core/schema-bootstrap.js';
 import type { Schema } from './src/entity-core/types.js';
 // Bundled as a raw string via esbuild `--loader:.html=text`. get_schema_designer
 // injects the active schema by replacing the "__SCHEMA_PLACEHOLDER__" token.
 // @ts-ignore
 import DESIGNER_HTML_TEMPLATE from './schema-designer.html';
-import { EntityParser } from './src/entity-core/parser.js';
-import { EntitySerializer } from './src/entity-core/serializer.js';
-import { EntityValidator } from './src/entity-core/validator.js';
-import { IDAllocator, getEntityTypeFromId } from './src/entity-core/id-allocator.js';
-import { PathResolver } from './src/entity-core/path-resolver.js';
-import { SchemaMigrator } from './src/entity-core/migrator.js';
-import { ProjectIndex } from './src/entity-core/project-index.js';
+import { getEntityTypeFromId } from './src/entity-core/id-allocator.js';
+import type { SchemaRegistry } from './src/entity-core/schema-registry.js';
 import type { RuntimeEntity, EntityType, EntityId, EntityMetadata } from './src/entity-core/types.js';
-import { MsrlEngine, type QueryResult, type IndexStatus } from '@ostanlabs/md-retriever';
+// Type-only: the real module has native deps (onnxruntime/faiss) that must not
+// load at module-eval time — each engine dynamic-imports it inside msrl().
+import type { MsrlEngine, QueryResult, IndexStatus } from '@ostanlabs/md-retriever';
 
-// Validate environment
+// Multi-vault machinery (src/mcp/* — Wave 1 modules wired here, W8)
+import { VaultNotFound, SchemaInvalid } from './src/mcp/types.js';
+import type { VaultEntry, ReconcileResult } from './src/mcp/types.js';
+// Transactional schema-change reconciler (D5/§9, W10 — wired here in W11):
+// set_schema routes STRUCTURAL diffs through it; reconcile_vault is the
+// catch-up path after a hand-edited schema.json.
+import {
+  reconcileVault,
+  diffSchemas,
+  hasStructuralChanges,
+  computeSchemaVersionBump,
+  readAppliedSchema,
+  writeAppliedSchema,
+} from './src/mcp/reconcile.js';
+import {
+  buildVaultEngine,
+  archiveEntity,
+  ensureDefaultCanvas,
+  ensurePluginInstalled,
+  ensureDataviewInstalled,
+  type NodeVaultEngine,
+} from './src/mcp/vault-engine.js';
+import { VaultRegistry, kebabSlug } from './src/mcp/vault-registry.js';
+import {
+  resolveConfigPath,
+  confinePath,
+  confineExisting,
+  assertDocPath,
+} from './src/mcp/confine.js';
+import { detectVaultLayout } from './src/mcp/vault-detect.js';
+import {
+  readWorkspaces,
+  addWorkspace,
+  removeWorkspace,
+  resolveWorkspace,
+  WORKSPACES_FILE,
+} from './src/mcp/workspaces.js';
+import {
+  resolveVaultRef,
+  assertEntityMatchesVault,
+  selectEnumMode,
+  echoVault,
+} from './src/mcp/routing.js';
+
+// VAULT_PATH is OPTIONAL since multi-vault: when set, the registry absorbs it
+// as a transient vault (the legacy single-vault contract keeps working with
+// zero config); when unset, vaults come from mcp.json / MCP roots / add_vault.
 const VAULT_PATH = process.env.VAULT_PATH;
-if (!VAULT_PATH) {
-  console.error('ERROR: VAULT_PATH environment variable is required');
-  console.error('Usage: VAULT_PATH=/path/to/vault npm run dev:mcp');
-  process.exit(1);
-}
-
-// Initialize the entity-core engine with Node.js filesystem adapter
-const adapter = new NodeFsAdapter(VAULT_PATH);
-
-// SINGLE SOURCE OF TRUTH: the active schema comes from <VAULT_PATH>/schema.json
-// (bootstrapped from DEFAULT_SCHEMA on first run — see loadSchema() in main()).
-// These are `let` so set_schema / (re)load can swap the active schema at runtime.
-// The plugin positioning engine derives its rules from the SAME schema file.
-let schema = new SchemaRegistry(DEFAULT_SCHEMA);
-let parser = new EntityParser(schema);
-let serializer = new EntitySerializer(schema);
-let validator = new EntityValidator(schema);
-let VALIDATION_ALLOWLIST = buildValidationAllowList(schema.getSchema());
-let activeSchema: Schema = DEFAULT_SCHEMA;
-let schemaSource: 'file' | 'default' = 'default';
-let schemaErrors: string[] = [];
-
-/** Rebuild every schema-derived engine object from a schema. */
-function applySchema(s: Schema): void {
-  schema = new SchemaRegistry(s);
-  parser = new EntityParser(schema);
-  serializer = new EntitySerializer(schema);
-  validator = new EntityValidator(schema);
-  VALIDATION_ALLOWLIST = buildValidationAllowList(s);
-  // Path routing derives from the schema's entity-type folders/prefixes — without
-  // this rebuild, create_entity of a type added via set_schema throws
-  // "Unknown entity type" from the stale resolver.
-  pathResolver = new PathResolver(schema, config);
-  // Keep the index's reverse relationship map in sync with the active schema.
-  index.setReverseRelationMap(buildReverseRelationMap(s));
-  activeSchema = s;
-}
 
 // ---------------------------------------------------------------------------
 // Schema-driven write-path routing (BUG-1 fix: flat relationship keys were a
 // silent no-op — update assigned them outside entity.relationships and
 // create/batch destructuring parked them as inert custom fields; both were
-// then dropped by the schema-driven serializer).
+// then dropped by the schema-driven serializer). Parameterized on the resolved
+// vault's SchemaRegistry (was the module-level `schema` singleton).
 // ---------------------------------------------------------------------------
 
 /**
- * Relationship field names an entity of `type` may carry per the ACTIVE schema:
- * forward fields where the type is a pair's `from`, reverse fields where it is
- * the `to`. Per-type CUSTOM FIELDS SHADOW same-named relationship fields (e.g.
- * `decided_by` is a person string field on decisions, but the `affects` reverse
- * on documents), so routing stays unambiguous per type.
+ * Relationship field names an entity of `type` may carry per that vault's
+ * schema: forward fields where the type is a pair's `from`, reverse fields
+ * where it is the `to`. Per-type CUSTOM FIELDS SHADOW same-named relationship
+ * fields (e.g. `decided_by` is a person string field on decisions, but the
+ * `affects` reverse on documents), so routing stays unambiguous per type.
  */
-function getRelationshipFieldNamesForType(type: string): Set<string> {
+function getRelationshipFieldNamesForType(schema: SchemaRegistry, type: string): Set<string> {
   const names = new Set<string>();
   for (const rel of schema.getRelationshipsForType(type)) {
     for (const pair of rel.pairs) {
@@ -109,10 +130,11 @@ function getRelationshipFieldNamesForType(type: string): Set<string> {
  * on create paths instead of silently becoming inert custom fields.
  */
 function splitFlatRelationshipKeys(
+  schema: SchemaRegistry,
   type: string,
   input: Record<string, unknown>,
 ): { relationships: Record<string, unknown>; rest: Record<string, unknown> } {
-  const relNames = getRelationshipFieldNamesForType(type);
+  const relNames = getRelationshipFieldNamesForType(schema, type);
   const relationships: Record<string, unknown> = {};
   const rest: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input)) {
@@ -167,145 +189,6 @@ function explicitUpdatedAtMs(content: string): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
-const config = {
-  vaultPath: VAULT_PATH,
-  entitiesFolder: '', // Scan top-level type folders (tasks/, stories/, etc.)
-  archiveFolder: 'archive',
-  canvasFolder: 'projects',
-};
-
-/**
- * Recursively list files under a folder (readDir-based; [] when the folder is
- * missing). The archive folder nests by type/quarter (see archiveLayout and
- * cleanup_completed, which writes archive/<type>/…), so the flat listFiles()
- * scan silently missed archived entities in subfolders — BUG-3: they were then
- * unreachable by id ("Entity not found") for reads and updates alike.
- */
-async function listFilesRecursive(folder: string): Promise<string[]> {
-  const out: string[] = [];
-  const walk = async (dir: string): Promise<void> => {
-    for (const entry of await adapter.readDir(dir)) {
-      if (entry.isDirectory) await walk(entry.path);
-      else out.push(entry.path);
-    }
-  };
-  await walk(folder);
-  return out;
-}
-
-// `let` — rebuilt inside applySchema whenever the active schema changes.
-let pathResolver = new PathResolver(schema, config);
-
-// Initialize ProjectIndex
-const index = new ProjectIndex();
-
-// Helper: Build EntityMetadata from RuntimeEntity
-function buildMetadata(entity: RuntimeEntity, filePath: string, mtimeMs: number): EntityMetadata {
-  // Extract parent from relationships
-  const parentRel = entity.relationships?.parent;
-  const parent_id = Array.isArray(parentRel) ? parentRel[0] : parentRel;
-
-  // Count children
-  const childrenRel = entity.relationships?.children;
-  const children_count = Array.isArray(childrenRel) ? childrenRel.length : (childrenRel ? 1 : 0);
-
-  // Check if in progress
-  const in_progress = entity.status === 'In Progress' || entity.status === 'In-progress';
-
-  return {
-    id: entity.id,
-    type: entity.type,
-    title: entity.title,
-    workstream: entity.workstream || '',
-    status: entity.status,
-    archived: entity.archived,
-    in_progress,
-    parent_id,
-    children_count,
-    priority: entity.fields?.priority as string | undefined,
-    canvas_source: '', // Not applicable for MCP
-    vault_path: filePath,
-    file_mtime: mtimeMs,
-    created_at: entity.created_at,
-    updated_at: entity.updated_at,
-  };
-}
-
-// Helper: Scan and populate the index
-async function scanIndex(): Promise<void> {
-  index.clear();
-
-  // Build list of folders to scan: archive + each entity type's folder from the
-  // ACTIVE schema (custom types added via set_schema are scanned too).
-  // Archive is scanned FIRST so that when a stale duplicate of an entity exists
-  // in both a live type folder and archive/, the LIVE copy wins the id→path
-  // mapping (index.set is last-writer-wins per id).
-  const folders: string[] = [config.archiveFolder];
-  for (const typeDef of schema.getAllEntityTypes()) {
-    const folder = pathResolver.getTypeFolderPath(typeDef.type);
-    if (!folders.includes(folder)) folders.push(folder);
-  }
-
-  // Scan all folders. Type folders are flat; archive/ nests by type/quarter,
-  // so it is walked recursively — otherwise archived entities in subfolders
-  // are invisible to the index and unreachable by id (BUG 3).
-  for (const folder of folders) {
-    try {
-      const files = folder === config.archiveFolder
-        ? await listFilesRecursive(folder)
-        : await adapter.listFiles(folder);
-      for (const filePath of files) {
-        if (!filePath.endsWith('.md')) continue;
-        try {
-          const content = await adapter.readFile(filePath);
-          const entity = parser.parse(content, filePath);
-
-          // Get file stats for mtime
-          const stat = await adapter.stat(filePath);
-          const metadata = buildMetadata(entity, filePath, stat.mtimeMs);
-
-          index.set(metadata);
-
-          // Index relationships
-          if (entity.relationships) {
-            for (const [relType, targets] of Object.entries(entity.relationships)) {
-              const targetIds = Array.isArray(targets) ? targets : [targets];
-              for (const targetId of targetIds) {
-                index.addRelationship(entity.id, relType, targetId);
-              }
-            }
-          }
-        } catch (err) {
-          // Skip unparseable files
-          if (process.env.DEBUG) {
-            console.error(`Failed to parse ${filePath}:`, err);
-          }
-        }
-      }
-    } catch (err) {
-      // Folder doesn't exist, skip
-      if (process.env.DEBUG) {
-        console.error(`Folder not found: ${folder}`, err);
-      }
-    }
-  }
-}
-
-// Initialize MSRL Engine (lazy - created on first search)
-let msrlEngine: MsrlEngine | null = null;
-
-async function getMsrlEngine(): Promise<MsrlEngine> {
-  if (!msrlEngine) {
-    console.error('Initializing MSRL engine...');
-    msrlEngine = await MsrlEngine.create({
-      vaultRoot: VAULT_PATH!,
-      logLevel: 'info',
-    });
-    console.error('MSRL engine initialized');
-  }
-  return msrlEngine;
-}
-
 // Create MCP server (version bundled in from package.json at build time)
 import { version as PKG_VERSION } from './package.json';
 const server = new Server(
@@ -322,133 +205,250 @@ const server = new Server(
   }
 );
 
-/**
- * Entity type names per the ACTIVE schema — used for the tool inputSchema
- * enums (create_entity, list_entities, search_entities, entities, …) so the
- * advertised types always match what the vault schema actually allows,
- * including custom types added via set_schema. The ListTools handler runs per
- * request, so these re-evaluate against the current schema every time.
- */
-function entityTypeEnumValues(): string[] {
-  return activeSchema.entityTypes.map((e) => e.type);
+// ---------------------------------------------------------------------------
+// VaultRegistry — THE engine source. Config is re-read per call (other MCP
+// clients' add_vault mutations become visible immediately); engines are built
+// lazily on first use and cached until invalidated. `builtEngines` mirrors the
+// registry cache for registry-global introspection (list_vaults entityCount)
+// and shutdown — it never triggers a build by itself.
+// ---------------------------------------------------------------------------
+
+const builtEngines = new Map<string, NodeVaultEngine>();
+
+const registry = new VaultRegistry({
+  configPath: resolveConfigPath(),
+  buildEngine: async (entry: VaultEntry) => {
+    const eng = await buildVaultEngine(entry);
+    builtEngines.set(entry.id, eng);
+    return eng;
+  },
+  env: process.env,
+  // MCP SDK ^1.29 first-class roots: when the connected client advertises the
+  // roots capability, absorb each file:// root as a transient vault (merged,
+  // never replacing config entries). Clients without roots → [] silently.
+  rootsProvider: async () => {
+    try {
+      const caps = server.getClientCapabilities();
+      if (!caps?.roots) return [];
+      const res = await server.listRoots();
+      const paths: string[] = [];
+      for (const root of res.roots ?? []) {
+        if (typeof root.uri === 'string' && root.uri.startsWith('file://')) {
+          try {
+            paths.push(fileURLToPath(root.uri));
+          } catch { /* skip unparseable root URIs */ }
+        }
+      }
+      return paths;
+    } catch {
+      return []; // roots/list unsupported or failed — skip silently (spec §6.1)
+    }
+  },
+});
+
+/** registry.engine with the Node-engine type (adds validationAllowList). */
+async function getEngine(ref: string): Promise<NodeVaultEngine> {
+  return (await registry.engine(ref)) as NodeVaultEngine;
+}
+
+// Per-vault MSRL engines, keyed by vault id in mcp.ts (NOT on the engine
+// object) so a registry.invalidate() after set_schema doesn't strand a live
+// MSRL instance — the rebuilt engine keeps talking to the same MSRL.
+const msrlStarted = new Map<string, Promise<MsrlEngine>>();
+
+function getMsrl(eng: NodeVaultEngine): Promise<MsrlEngine> {
+  let pending = msrlStarted.get(eng.entry.id);
+  if (!pending) {
+    pending = eng.msrl();
+    msrlStarted.set(eng.entry.id, pending);
+  }
+  return pending;
 }
 
 /**
- * Enum values of the feature `phase` field per the ACTIVE schema, so the
+ * Entity type names of a schema — used for the tool inputSchema enums
+ * (create_entity, list_entities, search_entities, entities, …). Only consulted
+ * when EXACTLY ONE vault is registered (D8): with N vaults the tool schemas
+ * stay permissive plain strings and dispatch-time matching is the authority.
+ */
+function entityTypeEnumValues(schema: Schema): string[] {
+  return schema.entityTypes.map((e) => e.type);
+}
+
+/**
+ * Enum values of the feature `phase` field per a schema, so the
  * get_feature_coverage tool advertises values that can actually match vault
  * data. Falls back to the codified default (src/entity-core/default-schema.ts:
- * MVP|0|1|2|3|4|5) if the active schema has no enum values for it.
+ * MVP|0|1|2|3|4|5) if the schema has no enum values for it.
  */
-function featurePhaseEnumValues(): string[] {
-  const phaseField = schema.getFields('feature').find((f) => f.name === 'phase');
+function featurePhaseEnumValues(schema: Schema): string[] {
+  const phaseField = schema.entityTypes
+    .find((t) => t.type === 'feature')
+    ?.fields.find((f) => f.name === 'phase');
   if (phaseField?.values && phaseField.values.length > 0) {
     return phaseField.values;
   }
   return ['MVP', '0', '1', '2', '3', '4', '5'];
 }
 
-// Register tools
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: 'create_entity',
-      description: `Create a new entity (${entityTypeEnumValues().join(', ')})`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          type: {
-            type: 'string',
-            enum: entityTypeEnumValues(),
-            description: 'The type of entity to create',
-          },
-          title: {
-            type: 'string',
-            description: 'The title of the entity',
-          },
+// Register tools. The handler is evaluated PER REQUEST: with exactly one
+// registered vault the type/status/phase enums derive from that vault's
+// active schema (v1.9.1 behavior, zero regression); with 0 or >1 vaults the
+// API layer stays permissive — plain strings whose descriptions point at
+// get_schema({vault}) — and the dispatch layer enforces the match (D8).
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  let soleSchema: Schema | null = null;
+  try {
+    const vaults = await registry.list();
+    if (selectEnumMode(vaults.length) === 'schema') {
+      soleSchema = (await getEngine(vaults[0].id)).activeSchema;
+    }
+  } catch {
+    // Registry/config/engine trouble must never break tools/list — fall back
+    // to the permissive (plain-string) tool surface.
+    soleSchema = null;
+  }
+  const typeValues = soleSchema ? entityTypeEnumValues(soleSchema) : null;
+  const phaseValues = soleSchema ? featurePhaseEnumValues(soleSchema) : null;
+
+  const typeProp = (description: string) =>
+    typeValues
+      ? { type: 'string', enum: typeValues, description }
+      : {
+          type: 'string',
+          description: `${description} Valid types are defined per vault — call get_schema({vault}) for the target vault's values.`,
+        };
+  const vaultRequired = {
+    type: 'string',
+    description: 'Vault id (call list_vaults). Required.',
+  };
+  const vaultOptional = {
+    type: 'string',
+    description:
+      'Vault id (call list_vaults). Optional only while exactly one vault is registered; required otherwise.',
+  };
+  const workspaceProp = {
+    type: 'string',
+    description:
+      'Optional workspace name (call list_workspaces) — resolves paths inside that workspace\'s confined external root instead of the vault.',
+  };
+
+  return {
+    tools: [
+      {
+        name: 'create_entity',
+        description: typeValues
+          ? `Create a new entity (${typeValues.join(', ')})`
+          : 'Create a new entity (valid types are defined by the target vault\'s schema — call get_schema({vault}))',
+        inputSchema: {
+          type: 'object',
           properties: {
-            type: 'object',
-            description: 'Additional entity properties (status, workstream, relationships, etc.). Valid relationship fields, their target types, and per-type custom fields are defined by the vault schema — call get_schema for the authoritative list.',
+            vault: vaultRequired,
+            type: typeProp('The type of entity to create.'),
+            title: {
+              type: 'string',
+              description: 'The title of the entity',
+            },
+            properties: {
+              type: 'object',
+              description: 'Additional entity properties (status, workstream, relationships, etc.). Valid relationship fields, their target types, and per-type custom fields are defined by the vault schema — call get_schema for the authoritative list.',
+            },
           },
-        },
-        required: ['type', 'title'],
-      },
-    },
-    {
-      name: 'list_entities',
-      description: 'List all entities or filter by type',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          type: {
-            type: 'string',
-            enum: entityTypeEnumValues(),
-            description: 'Optional: filter by entity type',
-          },
+          required: ['vault', 'type', 'title'],
         },
       },
-    },
-    {
-      name: 'get_entity',
-      description: 'Get an entity by ID',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          id: {
-            type: 'string',
-            description: 'Entity ID (e.g., M-001, S-035, T-127)',
+      {
+        name: 'list_entities',
+        description: 'List all entities or filter by type',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultOptional,
+            type: typeProp('Optional: filter by entity type.'),
           },
         },
-        required: ['id'],
       },
-    },
-    {
-      name: 'update_entity',
-      description: 'Update an existing entity',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          id: {
-            type: 'string',
-            description: 'Entity ID to update',
+      {
+        name: 'get_entity',
+        description: 'Get an entity by ID',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultOptional,
+            id: {
+              type: 'string',
+              description: 'Entity ID (e.g., M-001, S-035, T-127)',
+            },
           },
-          updates: {
-            type: 'object',
-            description: 'Fields to update (title, status, workstream, relationships, etc.). Valid relationship fields and target types are defined by the vault schema — call get_schema for the authoritative list. A string "body" key replaces the markdown body below the frontmatter ("" clears it). Setting a passthrough-only key (a field not valid for this type) to null or [] deletes it from the file.',
-          },
-        },
-        required: ['id', 'updates'],
-      },
-    },
-    {
-      name: 'get_schema',
-      description: 'Get the active schema (from schema.json or the codified default), its source, and any validation errors. Beyond entity types and relationships, the schema carries validation rules (per-relationship requiredForTypes parent rules and maxForwardTargets/maxReverseTargets fan-out limits — validate_project derives its rule set from these), canvas positioning metadata, and settings (e.g. settings.defaultCanvas, the canvas file bootstrapped on startup).',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-      },
-    },
-    {
-      name: 'set_schema',
-      description: 'Configure the vault\'s relationships/schema. Writes <vault>/schema.json (the single source of truth for both the MCP validator and the plugin positioning) and hot-reloads all schema-derived machinery (path routing, index scanning, validation). The schema also carries validation rules (requiredForTypes parent rules, fan-out limits) that validate_project derives its rules from, positioning metadata, and settings.defaultCanvas (bootstrapped if missing after a successful save). Provide a full "schema" object, or a "relationships" array to merge into the current schema. Invalid schemas are rejected and not saved.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          schema: { type: 'object', description: 'Full Schema object (entityTypes, relationships, settings, workstreams).' },
-          relationships: { type: 'array', description: 'Relationships array to merge into the current schema (relationships-only edit).' },
+          required: ['id'],
         },
       },
-    },
-    {
-      name: 'get_schema_designer',
-      description: 'Return a self-contained HTML relationship designer, pre-populated with this vault\'s schema. Toggle relationships/pairs, then copy the result and apply it with set_schema.',
-      inputSchema: {
-        type: 'object',
-        properties: {},
+      {
+        name: 'update_entity',
+        description: 'Update an existing entity',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultRequired,
+            id: {
+              type: 'string',
+              description: 'Entity ID to update',
+            },
+            updates: {
+              type: 'object',
+              description: 'Fields to update (title, status, workstream, relationships, etc.). Valid relationship fields and target types are defined by the vault schema — call get_schema for the authoritative list. A string "body" key replaces the markdown body below the frontmatter ("" clears it). Setting a passthrough-only key (a field not valid for this type) to null or [] deletes it from the file.',
+            },
+          },
+          required: ['vault', 'id', 'updates'],
+        },
       },
-    },
-    {
-      name: 'search_entities',
-      description: `Search, list, or navigate structured project entities.
+      {
+        name: 'get_schema',
+        description: 'Get the active schema (from schema.json or the codified default), its source, and any validation errors. Beyond entity types and relationships, the schema carries validation rules (per-relationship requiredForTypes parent rules and maxForwardTargets/maxReverseTargets fan-out limits — validate_project derives its rule set from these), canvas positioning metadata, and settings (e.g. settings.defaultCanvas, the canvas file bootstrapped on startup).',
+        inputSchema: {
+          type: 'object',
+          properties: { vault: vaultOptional },
+        },
+      },
+      {
+        name: 'set_schema',
+        description: 'Configure the vault\'s relationships/schema. Writes <vault>/schema.json (the single source of truth for both the MCP validator and the plugin positioning), bumps schemaVersion, and hot-reloads all schema-derived machinery (path routing, index scanning, validation). Provide a full "schema" object, or a "relationships" array to merge into the current schema. Invalid schemas are rejected and not saved. STRUCTURAL changes (entity types added/removed, type folders renamed, relationships added/removed) are reconciled against the vault\'s files transactionally: removing a type ARCHIVES its entities into archive/<old-folder>/ (copy-then-delete — entity files are never destroyed), folder renames move files with collision checks, and added relationships are inverse-backfilled. Pass dryRun: true to preview the exact change plan (folders to create, the entity ids to be archived, filename collisions, dangling refs left on survivors) WITHOUT writing anything. The schema also carries validation rules (requiredForTypes parent rules, fan-out limits) that validate_project derives its rules from, positioning metadata, and settings.defaultCanvas (bootstrapped if missing after a successful save). CAUTION: reconciling a vault currently open in Obsidian is best-effort — archival and folder renames change file inodes, so the plugin may miss those renames until Obsidian reloads.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultRequired,
+            schema: { type: 'object', description: 'Full Schema object (entityTypes, relationships, settings, workstreams).' },
+            relationships: { type: 'array', description: 'Relationships array to merge into the current schema (relationships-only edit).' },
+            dryRun: { type: 'boolean', description: 'Validate and diff only: return the reconcile plan (entities to archive, folders, collisions, dangling refs) without writing anything.', default: false },
+            collisionPolicy: { type: 'string', enum: ['refuse', 'suffix'], description: 'When an archive target filename already exists: "refuse" (default) aborts the whole apply with nothing written; "suffix" archives the colliding file as <name>_dup-N.md instead. Run dryRun first — the plan lists every collision.', default: 'refuse' },
+          },
+          required: ['vault'],
+        },
+      },
+      {
+        name: 'reconcile_vault',
+        description: 'Catch the vault\'s folders/entities up to a hand-edited <vault>/schema.json. Diffs the persisted last-reconciled baseline (.mcp-applied-schema.json — survives server restarts, so edits made while the server was down are caught too) against the schema.json currently on disk and reconciles the difference transactionally (same machinery as set_schema): removing a type ARCHIVES its entities into archive/<old-folder>/ (copy-then-delete — entity files are never destroyed), folder renames move files with collision checks, and added relationships are inverse-backfilled. Returns { upToDate: true } when the on-disk schema already matches the active one; an invalid on-disk schema.json is rejected with its validation errors (the last-good schema stays active). Pass dryRun: true to preview the exact change plan (folders to create, the entity ids to be archived, filename collisions, dangling refs left on survivors) WITHOUT writing anything. CAUTION: reconciling a vault currently open in Obsidian is best-effort — archival and folder renames change file inodes, so the plugin may miss those renames until Obsidian reloads.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultRequired,
+            dryRun: { type: 'boolean', description: 'Return the reconcile plan without writing anything.', default: false },
+            collisionPolicy: { type: 'string', enum: ['refuse', 'suffix'], description: 'When an archive target filename already exists: "refuse" (default) aborts the whole apply with nothing written; "suffix" archives the colliding file as <name>_dup-N.md instead. Run dryRun first — the plan lists every collision.', default: 'refuse' },
+          },
+          required: ['vault'],
+        },
+      },
+      {
+        name: 'get_schema_designer',
+        description: 'Return a self-contained HTML relationship designer, pre-populated with this vault\'s schema. Toggle relationships/pairs, then copy the result and apply it with set_schema.',
+        inputSchema: {
+          type: 'object',
+          properties: { vault: vaultOptional },
+        },
+      },
+      {
+        name: 'search_entities',
+        description: `Search, list, or navigate structured project entities.
 
 USE FOR: Finding entities by text, listing by type/status, traversing relationships.
 
@@ -460,29 +460,32 @@ MODES:
 EXAMPLES:
 - "Find blocked tasks" → filters: {type: ["task"], status: ["Blocked"]}
 - "List all tasks in api-server" → filters: {type: ["task"], workstream: ["api-server"]}`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Search query (search mode)' },
-          from_id: { type: 'string', description: 'Starting entity ID (navigation mode)' },
-          direction: { type: 'string', enum: ['up', 'down', 'siblings', 'dependencies'], description: 'Navigation direction' },
-          depth: { type: 'number', description: 'Traversal depth (default: 1)' },
-          filters: {
-            type: 'object',
-            properties: {
-              type: { type: 'array', items: { type: 'string', enum: entityTypeEnumValues() } },
-              status: { type: 'array', items: { type: 'string' } },
-              workstream: { type: 'array', items: { type: 'string' } },
-              archived: { type: 'boolean', description: 'Include archived (default: false)' },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultOptional,
+            query: { type: 'string', description: 'Search query (search mode)' },
+            from_id: { type: 'string', description: 'Starting entity ID (navigation mode)' },
+            direction: { type: 'string', enum: ['up', 'down', 'siblings', 'dependencies'], description: 'Navigation direction' },
+            depth: { type: 'number', description: 'Traversal depth (default: 1)' },
+            filters: {
+              type: 'object',
+              properties: {
+                type: typeValues
+                  ? { type: 'array', items: { type: 'string', enum: typeValues } }
+                  : { type: 'array', items: { type: 'string' }, description: 'Entity types (per-vault — call get_schema({vault})).' },
+                status: { type: 'array', items: { type: 'string' } },
+                workstream: { type: 'array', items: { type: 'string' } },
+                archived: { type: 'boolean', description: 'Include archived (default: false)' },
+              },
             },
+            limit: { type: 'number', description: 'Max results (default: 20)' },
           },
-          limit: { type: 'number', description: 'Max results (default: 20)' },
         },
       },
-    },
-    {
-      name: 'get_project_overview',
-      description: `Get high-level project status summary across workstreams.
+      {
+        name: 'get_project_overview',
+        description: `Get high-level project status summary across workstreams.
 
 INCLUDES: Entity counts by type and status, workstream breakdowns.
 
@@ -490,18 +493,19 @@ EXAMPLES:
 - "What's the overall project status?"
 - "Show me the engineering workstream progress"
 - "How many tasks are blocked?"`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          include_completed: { type: 'boolean', description: 'Include completed items' },
-          include_archived: { type: 'boolean', description: 'Include archived items' },
-          workstream: { type: 'string', description: 'Filter by specific workstream' },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultOptional,
+            include_completed: { type: 'boolean', description: 'Include completed items' },
+            include_archived: { type: 'boolean', description: 'Include archived items' },
+            workstream: { type: 'string', description: 'Filter by specific workstream' },
+          },
         },
       },
-    },
-    {
-      name: 'reconcile_relationships',
-      description: `Fix inconsistent bidirectional relationships across all entities.
+      {
+        name: 'reconcile_relationships',
+        description: `Fix inconsistent bidirectional relationships across all entities.
 
 USE FOR: Fixing broken relationships, ensuring consistency after manual edits.
 
@@ -523,112 +527,127 @@ links.
 EXAMPLES:
 - "Check for broken relationships" → dry_run: true
 - "Fix all relationship inconsistencies" → dry_run: false`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          dry_run: { type: 'boolean', description: 'Preview changes without executing', default: false },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultRequired,
+            dry_run: { type: 'boolean', description: 'Preview changes without executing', default: false },
+          },
+          required: ['vault'],
         },
       },
-    },
-    {
-      name: 'rebuild_index',
-      description: `Rebuild the in-memory entity index from scratch by re-scanning all vault files.
+      {
+        name: 'rebuild_index',
+        description: `Rebuild the in-memory entity index from scratch by re-scanning all vault files.
 
 USE FOR: Fixing index inconsistencies, recovering from corrupted state.
 
 RETURNS: entities_before, entities_after, duration_ms`,
-      inputSchema: {
-        type: 'object',
-        properties: {},
+        inputSchema: {
+          type: 'object',
+          properties: { vault: vaultRequired },
+          required: ['vault'],
+        },
       },
-    },
-    {
-      name: 'read_docs',
-      description: `Read workspace documents (README, guides, specs).
+      {
+        name: 'read_docs',
+        description: `Read workspace documents (README, guides, specs).
 
 NOT FOR: Reading entity files (use get_entity or search_entities instead).
 
 EXAMPLES:
 - "Read the README" → path: "README.md"
 - "Show the API spec" → path: "docs/api-spec.md"`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Document path relative to vault root' },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultOptional,
+            path: { type: 'string', description: 'Document path relative to vault root (or to the workspace root when "workspace" is given)' },
+            workspace: workspaceProp,
+          },
+          required: ['path'],
         },
-        required: ['path'],
       },
-    },
-    {
-      name: 'update_doc',
-      description: `Update workspace documents.
+      {
+        name: 'update_doc',
+        description: `Update workspace documents.
 
 NOT FOR: Updating entities (use update_entity instead).
 
 EXAMPLES:
 - Update README → path: "README.md", content: "..."`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Document path' },
-          content: { type: 'string', description: 'New content' },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultRequired,
+            path: { type: 'string', description: 'Document path' },
+            content: { type: 'string', description: 'New content' },
+            workspace: workspaceProp,
+          },
+          required: ['vault', 'path', 'content'],
         },
-        required: ['path', 'content'],
       },
-    },
-    {
-      name: 'list_files',
-      description: `List files in the vault or a specific directory.
+      {
+        name: 'list_files',
+        description: `List files in the vault or a specific directory.
 
 EXAMPLES:
 - "List all markdown files" → pattern: "*.md"
 - "List files in docs/" → directory: "docs"`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          directory: { type: 'string', description: 'Directory to list (default: vault root)' },
-          pattern: { type: 'string', description: 'File pattern (e.g., *.md)' },
-          recursive: { type: 'boolean', description: 'Search recursively', default: false },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultOptional,
+            directory: { type: 'string', description: 'Directory to list (default: vault root)' },
+            pattern: { type: 'string', description: 'File pattern (e.g., *.md)' },
+            recursive: { type: 'boolean', description: 'Search recursively', default: false },
+            workspace: workspaceProp,
+          },
         },
       },
-    },
-    {
-      name: 'analyze_project_state',
-      description: `Deep analysis of project state identifying blockers and suggesting actions.
+      {
+        name: 'analyze_project_state',
+        description: `Deep analysis of project state identifying blockers and suggesting actions.
 
 USE FOR: Finding blockers, getting actionable recommendations.
 
 EXAMPLES:
 - "What's blocking progress?"
 - "What actions should I take?"`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          workstream: { type: 'string', description: 'Filter by workstream' },
-          focus: { type: 'string', enum: ['blockers', 'actions', 'both'], description: 'Analysis focus' },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultOptional,
+            workstream: { type: 'string', description: 'Filter by workstream' },
+            focus: { type: 'string', enum: ['blockers', 'actions', 'both'], description: 'Analysis focus' },
+          },
         },
       },
-    },
-    {
-      name: 'get_feature_coverage',
-      description: `Analyze feature implementation and documentation coverage.
+      {
+        name: 'get_feature_coverage',
+        description: `Analyze feature implementation and documentation coverage.
 
 USE FOR: Coverage reports, gap analysis, finding undocumented features.
 
 EXAMPLES:
 - "How many features have documentation?"
 - "What features are missing implementation?"`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          phase: { type: 'string', enum: featurePhaseEnumValues(), description: 'Filter by phase' },
-          tier: { type: 'string', enum: ['OSS', 'Premium'], description: 'Filter by tier' },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultOptional,
+            phase: phaseValues
+              ? { type: 'string', enum: phaseValues, description: 'Filter by phase' }
+              : { type: 'string', description: 'Filter by phase (values are per-vault — call get_schema({vault})).' },
+            tier: typeValues
+              ? { type: 'string', enum: ['OSS', 'Premium'], description: 'Filter by tier' }
+              : { type: 'string', description: 'Filter by tier' },
+          },
         },
       },
-    },
-    {
-      name: 'validate_project',
-      description: `Validate project entities against relationship rules.
+      {
+        name: 'validate_project',
+        description: `Validate project entities against relationship rules.
 
 USE FOR: Finding missing relationships, ensuring entities are properly connected.
 
@@ -642,43 +661,52 @@ suggestion; reconcile them gradually rather than treating them as errors.
 EXAMPLES:
 - "Are there any orphaned documents?"
 - "Validate backend workstream"`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          workstream: { type: 'string', description: 'Filter by workstream' },
-          entity_types: {
-            type: 'array',
-            items: { type: 'string', enum: entityTypeEnumValues() },
-            description: 'Filter to specific entity types',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultOptional,
+            workstream: { type: 'string', description: 'Filter by workstream' },
+            entity_types: typeValues
+              ? {
+                  type: 'array',
+                  items: { type: 'string', enum: typeValues },
+                  description: 'Filter to specific entity types',
+                }
+              : {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Filter to specific entity types (per-vault — call get_schema({vault})).',
+                },
           },
         },
       },
-    },
-    {
-      name: 'cleanup_completed',
-      description: `Archive completed stories/tasks under completed milestones.
+      {
+        name: 'cleanup_completed',
+        description: `Archive completed stories/tasks under completed milestones.
 
 USE FOR: Archiving completed work, cleaning up the vault.
 
 FLOW:
 1. Find completed milestones
-2. Archive their completed stories/tasks
+2. Archive their completed stories/tasks (copy to archive/, verify, delete original)
 3. Return summary
 
 EXAMPLES:
 - "Clean up all completed milestones" → {}
 - "Preview cleanup" → dry_run: true`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          milestone_id: { type: 'string', description: 'Optional milestone ID to clean up' },
-          dry_run: { type: 'boolean', description: 'Preview without making changes', default: false },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultRequired,
+            milestone_id: { type: 'string', description: 'Optional milestone ID to clean up' },
+            dry_run: { type: 'boolean', description: 'Preview without making changes', default: false },
+          },
+          required: ['vault'],
         },
       },
-    },
-    {
-      name: 'manage_documents',
-      description: `Manage documents and decisions: history, versioning, freshness checks.
+      {
+        name: 'manage_documents',
+        description: `Manage documents and decisions: history, versioning, freshness checks.
 
 ACTIONS:
 - get_decision_history: List decisions
@@ -686,24 +714,25 @@ ACTIONS:
 
 EXAMPLES:
 - "What decisions have we made about auth?" → action: "get_decision_history", topic: "auth"`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          action: {
-            type: 'string',
-            enum: ['get_decision_history', 'check_freshness'],
-            description: 'The action to perform',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultRequired,
+            action: {
+              type: 'string',
+              enum: ['get_decision_history', 'check_freshness'],
+              description: 'The action to perform',
+            },
+            topic: { type: 'string', description: 'Filter by topic (for get_decision_history)' },
+            workstream: { type: 'string', description: 'Filter by workstream (for get_decision_history)' },
+            document_id: { type: 'string', description: 'Document ID (for check_freshness)' },
           },
-          topic: { type: 'string', description: 'Filter by topic (for get_decision_history)' },
-          workstream: { type: 'string', description: 'Filter by workstream (for get_decision_history)' },
-          document_id: { type: 'string', description: 'Document ID (for check_freshness)' },
+          required: ['vault', 'action'],
         },
-        required: ['action'],
       },
-    },
-    {
-      name: 'search_docs',
-      description: `Semantic search across all documents in the vault using hybrid vector + keyword search.
+      {
+        name: 'search_docs',
+        description: `Semantic search across all documents in the vault using hybrid vector + keyword search.
 
 USE FOR: Finding relevant documents by meaning, not just keywords.
 NOT FOR: Listing all files (use list_files), getting specific entity (use get_entity).
@@ -720,76 +749,82 @@ BUDGET BEHAVIOR:
 - If a result's content is smaller than its allocation, surplus is redistributed
 - budget_info in response tells you if content was truncated
 
+WORKSPACE MODE: passing "workspace" scopes the search to that workspace's
+confined external root using a plain keyword scan (external docs are not in
+the vault's semantic index).
+
 EXAMPLES:
 - "Search for authentication implementation details"
 - "Find documents about Kubernetes deployment" with min_score: 0.5 to filter noise
 - Large budget search: excerpt_budget: { total_chars: 15000 }`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          query: {
-            type: 'string',
-            description: 'Natural language search query',
-          },
-          top_k: {
-            type: 'number',
-            description: 'Maximum number of results to return (default: 10, max: 100)',
-          },
-          min_score: {
-            type: 'number',
-            description: 'Minimum relevance score threshold (default: 0.2, floor: 0.2). Results below this are dropped.',
-          },
-          excerpt_budget: {
-            type: 'object',
-            description: 'Configure how character budget is allocated across results',
-            properties: {
-              total_chars: {
-                type: 'number',
-                description: 'Total character budget across all results (default: 8000)',
-              },
-              min_per_result: {
-                type: 'number',
-                description: 'Minimum characters per result (default: 200)',
-              },
-              max_per_result: {
-                type: 'number',
-                description: 'Maximum characters per result (default: 3000)',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultOptional,
+            workspace: workspaceProp,
+            query: {
+              type: 'string',
+              description: 'Natural language search query',
+            },
+            top_k: {
+              type: 'number',
+              description: 'Maximum number of results to return (default: 10, max: 100)',
+            },
+            min_score: {
+              type: 'number',
+              description: 'Minimum relevance score threshold (default: 0.2, floor: 0.2). Results below this are dropped.',
+            },
+            excerpt_budget: {
+              type: 'object',
+              description: 'Configure how character budget is allocated across results',
+              properties: {
+                total_chars: {
+                  type: 'number',
+                  description: 'Total character budget across all results (default: 8000)',
+                },
+                min_per_result: {
+                  type: 'number',
+                  description: 'Minimum characters per result (default: 200)',
+                },
+                max_per_result: {
+                  type: 'number',
+                  description: 'Maximum characters per result (default: 3000)',
+                },
               },
             },
-          },
-          max_excerpt_chars: {
-            type: 'number',
-            description: '[DEPRECATED] Use excerpt_budget.max_per_result instead',
-          },
-          filters: {
-            type: 'object',
-            properties: {
-              doc_uri_prefix: {
-                type: 'string',
-                description: 'Filter to documents starting with this path prefix (e.g., "stories/")',
-              },
-              doc_uris: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Filter to specific document URIs',
-              },
-              heading_path_contains: {
-                type: 'string',
-                description: 'Filter to sections containing this heading path segment',
+            max_excerpt_chars: {
+              type: 'number',
+              description: '[DEPRECATED] Use excerpt_budget.max_per_result instead',
+            },
+            filters: {
+              type: 'object',
+              properties: {
+                doc_uri_prefix: {
+                  type: 'string',
+                  description: 'Filter to documents starting with this path prefix (e.g., "stories/")',
+                },
+                doc_uris: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Filter to specific document URIs',
+                },
+                heading_path_contains: {
+                  type: 'string',
+                  description: 'Filter to sections containing this heading path segment',
+                },
               },
             },
+            include_scores: {
+              type: 'boolean',
+              description: 'Include detailed scores (vector_score, bm25_score) in results',
+            },
           },
-          include_scores: {
-            type: 'boolean',
-            description: 'Include detailed scores (vector_score, bm25_score) in results',
-          },
+          required: ['query'],
         },
-        required: ['query'],
       },
-    },
-    {
-      name: 'msrl_status',
-      description: `Get the status of the MSRL semantic search index.
+      {
+        name: 'msrl_status',
+        description: `Get the status of the MSRL semantic search index.
 
 USE FOR: Checking if the index is ready, viewing index statistics.
 NOT FOR: Searching (use search_docs).
@@ -799,15 +834,15 @@ RETURNS:
 - snapshot_id: Current snapshot identifier
 - stats: Document, node, leaf, and shard counts
 - watcher: File watcher status`,
-      inputSchema: {
-        type: 'object',
-        properties: {},
-        required: [],
+        inputSchema: {
+          type: 'object',
+          properties: { vault: vaultOptional },
+          required: [],
+        },
       },
-    },
-    {
-      name: 'entities',
-      description: `Unified bulk operations tool. Fetch multiple entities or perform batch operations.
+      {
+        name: 'entities',
+        description: `Unified bulk operations tool. Fetch multiple entities or perform batch operations.
 
 ACTIONS:
 - get: Fetch multiple entities by IDs (more efficient than multiple entity calls)
@@ -822,61 +857,444 @@ USE FOR:
 EXAMPLES:
 - { action: "get", ids: ["M-001", "S-001", "T-001"] }
 - { action: "batch", ops: [...], options: { dry_run: true } }`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          action: {
-            type: 'string',
-            enum: ['get', 'batch'],
-            description: 'Action to perform',
-          },
-          // For 'get' action
-          ids: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'Entity IDs to fetch (for get action)',
-          },
-          fields: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'Fields to include in response (default: all)',
-          },
-          // For 'batch' action
-          ops: {
-            type: 'array',
-            items: {
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultRequired,
+            action: {
+              type: 'string',
+              enum: ['get', 'batch'],
+              description: 'Action to perform',
+            },
+            // For 'get' action
+            ids: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Entity IDs to fetch (for get action)',
+            },
+            fields: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Fields to include in response (default: all)',
+            },
+            // For 'batch' action
+            ops: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  client_id: { type: 'string', description: 'Client-provided ID for idempotency' },
+                  op: { type: 'string', enum: ['create', 'update', 'archive'], description: 'Operation type' },
+                  type: typeProp('Entity type (for create).'),
+                  id: { type: 'string', description: 'Entity ID (for update/archive)' },
+                  payload: { type: 'object', description: 'Operation payload (title, workstream, relationships, etc.)' },
+                },
+                required: ['client_id', 'op', 'payload'],
+              },
+              description: 'Operations to perform (for batch action)',
+            },
+            options: {
               type: 'object',
               properties: {
-                client_id: { type: 'string', description: 'Client-provided ID for idempotency' },
-                op: { type: 'string', enum: ['create', 'update', 'archive'], description: 'Operation type' },
-                type: { type: 'string', enum: entityTypeEnumValues(), description: 'Entity type (for create)' },
-                id: { type: 'string', description: 'Entity ID (for update/archive)' },
-                payload: { type: 'object', description: 'Operation payload (title, workstream, relationships, etc.)' },
+                atomic: { type: 'boolean', description: 'Rollback all on any failure (default: false)' },
+                dry_run: { type: 'boolean', description: 'Preview changes without executing (default: false)' },
+                include_entities: { type: 'boolean', description: 'Include full entity data in results (default: false)' },
               },
-              required: ['client_id', 'op', 'payload'],
+              description: 'Options for batch action',
             },
-            description: 'Operations to perform (for batch action)',
           },
-          options: {
-            type: 'object',
-            properties: {
-              atomic: { type: 'boolean', description: 'Rollback all on any failure (default: false)' },
-              dry_run: { type: 'boolean', description: 'Preview changes without executing (default: false)' },
-              include_entities: { type: 'boolean', description: 'Include full entity data in results (default: false)' },
-            },
-            description: 'Options for batch action',
-          },
+          required: ['vault', 'action'],
         },
-        required: ['action'],
       },
-    },
-  ],
-}));
+      // --- Registry-global vault management (spec §7, D6) — no `vault` arg ---
+      {
+        name: 'list_vaults',
+        description: 'List every registered vault (config + absorbed VAULT_PATH / client roots) with id, name, path, whether the path exists, and — for vaults whose engine has been built — entity count and schema source.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+        },
+      },
+      {
+        name: 'add_vault',
+        description: `Register a vault with the MCP server (scaffold a new one or adopt an existing one).
+
+MODES (bootstrap):
+- "auto" (default): missing/empty dir → scaffold a fresh vault; recognizable vault → adopt with layout detection; anything else → refused.
+- "always": scaffold; errors when the directory is non-empty.
+- "never": register only — no files are written.
+
+Scaffold writes schema.json (the default schema), one folder per entity type, archive/, workspaces.json, and the default canvas. Adopt DETECTS the on-disk layout (top-level vs entities/ type folders, by-type vs quarterly archive) and never creates a competing tree. The path must be inside the config's allowedRoots (hand-edited in mcp.json only).`,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Absolute path of the vault directory (must be within allowedRoots).' },
+            name: { type: 'string', description: 'Human-readable vault name (default: the directory basename).' },
+            id: { type: 'string', description: 'Stable vault id (default: kebab slug of the name/basename; suffixed on collision).' },
+            bootstrap: { type: 'string', enum: ['auto', 'always', 'never'], description: 'Scaffold/adopt behavior (default: auto).' },
+            installPlugin: { type: 'boolean', description: 'Install the bundled Obsidian plugin into the new vault (scaffold only; default: true — pass false for a headless vault that will never be opened in Obsidian).' },
+          },
+          required: ['path'],
+        },
+      },
+      {
+        name: 'remove_vault',
+        description: 'Deregister a vault from the MCP config. NEVER touches or deletes any vault files — it only removes the registry entry.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Vault id to deregister (call list_vaults).' },
+          },
+          required: ['id'],
+        },
+      },
+      // --- Per-vault workspaces (spec §8, D1) ---
+      {
+        name: 'list_workspaces',
+        description: 'List the vault\'s registered workspaces (named external doc-source pointers stored in <vault>/workspaces.json).',
+        inputSchema: {
+          type: 'object',
+          properties: { vault: vaultOptional },
+        },
+      },
+      {
+        name: 'add_workspace',
+        description: 'Register a named external doc-source for the vault. The path must be inside the config\'s allowedRoots; workspace file access is restricted to .md/.canvas documents.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultRequired,
+            name: { type: 'string', description: 'Workspace name (a label — no path separators).' },
+            path: { type: 'string', description: 'Absolute path of the external doc root (must be within allowedRoots).' },
+            description: { type: 'string', description: 'Optional human-readable description.' },
+          },
+          required: ['vault', 'name', 'path'],
+        },
+      },
+      {
+        name: 'remove_workspace',
+        description: 'Unregister a workspace from the vault\'s workspaces.json. Never touches the workspace\'s files.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            vault: vaultRequired,
+            name: { type: 'string', description: 'Workspace name to remove (call list_workspaces).' },
+          },
+          required: ['vault', 'name'],
+        },
+      },
+    ],
+  };
+});
+
+// Every vault-scoped tool the dispatch switch below understands. Anything not
+// here and not registry-global is an unknown tool (checked BEFORE vault
+// resolution so bogus names error as "Unknown tool", not as a vault problem).
+const VAULT_SCOPED_TOOLS = new Set<string>([
+  'create_entity', 'list_entities', 'get_entity', 'update_entity',
+  'get_schema', 'set_schema', 'reconcile_vault', 'get_schema_designer',
+  'search_entities', 'get_project_overview', 'reconcile_relationships',
+  'rebuild_index', 'read_docs', 'update_doc', 'list_files',
+  'analyze_project_state', 'get_feature_coverage', 'validate_project',
+  'cleanup_completed', 'manage_documents', 'search_docs', 'msrl_status',
+  'entities', 'list_workspaces', 'add_workspace', 'remove_workspace',
+]);
+
+const REGISTRY_GLOBAL_TOOLS = new Set<string>(['list_vaults', 'add_vault', 'remove_vault']);
+
+/** JSON tool result (all JSON payloads carry the resolved vault id, D3). */
+function jsonResult(payload: unknown): { content: Array<{ type: 'text'; text: string }> } {
+  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-scoped doc access (spec §8 + D7): resolve the workspace's stored
+// path with confineExisting (TOCTOU re-check on EVERY access — a registered
+// dir swapped for a symlink to /etc is caught here), then re-confine the
+// requested file to the WORKSPACE subtree and enforce the doc-extension
+// allowlist. Workspace reads/writes go through node:fs — they live outside
+// the vault-rooted adapter.
+// ---------------------------------------------------------------------------
+
+async function resolveWorkspaceRoot(
+  eng: NodeVaultEngine,
+  workspaceName: string
+): Promise<string> {
+  const allowed = (await registry.loadConfig()).allowedRoots;
+  const ws = await readWorkspaces(eng.fs);
+  const resolved = resolveWorkspace(ws, workspaceName, (p) => confineExisting(p, allowed));
+  return resolved.path;
+}
+
+/** Recursively list files under a workspace root; symlinks that escape the
+ * confined subtree are skipped (never followed). Paths are root-relative. */
+async function listWorkspaceFiles(
+  rootReal: string,
+  dir: string,
+  recursive: boolean,
+  out: string[]
+): Promise<void> {
+  const entries = await nodeFsp.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const p = nodePath.join(dir, entry.name);
+    let real: string;
+    try {
+      real = confineExisting(p, [rootReal]);
+    } catch {
+      continue; // escapes the workspace subtree (symlink) — never follow
+    }
+    if (entry.isDirectory()) {
+      if (recursive) await listWorkspaceFiles(rootReal, real, recursive, out);
+    } else {
+      out.push(nodePath.relative(rootReal, p));
+    }
+  }
+}
+
+// Keyword-scan cap for workspace-scoped search_docs (external docs are not in
+// the vault's MSRL index, so this is a bounded plain-text scan).
+const WS_SEARCH_MAX_FILES = 500;
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
+    // ----- Registry-global tools (no vault argument) -----------------------
+    if (REGISTRY_GLOBAL_TOOLS.has(name)) {
+      switch (name) {
+        case 'list_vaults': {
+          const vaults = await registry.list();
+          const out = [];
+          for (const v of vaults) {
+            let exists = false;
+            try {
+              exists = (await nodeFsp.stat(v.path)).isDirectory();
+            } catch { /* missing path → exists: false */ }
+            const built = builtEngines.get(v.id);
+            out.push({
+              id: v.id,
+              name: v.name,
+              path: v.path,
+              exists,
+              ...(v.transient && { transient: true }),
+              // Only vaults whose engine has already been built report these —
+              // list_vaults never force-builds an engine.
+              ...(built && {
+                entityCount: built.index.getAll().length,
+                schemaSource: built.schemaSource,
+              }),
+            });
+          }
+          return jsonResult({ count: out.length, vaults: out });
+        }
+
+        case 'add_vault': {
+          // installPlugin defaults TRUE on scaffold — parity with the v1.9.0
+          // "first connect needs zero manual setup" startup bootstrap; a vault
+          // scaffolded via add_vault should be Obsidian-ready the same way.
+          const { path: rawPath, name: vaultName, id: requestedId, bootstrap = 'auto', installPlugin = true } = args as {
+            path: string;
+            name?: string;
+            id?: string;
+            bootstrap?: 'auto' | 'always' | 'never';
+            installPlugin?: boolean;
+          };
+          if (!rawPath || typeof rawPath !== 'string') {
+            throw new Error(`add_vault requires 'path' (absolute vault directory).`);
+          }
+          if (bootstrap !== 'auto' && bootstrap !== 'always' && bootstrap !== 'never') {
+            throw new Error(`add_vault: bootstrap must be "auto", "always" or "never" — got '${bootstrap}'.`);
+          }
+
+          // 1. Confinement FIRST (D7): agent-supplied paths are an arbitrary
+          //    read/write primitive until proven inside allowedRoots.
+          const cfg = await registry.loadConfig();
+          const confined = confinePath(rawPath, cfg.allowedRoots);
+          const already = cfg.vaults.find((v) => nodePath.resolve(v.path) === confined);
+          if (already) {
+            throw new Error(`Path ${confined} is already registered as vault '${already.id}'.`);
+          }
+
+          // 2. Read-only layout probe (never writes, never mkdirs).
+          const vfs = new NodeFsAdapter(confined);
+          const detection = await detectVaultLayout(vfs);
+
+          let mode: 'created' | 'adopted' | 'registered';
+          const layout = {
+            entitiesFolder: detection.entitiesFolder,
+            archiveFolder: detection.archiveFolder,
+            archiveLayout: detection.archiveLayout,
+            canvasFolder: detection.canvasFolder,
+          };
+          const folders: string[] = [...detection.typeFolders];
+
+          const scaffold = async (): Promise<void> => {
+            // Scaffold (D4/§7.2 step 3) — schema-bootstrap owns the schema file.
+            await nodeFsp.mkdir(confined, { recursive: true });
+            // Personalize the default canvas after the vault, AT THE VAULT
+            // ROOT (matches the established convention — AgentPlatform.canvas
+            // sits at the root, not inside a subfolder) instead of the generic
+            // projects/Project.canvas — front and center on first open.
+            const displayName = (vaultName ?? nodePath.basename(confined))
+              .replace(/[\\/:*?"<>|]/g, '-')
+              .trim();
+            const schema: Schema = {
+              ...DEFAULT_SCHEMA,
+              settings: {
+                ...DEFAULT_SCHEMA.settings,
+                defaultCanvas: `${displayName || 'Project'}.canvas`,
+              },
+            };
+            const schemaErrs = validateSchema(schema);
+            if (schemaErrs.length > 0) {
+              throw new Error(`Scaffold schema failed validation (nothing written): ${schemaErrs.join('; ')}`);
+            }
+            await vfs.writeFile(SCHEMA_FILENAME, serializeSchema(schema));
+            // Scaffolded folders match this schema by construction — it is the
+            // vault's initial reconcile baseline.
+            await writeAppliedSchema(vfs, schema);
+            for (const t of schema.entityTypes) {
+              const folder = layout.entitiesFolder ? `${layout.entitiesFolder}/${t.folder}` : t.folder;
+              await vfs.createDir(folder, { recursive: true });
+              folders.push(folder);
+            }
+            await vfs.createDir(layout.archiveFolder, { recursive: true });
+            folders.push(layout.archiveFolder);
+            await vfs.writeFile(WORKSPACES_FILE, '{}\n');
+            await ensureDefaultCanvas(vfs, schema);
+            if (installPlugin) {
+              const artifactsDir = await findPluginSourceDir();
+              if (artifactsDir) await ensurePluginInstalled(vfs, artifactsDir);
+              else console.error('WARNING: installPlugin requested but plugin artifacts not found next to the MCP server — skipped.');
+              // Dataview is a runtime dependency of the plugin's views —
+              // install + enable it too (warn-and-skip when offline).
+              await ensureDataviewInstalled(vfs);
+            }
+          };
+
+          if (bootstrap === 'always') {
+            if (detection.kind !== 'absent' && detection.kind !== 'empty') {
+              throw new Error(
+                `add_vault bootstrap:"always" refuses to scaffold into non-empty directory ${confined} (detected: ${detection.kind}). Use bootstrap:"auto" to adopt it.`
+              );
+            }
+            mode = 'created';
+            await scaffold();
+          } else if (bootstrap === 'never') {
+            // Register only — no files written, layout from detection.
+            mode = 'registered';
+          } else {
+            // auto
+            if (detection.kind === 'absent' || detection.kind === 'empty') {
+              mode = 'created';
+              await scaffold();
+            } else if (detection.kind === 'vault') {
+              // Adopt (§7.2 step 4): detection-driven layout, NEVER a competing
+              // tree. schema.json is written only now (adopt-commit) and only
+              // when it doesn't exist at all; type folders genuinely missing
+              // for the effective schema are created in the DETECTED location.
+              mode = 'adopted';
+              const loaded = await loadSchemaOrDefault(vfs, '');
+              if (!detection.hasSchemaJson) {
+                await vfs.writeFile(SCHEMA_FILENAME, serializeSchema(loaded.schema));
+              }
+              for (const t of loaded.schema.entityTypes) {
+                const folder = layout.entitiesFolder ? `${layout.entitiesFolder}/${t.folder}` : t.folder;
+                if (!(await vfs.exists(folder))) {
+                  await vfs.createDir(folder, { recursive: true });
+                  folders.push(folder);
+                }
+              }
+            } else {
+              throw new Error(
+                `${confined} does not look like a vault (no schema.json, no recognizable type folders, no entity frontmatter) and is not empty. Refusing to adopt — pass bootstrap:"never" to force-register it as-is.`
+              );
+            }
+          }
+
+          // 3. Register under the config lock (kebab slug + suffix collision policy).
+          const base = kebabSlug(requestedId ?? vaultName ?? nodePath.basename(confined));
+          let finalId = base;
+          await registry.mutateConfig((c) => {
+            if (c.vaults.some((v) => nodePath.resolve(v.path) === confined)) {
+              throw new Error(`Path ${confined} is already registered.`);
+            }
+            if (requestedId) {
+              if (c.vaults.some((v) => v.id === base)) {
+                throw new Error(`Vault id '${base}' is already taken — pick another id.`);
+              }
+              finalId = base;
+            } else {
+              finalId = base;
+              for (let n = 2; c.vaults.some((v) => v.id === finalId); n++) {
+                finalId = `${base}-${n}`;
+              }
+            }
+            c.vaults.push({
+              id: finalId,
+              name: vaultName ?? nodePath.basename(confined),
+              path: confined,
+              ...layout,
+            });
+          });
+          console.error(`add_vault: ${mode} '${finalId}' at ${confined}`);
+
+          return jsonResult({
+            vault: finalId,
+            mode,
+            path: confined,
+            ...layout,
+            folders: [...new Set(folders)].sort(),
+          });
+        }
+
+        case 'remove_vault': {
+          const { id } = args as { id: string };
+          if (!id || typeof id !== 'string') {
+            throw new Error(`remove_vault requires 'id' (call list_vaults).`);
+          }
+          const vaults = await registry.list();
+          const entry = vaults.find((v) => v.id === id);
+          if (!entry) {
+            throw new VaultNotFound(id, vaults.map((v) => v.id));
+          }
+          if (entry.transient) {
+            throw new Error(
+              `Vault '${id}' is absorbed from VAULT_PATH / MCP client roots, not from the config — unset the env var / root to drop it. Nothing to remove.`
+            );
+          }
+          // Deregister ONLY — never touches vault files (D6).
+          await registry.mutateConfig((c) => {
+            const i = c.vaults.findIndex((v) => v.id === id);
+            if (i === -1) {
+              throw new VaultNotFound(id, c.vaults.map((v) => v.id));
+            }
+            c.vaults.splice(i, 1);
+          });
+          registry.invalidate(id);
+          builtEngines.delete(id);
+          const msrl = msrlStarted.get(id);
+          if (msrl) {
+            msrlStarted.delete(id);
+            msrl.then((m) => m.shutdown()).catch(() => { /* best-effort */ });
+          }
+          console.error(`remove_vault: deregistered '${id}' (files untouched)`);
+          return jsonResult({ vault: id, removed: true });
+        }
+      }
+    }
+
+    if (!VAULT_SCOPED_TOOLS.has(name)) {
+      throw new Error(`Unknown tool: ${name}`);
+    }
+
+    // ----- Vault resolution (D3): mutating tools REQUIRE `vault`; read-only
+    // tools default only to the sole registered vault. -----------------------
+    const registeredVaults = await registry.list();
+    const vaultRef = resolveVaultRef(args as Record<string, unknown> | undefined, name, registeredVaults);
+    const eng = await getEngine(vaultRef);
+    console.error(`[tool] ${name} vault=${eng.entry.id}`);
+
     switch (name) {
       case 'create_entity': {
         const { type, title, properties = {} } = args as {
@@ -885,16 +1303,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           properties?: Record<string, unknown>;
         };
 
+        // Accept-then-match (D8): the API layer accepted the payload; the
+        // RESOLVED vault's schema is the authority. Unknown type / illegal
+        // status → SchemaMismatch naming the vault + its valid values.
+        assertEntityMatchesVault(eng.entry.id, eng.activeSchema, {
+          type,
+          status: typeof properties.status === 'string' ? properties.status : undefined,
+        });
+
         // Rescan index to get latest IDs
-        await scanIndex();
+        await eng.scanIndex();
 
         // Allocate new ID
-        const allocator = new IDAllocator(schema, index);
-        const id = await allocator.allocate(type);
+        const id = await eng.allocator.allocate(type);
 
         // Build entity
         const now = new Date().toISOString();
-        const typeDef = schema.getEntityType(type);
+        const typeDef = eng.schema.getEntityType(type);
 
         // Separate base properties from custom fields and relationships
         const { workstream, status, relationships, ...customFields } = properties;
@@ -902,7 +1327,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // BUG 1: flat relationship keys (e.g. `implements: [...]` given directly
         // in properties) are routed into relationships instead of becoming inert
         // custom fields. Explicit `relationships` entries win on conflict.
-        const split = splitFlatRelationshipKeys(type, customFields);
+        const split = splitFlatRelationshipKeys(eng.schema, type, customFields);
         const mergedRelationships = {
           ...split.relationships,
           ...((relationships as Record<string, unknown>) ?? {}),
@@ -938,7 +1363,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         // Validate
-        const errors = validator.validate(entity);
+        const errors = eng.validator.validate(entity);
         if (errors.length > 0) {
           return {
             content: [
@@ -952,21 +1377,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Serialize (no body content)
-        const content = serializer.serialize(entity);
+        const content = eng.serializer.serialize(entity);
 
         // Determine path
-        const filename = pathResolver.generateFilename(id, title);
-        const folder = pathResolver.getTypeFolderPath(type);
+        const filename = eng.pathResolver.generateFilename(id, title);
+        const folder = eng.pathResolver.getTypeFolderPath(type);
         const filePath = `${folder}/${filename}`;
 
         // Write file
-        await adapter.writeFile(filePath, content);
+        await eng.fs.writeFile(filePath, content);
 
         return {
           content: [
             {
               type: 'text',
-              text: `Created ${type} ${id}: ${title}\nPath: ${filePath}`,
+              text: `Created ${type} ${id}: ${title}\nPath: ${filePath}\nVault: ${eng.entry.id}`,
             },
           ],
         };
@@ -976,15 +1401,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { type } = args as { type?: EntityType };
 
         // Rescan index
-        await scanIndex();
+        await eng.scanIndex();
 
-        const allIds = index.getAllIds();
+        const allIds = eng.index.getAllIds();
         let filteredIds = allIds;
 
         if (type) {
           filteredIds = allIds.filter(id => {
             try {
-              return getEntityTypeFromId(id, schema) === type;
+              return getEntityTypeFromId(id, eng.schema) === type;
             } catch {
               return false;
             }
@@ -994,12 +1419,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Load entities
         const entities: RuntimeEntity[] = [];
         for (const id of filteredIds) {
-          const path = index.getPathById(id);
+          const path = eng.index.getPathById(id);
           if (!path) continue;
 
           try {
-            const content = await adapter.readFile(path);
-            const entity = parser.parse(content, path);
+            const content = await eng.fs.readFile(path);
+            const entity = eng.parser.parse(content, path);
             entities.push(entity);
           } catch (err) {
             // Skip unparseable files
@@ -1015,7 +1440,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: `Found ${entities.length} entit${entities.length === 1 ? 'y' : 'ies'}${type ? ` of type ${type}` : ''}:\n\n${summary}`,
+              text: `Found ${entities.length} entit${entities.length === 1 ? 'y' : 'ies'}${type ? ` of type ${type}` : ''}:\n\n${summary}\n\nVault: ${eng.entry.id}`,
             },
           ],
         };
@@ -1025,48 +1450,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { id } = args as { id: EntityId };
 
         // Rescan index
-        await scanIndex();
+        await eng.scanIndex();
 
-        const path = index.getPathById(id);
+        const path = eng.index.getPathById(id);
         if (!path) {
           return {
             content: [
               {
                 type: 'text',
-                text: `Entity ${id} not found`,
+                text: `Entity ${id} not found in vault '${eng.entry.id}'`,
               },
             ],
             isError: true,
           };
         }
 
-        const content = await adapter.readFile(path);
-        const entity = parser.parse(content, path);
+        const content = await eng.fs.readFile(path);
+        const entity = eng.parser.parse(content, path);
 
-        // Format as JSON for agents
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(entity, null, 2),
-            },
-          ],
-        };
+        // Format as JSON for agents (echoing the resolved vault, D3)
+        return jsonResult(echoVault(eng.entry.id, entity));
       }
 
       case 'update_entity': {
         const { id, updates } = args as { id: EntityId; updates: Record<string, unknown> };
 
         // Rescan index
-        await scanIndex();
+        await eng.scanIndex();
 
-        const path = index.getPathById(id);
+        const path = eng.index.getPathById(id);
         if (!path) {
           return {
             content: [
               {
                 type: 'text',
-                text: `Entity ${id} not found`,
+                text: `Entity ${id} not found in vault '${eng.entry.id}'`,
               },
             ],
             isError: true,
@@ -1074,8 +1492,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Load current entity
-        const content = await adapter.readFile(path);
-        const entity = parser.parse(content, path);
+        const content = await eng.fs.readFile(path);
+        const entity = eng.parser.parse(content, path);
 
         // BUG A: `updates.body` addresses the markdown BODY, not frontmatter.
         // Pull it out BEFORE sanitization (the YAML sanitizer would mangle
@@ -1109,7 +1527,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Capture pre-existing validation errors so a partial update (e.g. setting
         // only a relationship) is not blocked by unrelated violations that were
         // already present on the stored entity (BUG 4).
-        const errorsBefore = validator.validate(entity);
+        const errorsBefore = eng.validator.validate(entity);
         const beforeKeys = new Set(errorsBefore.map(e => `${e.code}:${e.field}`));
 
         // BUG 1: schema-driven routing — flat relationship keys go into
@@ -1117,8 +1535,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // (Object.assign put both at top level, where the schema-driven
         // serializer silently dropped them). Nested `relationships`/`fields`
         // objects keep their existing whole-map-replace contract.
-        const relNames = getRelationshipFieldNamesForType(entity.type);
-        const customNames = new Set(schema.getFields(entity.type).map(f => f.name));
+        const relNames = getRelationshipFieldNamesForType(eng.schema, entity.type);
+        const customNames = new Set(eng.schema.getFields(entity.type).map(f => f.name));
         // BUG 4: track which fields this update actually touches (nested
         // objects touch their inner keys) so only THOSE can block.
         const touched = new Set<string>();
@@ -1172,7 +1590,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // fields this update touched (or newly introduced elsewhere).
         // Pre-existing violations in untouched fields become non-blocking
         // warnings so legacy data can't hold unrelated repairs hostage.
-        const errorsAfter = validator.validate(entity);
+        const errorsAfter = eng.validator.validate(entity);
         const blocking = errorsAfter.filter(
           e => touched.has(e.field) || !beforeKeys.has(`${e.code}:${e.field}`)
         );
@@ -1195,52 +1613,57 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // the update carries a string `body`, otherwise preserved verbatim
         // (BUG A — frontmatter-only writes destroyed it).
         const body = typeof bodyUpdate === 'string' ? normalizeBody(bodyUpdate) : extractBody(content);
-        const newContent = serializer.serialize(entity) + body;
-        await adapter.writeFile(path, newContent);
+        const newContent = eng.serializer.serialize(entity) + body;
+        await eng.fs.writeFile(path, newContent);
 
         return {
           content: [
             {
               type: 'text',
-              text: warnings.length > 0
+              text: (warnings.length > 0
                 ? `Updated ${id}: ${entity.title}\n${JSON.stringify({ warnings }, null, 2)}`
-                : `Updated ${id}: ${entity.title}`,
+                : `Updated ${id}: ${entity.title}`) + `\nVault: ${eng.entry.id}`,
             },
           ],
         };
       }
 
       case 'get_schema': {
-        // Return the ACTIVE schema (from schema.json, or the codified default) plus
-        // where it came from and any validation errors (surfaced, per config).
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                source: schemaSource,
-                path: `${VAULT_PATH}/${SCHEMA_FILENAME}`,
-                errors: schemaErrors,
-                schema: activeSchema,
-              }, null, 2),
-            },
-          ],
-        };
+        // Return the vault's ACTIVE schema (from schema.json, or the codified
+        // default) plus where it came from and any validation errors.
+        return jsonResult({
+          vault: eng.entry.id,
+          source: eng.schemaSource,
+          path: `${eng.entry.path}/${SCHEMA_FILENAME}`,
+          errors: eng.schemaErrors,
+          schema: eng.activeSchema,
+        });
       }
 
       case 'set_schema': {
         // Write the vault's schema.json (single source of truth) and hot-reload.
         // Accepts a FULL schema object, or a relationships[] array to merge into the
         // current schema (the designer UI edits relationships only).
-        const { schema: fullSchema, relationships } = args as {
+        // NOTE: set_schema payloads are exempt from accept-then-match (they
+        // DEFINE the schema) but still gated by validateSchema.
+        //
+        // D5 (spec §9): STRUCTURAL diffs (types added/removed, folders renamed,
+        // relationships added/removed) go through the transactional reconciler,
+        // which OWNS the whole commit — it writes the bumped schema.json itself,
+        // hot-swaps the engine and rescans; we must NOT write the file a second
+        // time around it. Non-structural edits keep the direct fast path (write
+        // + applySchema) with the SAME schemaVersion bump rule as the reconciler.
+        const { schema: fullSchema, relationships, dryRun = false, collisionPolicy = 'refuse' } = args as {
           schema?: Schema;
           relationships?: unknown[];
+          dryRun?: boolean;
+          collisionPolicy?: 'refuse' | 'suffix';
         };
         let candidate: Schema;
         if (fullSchema) {
           candidate = fullSchema;
         } else if (Array.isArray(relationships)) {
-          candidate = { ...activeSchema, relationships } as Schema;
+          candidate = { ...eng.activeSchema, relationships } as Schema;
         } else {
           return {
             content: [{ type: 'text', text: 'set_schema requires "schema" (full Schema object) or "relationships" (array).' }],
@@ -1256,28 +1679,171 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        // adapter is rooted at VAULT_PATH → write the RELATIVE filename.
-        await adapter.writeFile(SCHEMA_FILENAME, serializeSchema(candidate));
-        applySchema(candidate);
-        schemaSource = 'file';
-        schemaErrors = [];
-        // If the new schema names a defaultCanvas that doesn't exist yet (or is
-        // an empty file), bootstrap/repair it now — same step as server startup.
-        await ensureDefaultCanvas();
-        // Tool inputSchemas embed schema-derived enums (entity types, feature
-        // phase values) — tell clients the tool surface may have changed.
+        const schemaPath = `${eng.entry.path}/${SCHEMA_FILENAME}`;
+        const diff = diffSchemas(eng.activeSchema, candidate);
+
+        if (!hasStructuralChanges(diff)) {
+          // FAST PATH — description/field/settings tweaks only: no files move.
+          const version = await computeSchemaVersionBump(eng.fs, eng.activeSchema, candidate);
+          if (dryRun) {
+            // Nothing structural → an empty plan: nothing to reconcile.
+            return jsonResult({
+              vault: eng.entry.id,
+              dryRun: true,
+              structuralChanges: false,
+              message: 'No structural changes (no types added/removed, folders renamed, or relationships added/removed) — nothing to reconcile. Re-run without dryRun to save.',
+              typesAdded: [],
+              typesRemoved: [],
+              foldersToCreate: [],
+              entitiesToArchive: [],
+              fileMoves: [],
+              collisions: [],
+              danglingRefs: [],
+              relsAdded: [],
+              relsRemoved: [],
+              schemaVersionFrom: version.from,
+              schemaVersionTo: version.to,
+            });
+          }
+          // eng.fs is rooted at the vault → write the RELATIVE filename.
+          // The applied-schema baseline follows every save (even non-structural
+          // ones) so reconcile_vault's restart-safe diff never reports stale
+          // description/field edits as drift.
+          const bumped: Schema = { ...candidate, schemaVersion: version.to };
+          await eng.fs.writeFile(SCHEMA_FILENAME, serializeSchema(bumped));
+          await writeAppliedSchema(eng.fs, bumped);
+          console.error(`set_schema: wrote ${schemaPath} (schemaVersion ${version.from} -> ${version.to})`);
+          // Hot-reload the in-flight engine AND invalidate the registry cache so
+          // the next engine() rebuilds from the file (both stay consistent).
+          eng.applySchema(bumped);
+          eng.schemaSource = 'file';
+          eng.schemaErrors = [];
+          registry.invalidate(eng.entry.id);
+          // If the new schema names a defaultCanvas that doesn't exist yet (or is
+          // an empty file), bootstrap/repair it now — same step as server startup.
+          await ensureDefaultCanvas(eng.fs, bumped);
+          // Tool inputSchemas embed schema-derived enums (entity types, feature
+          // phase values) — tell clients the tool surface may have changed.
+          try { await server.sendToolListChanged(); } catch { /* transport may not be connected */ }
+          return jsonResult({
+            vault: eng.entry.id,
+            saved: true,
+            path: schemaPath,
+            entityTypes: bumped.entityTypes.length,
+            relationships: bumped.relationships.length,
+            schemaVersion: { from: version.from, to: version.to },
+          });
+        }
+
+        // STRUCTURAL PATH — the reconciler. dryRun returns the plan and writes
+        // NOTHING (no lock, no files); apply archives/moves transactionally and
+        // writes the bumped schema.json + applySchema + rescan itself.
+        // The plan is built from eng.index — rescan first so it sees every file.
+        await eng.scanIndex();
+        const outcome = await reconcileVault(eng, eng.activeSchema, candidate, { dryRun, collisionPolicy });
+        if (dryRun) {
+          return jsonResult({
+            vault: eng.entry.id,
+            dryRun: true,
+            structuralChanges: true,
+            plan: outcome,
+          });
+        }
+        const result = outcome as ReconcileResult;
+        console.error(
+          `set_schema: reconciled ${schemaPath} (schemaVersion ${result.plan.schemaVersionFrom} -> ` +
+            `${result.plan.schemaVersionTo}; archived ${result.archived.length}, moved ${result.moved.length})`
+        );
+        // reconcileVault already hot-swapped the engine; keep registry + canvas
+        // + tool surface in step with it (same post-save steps as the fast path).
+        eng.schemaSource = 'file';
+        eng.schemaErrors = [];
+        registry.invalidate(eng.entry.id);
+        await ensureDefaultCanvas(eng.fs, eng.activeSchema);
         try { await server.sendToolListChanged(); } catch { /* transport may not be connected */ }
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              saved: true,
-              path: `${VAULT_PATH}/${SCHEMA_FILENAME}`,
-              entityTypes: candidate.entityTypes.length,
-              relationships: candidate.relationships.length,
-            }, null, 2),
-          }],
+        return jsonResult({
+          vault: eng.entry.id,
+          saved: true,
+          path: schemaPath,
+          entityTypes: eng.activeSchema.entityTypes.length,
+          relationships: eng.activeSchema.relationships.length,
+          schemaVersion: { from: result.plan.schemaVersionFrom, to: result.plan.schemaVersionTo },
+          reconciled: {
+            typesAdded: result.plan.typesAdded,
+            typesRemoved: result.plan.typesRemoved,
+            archived: result.archived,
+            tombstoned: result.tombstoned,
+            moved: result.moved,
+            foldersCreated: result.foldersCreated,
+            foldersRemoved: result.foldersRemoved,
+            danglingRefs: result.plan.danglingRefs,
+          },
+        });
+      }
+
+      case 'reconcile_vault': {
+        // Catch-up after a hand-edited schema.json (spec §9.1): new = the file
+        // on disk; old = the PERSISTED applied-schema baseline (falling back to
+        // the engine's active schema for vaults that predate the baseline).
+        // The baseline — not activeSchema — is what makes this restart-safe: a
+        // schema.json edited while the server was DOWN is loaded as the active
+        // schema at boot, so an active-vs-disk diff would always be empty and
+        // the edit's folder/archival consequences would silently never run.
+        const { dryRun = false, collisionPolicy = 'refuse' } = args as {
+          dryRun?: boolean;
+          collisionPolicy?: 'refuse' | 'suffix';
         };
+        const loaded = await loadSchemaOrDefault(eng.fs, '');
+        if (loaded.errors.length > 0) {
+          // Present-but-invalid file → loud SchemaInvalid with the load errors;
+          // the last-good (active) schema stays in force.
+          throw new SchemaInvalid(loaded.errors);
+        }
+        const baseline = (await readAppliedSchema(eng.fs)) ?? eng.activeSchema;
+        if (JSON.stringify(loaded.schema) === JSON.stringify(baseline)) {
+          return jsonResult({
+            vault: eng.entry.id,
+            upToDate: true,
+            schemaVersion: loaded.schema.schemaVersion,
+          });
+        }
+        // The plan is built from eng.index — rescan first so it sees every file.
+        await eng.scanIndex();
+        const outcome = await reconcileVault(eng, baseline, loaded.schema, { dryRun, collisionPolicy });
+        if (dryRun) {
+          return jsonResult({
+            vault: eng.entry.id,
+            upToDate: false,
+            dryRun: true,
+            plan: outcome,
+          });
+        }
+        const result = outcome as ReconcileResult;
+        console.error(
+          `reconcile_vault: reconciled ${eng.entry.path}/${SCHEMA_FILENAME} (schemaVersion ` +
+            `${result.plan.schemaVersionFrom} -> ${result.plan.schemaVersionTo}; ` +
+            `archived ${result.archived.length}, moved ${result.moved.length})`
+        );
+        // Same post-apply steps as set_schema's structural path.
+        eng.schemaSource = 'file';
+        eng.schemaErrors = [];
+        registry.invalidate(eng.entry.id);
+        await ensureDefaultCanvas(eng.fs, eng.activeSchema);
+        try { await server.sendToolListChanged(); } catch { /* transport may not be connected */ }
+        return jsonResult({
+          vault: eng.entry.id,
+          upToDate: false,
+          applied: true,
+          schemaVersion: { from: result.plan.schemaVersionFrom, to: result.plan.schemaVersionTo },
+          typesAdded: result.plan.typesAdded,
+          typesRemoved: result.plan.typesRemoved,
+          archived: result.archived,
+          tombstoned: result.tombstoned,
+          moved: result.moved,
+          foldersCreated: result.foldersCreated,
+          foldersRemoved: result.foldersRemoved,
+          danglingRefs: result.plan.danglingRefs,
+        });
       }
 
       case 'get_schema_designer': {
@@ -1285,7 +1851,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // the vault's ACTIVE schema. Its "copy" output feeds set_schema.
         const html = (DESIGNER_HTML_TEMPLATE as string).replaceAll(
           '"__SCHEMA_PLACEHOLDER__"',
-          JSON.stringify(activeSchema),
+          JSON.stringify(eng.activeSchema),
         );
         return { content: [{ type: 'text', text: html }] };
       }
@@ -1306,7 +1872,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         // Rescan index
-        await scanIndex();
+        await eng.scanIndex();
 
         // index.get*/getAll return EntityMetadata (flat parent_id, no
         // relationships/fields). Downstream we only surface metadata fields, so
@@ -1316,11 +1882,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Navigation mode
         if (from_id && direction) {
-          const startPath = index.getPathById(from_id);
-          const startEntity = startPath ? parser.parse(await adapter.readFile(startPath), startPath) : null;
+          const startPath = eng.index.getPathById(from_id);
+          const startEntity = startPath ? eng.parser.parse(await eng.fs.readFile(startPath), startPath) : null;
           if (!startEntity) {
             return {
-              content: [{ type: 'text', text: `Entity ${from_id} not found` }],
+              content: [{ type: 'text', text: `Entity ${from_id} not found in vault '${eng.entry.id}'` }],
               isError: true,
             };
           }
@@ -1328,43 +1894,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Simple navigation implementation
           if (direction === 'down') {
             // Get children
-            results = index.getAll().filter(e =>
+            results = eng.index.getAll().filter(e =>
               e.parent_id === from_id && !e.archived
             );
           } else if (direction === 'up') {
             // Get parent
             const parentId = startEntity.relationships?.parent;
             if (parentId) {
-              const parent = index.get(parentId as string);
+              const parent = eng.index.get(parentId as string);
               if (parent) results = [parent];
             }
           } else if (direction === 'siblings') {
             // Get entities with same parent
             const parentId = startEntity.relationships?.parent;
             if (parentId) {
-              results = index.getAll().filter(e =>
+              results = eng.index.getAll().filter(e =>
                 e.parent_id === parentId && e.id !== from_id && !e.archived
               );
             }
           } else if (direction === 'dependencies') {
             // Get dependencies
             const depsIds = (startEntity.relationships?.depends_on as string[]) || [];
-            results = depsIds.map(id => index.get(id)).filter(Boolean) as EntityMetadata[];
+            results = depsIds.map(id => eng.index.get(id)).filter(Boolean) as EntityMetadata[];
           }
         }
         // Search mode
         else if (query) {
           const lowerQuery = query.toLowerCase();
           const matched: EntityMetadata[] = [];
-          for (const e of index.getAll()) {
+          for (const e of eng.index.getAll()) {
             if (e.archived && !filters.archived) continue;
             let match =
               e.title.toLowerCase().includes(lowerQuery) ||
               e.id.toLowerCase().includes(lowerQuery);
             if (!match) {
               // Field values require the full parsed entity (metadata is flat).
-              const p = index.getPathById(e.id);
-              const ent = p ? parser.parse(await adapter.readFile(p), p) : null;
+              const p = eng.index.getPathById(e.id);
+              const ent = p ? eng.parser.parse(await eng.fs.readFile(p), p) : null;
               match = !!(ent?.fields && Object.values(ent.fields).some(v =>
                 typeof v === 'string' && v.toLowerCase().includes(lowerQuery)
               ));
@@ -1375,7 +1941,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         // List mode
         else {
-          results = index.getAll().filter(e => {
+          results = eng.index.getAll().filter(e => {
             if (e.archived && !filters.archived) return false;
             return true;
           });
@@ -1405,17 +1971,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           parent: e.parent_id,
         }));
 
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                total: results.length,
-                results: formatted,
-              }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({
+          vault: eng.entry.id,
+          total: results.length,
+          results: formatted,
+        });
       }
 
       case 'get_project_overview': {
@@ -1425,8 +1985,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           workstream?: string;
         };
 
-        await scanIndex();
-        const entities = index.getAll();
+        await eng.scanIndex();
+        const entities = eng.index.getAll();
 
         // Initialize counters
         const summary = {
@@ -1496,21 +2056,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({ summary, workstreams }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({ vault: eng.entry.id, summary, workstreams });
       }
 
       case 'reconcile_relationships': {
         const { dry_run = false } = args as { dry_run?: boolean };
 
-        await scanIndex();
-        const metas = index.getAll();
+        await eng.scanIndex();
+        const metas = eng.index.getAll();
         const changes: string[] = [];
 
         // BUG 2: the previous implementation hardcoded TWO pair handlers
@@ -1543,11 +2096,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const loadEntity = async (id: string): Promise<RuntimeEntity | null> => {
           const buffered = pending.get(id);
           if (buffered) return buffered;
-          const p = index.getPathById(id);
+          const p = eng.index.getPathById(id);
           if (!p) return null;
           try {
-            const raw = await adapter.readFile(p);
-            const parsed = parser.parse(raw, p);
+            const raw = await eng.fs.readFile(p);
+            const parsed = eng.parser.parse(raw, p);
             bodies.set(id, extractBody(raw));
             stamps.set(id, explicitUpdatedAtMs(raw));
             return parsed;
@@ -1571,7 +2124,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const relNamesFor = (type: string): Set<string> => {
           let names = relNamesByType.get(type);
           if (!names) {
-            names = getRelationshipFieldNamesForType(type);
+            names = getRelationshipFieldNamesForType(eng.schema, type);
             relNamesByType.set(type, names);
           }
           return names;
@@ -1610,7 +2163,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const keep: string[] = [];
 
           for (const targetId of ids) {
-            const targetMeta = index.get(targetId);
+            const targetMeta = eng.index.get(targetId);
             if (!targetMeta) {
               // Dangling entry: the other endpoint no longer exists → prune.
               changes.push(danglingMsg(entity.id, field, targetId));
@@ -1680,7 +2233,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         };
 
-        const relationshipDefs = schema.getAllRelationships();
+        const relationshipDefs = eng.schema.getAllRelationships();
         for (const meta of metas) {
           // Reconciliation reads/writes relationship fields, which live only on
           // the full parsed entity (index metadata is flat).
@@ -1704,60 +2257,67 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           for (const entity of pending.values()) {
             // Re-attach the file's original markdown body (BUG A: the
             // frontmatter-only serializer output used to destroy it).
-            const content = serializer.serialize(entity) + (bodies.get(entity.id) ?? '');
+            const content = eng.serializer.serialize(entity) + (bodies.get(entity.id) ?? '');
             // Write back to the entity's existing file path; only fall back to a
             // generated <ID>_<title> path for entities not yet in the index.
             // Recomputing unconditionally forks a duplicate file whenever the
             // vault's filename doesn't match the generated pattern.
-            const existingPath = index.getPathById(entity.id);
+            const existingPath = eng.index.getPathById(entity.id);
             const filePath = existingPath ??
-              `${pathResolver.getTypeFolderPath(entity.type)}/${pathResolver.generateFilename(entity.id, entity.title)}`;
-            await adapter.writeFile(filePath, content);
+              `${eng.pathResolver.getTypeFolderPath(entity.type)}/${eng.pathResolver.generateFilename(entity.id, entity.title)}`;
+            await eng.fs.writeFile(filePath, content);
           }
         }
 
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                dry_run,
-                changes_count: changes.length,
-                changes: changes.slice(0, 50), // Limit output
-              }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({
+          vault: eng.entry.id,
+          dry_run,
+          changes_count: changes.length,
+          changes: changes.slice(0, 50), // Limit output
+        });
       }
 
       case 'rebuild_index': {
-        const before = index.getAll().length;
+        const before = eng.index.getAll().length;
         const startTime = Date.now();
 
-        await scanIndex();
+        await eng.scanIndex();
 
-        const after = index.getAll().length;
+        const after = eng.index.getAll().length;
         const duration = Date.now() - startTime;
 
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                entities_before: before,
-                entities_after: after,
-                duration_ms: duration,
-              }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({
+          vault: eng.entry.id,
+          entities_before: before,
+          entities_after: after,
+          duration_ms: duration,
+        });
       }
 
       case 'read_docs': {
-        const { path } = args as { path: string };
+        const { path, workspace } = args as { path?: string; workspace?: string };
+        if (typeof path !== 'string' || path.length === 0) {
+          // Guard before nodePath.resolve — a missing path otherwise surfaces
+          // as a raw TypeError instead of an actionable validation error.
+          return {
+            content: [{ type: 'text', text: 'read_docs requires a "path" argument (vault-relative, or workspace-relative when "workspace" is given).' }],
+            isError: true,
+          };
+        }
+
+        if (workspace) {
+          // Workspace-scoped read: confineExisting at ACCESS time (TOCTOU) +
+          // doc-extension allowlist. Raw content result (no vault suffix —
+          // the payload must stay byte-faithful).
+          const root = await resolveWorkspaceRoot(eng, workspace);
+          const real = confineExisting(nodePath.resolve(root, path), [root]);
+          assertDocPath(real);
+          const content = await nodeFsp.readFile(real, 'utf8');
+          return { content: [{ type: 'text', text: content }] };
+        }
 
         try {
-          const content = await adapter.readFile(path);
+          const content = await eng.fs.readFile(path);
           return {
             content: [
               {
@@ -1780,15 +2340,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'update_doc': {
-        const { path, content } = args as { path: string; content: string };
+        const { path, content, workspace } = args as { path: string; content: string; workspace?: string };
+
+        if (workspace) {
+          // Workspace-scoped write: target may not exist yet, so confine via
+          // the deepest-existing-ancestor rule, then enforce the doc allowlist.
+          const root = await resolveWorkspaceRoot(eng, workspace);
+          const real = confinePath(nodePath.resolve(root, path), [root]);
+          assertDocPath(real);
+          await nodeFsp.mkdir(nodePath.dirname(real), { recursive: true });
+          await nodeFsp.writeFile(real, content, 'utf8');
+          return {
+            content: [{ type: 'text', text: `Updated ${path} (workspace: ${workspace})\nVault: ${eng.entry.id}` }],
+          };
+        }
 
         try {
-          await adapter.writeFile(path, content);
+          await eng.fs.writeFile(path, content);
           return {
             content: [
               {
                 type: 'text',
-                text: `Updated ${path}`,
+                text: `Updated ${path}\nVault: ${eng.entry.id}`,
               },
             ],
           };
@@ -1806,52 +2379,60 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_files': {
-        const { directory = '', pattern, recursive = false } = args as {
+        const { directory = '', pattern, recursive = false, workspace } = args as {
           directory?: string;
           pattern?: string;
           recursive?: boolean;
+          workspace?: string;
+        };
+
+        const matchesPattern = (relativePath: string): boolean => {
+          if (!pattern) return true;
+          const filename = relativePath.split('/').pop() || '';
+          // Convert glob pattern to regex (simple * → .* conversion)
+          const regexPattern = pattern.replace(/\*/g, '.*').replace(/\?/g, '.');
+          return filename.match(new RegExp(`^${regexPattern}$`)) !== null;
         };
 
         try {
           const files: string[] = [];
 
-          async function scan(dir: string) {
-            const entries = await adapter.readDir(dir);
-            for (const entry of entries) {
-              if (entry.isDirectory && recursive) {
-                await scan(entry.path);
-              } else if (!entry.isDirectory) {
-                const relativePath = entry.path;
-                // Match pattern against filename only, not full path
-                if (!pattern) {
-                  files.push(relativePath);
-                } else {
-                  const filename = relativePath.split('/').pop() || '';
-                  // Convert glob pattern to regex (simple * → .* conversion)
-                  const regexPattern = pattern.replace(/\*/g, '.*').replace(/\?/g, '.');
-                  if (filename.match(new RegExp(`^${regexPattern}$`))) {
-                    files.push(relativePath);
+          if (workspace) {
+            // Workspace-scoped listing: node:fs walk with per-entry re-confinement.
+            const root = await resolveWorkspaceRoot(eng, workspace);
+            const startDir = directory
+              ? confineExisting(nodePath.resolve(root, directory), [root])
+              : root;
+            const all: string[] = [];
+            await listWorkspaceFiles(root, startDir, recursive, all);
+            for (const rel of all) {
+              if (matchesPattern(rel)) files.push(rel);
+            }
+          } else {
+            const scan = async (dir: string): Promise<void> => {
+              const entries = await eng.fs.readDir(dir);
+              for (const entry of entries) {
+                if (entry.isDirectory && recursive) {
+                  await scan(entry.path);
+                } else if (!entry.isDirectory) {
+                  // Match pattern against filename only, not full path
+                  if (matchesPattern(entry.path)) {
+                    files.push(entry.path);
                   }
                 }
               }
-            }
+            };
+            await scan(directory);
           }
 
-          await scan(directory);
-
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  directory,
-                  pattern,
-                  count: files.length,
-                  files: files.slice(0, 100), // Limit output
-                }, null, 2),
-              },
-            ],
-          };
+          return jsonResult({
+            vault: eng.entry.id,
+            ...(workspace && { workspace }),
+            directory,
+            pattern,
+            count: files.length,
+            files: files.slice(0, 100), // Limit output
+          });
         } catch (error) {
           return {
             content: [
@@ -1871,8 +2452,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           focus?: 'blockers' | 'actions' | 'both';
         };
 
-        await scanIndex();
-        const entities = index.getAll().filter(e => !e.archived);
+        await eng.scanIndex();
+        const entities = eng.index.getAll().filter(e => !e.archived);
 
         const blockers: Array<{id: string; title: string; type: string; blocked_by: string[]}> = [];
         const suggestions: string[] = [];
@@ -1883,8 +2464,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           if (entity.status === 'Blocked') {
             // depends_on lives on the full parsed entity (metadata is flat).
-            const p = index.getPathById(entity.id);
-            const full = p ? parser.parse(await adapter.readFile(p), p) : null;
+            const p = eng.index.getPathById(entity.id);
+            const full = p ? eng.parser.parse(await eng.fs.readFile(p), p) : null;
             const blockedBy = (full?.relationships?.depends_on as string[]) || [];
             blockers.push({
               id: entity.id,
@@ -1918,19 +2499,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                health: blockers.length === 0 ? 'good' : blockers.length < 5 ? 'fair' : 'poor',
-                blockers_count: blockers.length,
-                blockers: blockers.slice(0, 20),
-                suggested_actions: suggestions,
-              }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({
+          vault: eng.entry.id,
+          health: blockers.length === 0 ? 'good' : blockers.length < 5 ? 'fair' : 'poor',
+          blockers_count: blockers.length,
+          blockers: blockers.slice(0, 20),
+          suggested_actions: suggestions,
+        });
       }
 
       case 'get_feature_coverage': {
@@ -1939,17 +2514,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           tier?: 'OSS' | 'Premium';
         };
 
-        await scanIndex();
-        const featureMeta = index.getAll().filter(e => e.type === 'feature' && !e.archived);
+        await eng.scanIndex();
+        const featureMeta = eng.index.getAll().filter(e => e.type === 'feature' && !e.archived);
 
         // NOTE: index.getAll() returns EntityMetadata (no `relationships`/`fields`).
         // Re-parse each feature from disk so filters and coverage read real data.
         const features: RuntimeEntity[] = [];
         for (const meta of featureMeta) {
-          const p = index.getPathById(meta.id);
+          const p = eng.index.getPathById(meta.id);
           if (!p) continue;
           try {
-            features.push(parser.parse(await adapter.readFile(p), p));
+            features.push(eng.parser.parse(await eng.fs.readFile(p), p));
           } catch {
             continue;
           }
@@ -1990,21 +2565,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         });
 
-        const coverage = {
+        return jsonResult({
+          vault: eng.entry.id,
           total: filtered.length,
           with_implementation: withImpl,
           with_documentation: withDoc,
           features: featureRows,
-        };
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(coverage, null, 2),
-            },
-          ],
-        };
+        });
       }
 
       case 'validate_project': {
@@ -2013,8 +2580,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           entity_types?: string[];
         };
 
-        await scanIndex();
-        let entities = index.getAll().filter(e => !e.archived);
+        await eng.scanIndex();
+        let entities = eng.index.getAll().filter(e => !e.archived);
 
         // Apply filters
         if (filterWorkstream) {
@@ -2032,7 +2599,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // create/update writes. They flag entities whose relationship fan-out
         // makes the canvas/graph hard to read, with concrete reorganization
         // suggestions for the agent to reconcile over time.
-        const fanoutRules = getFanoutRules(activeSchema);
+        const fanoutRules = getFanoutRules(eng.activeSchema);
 
         // Rule-id stability: these four ids predate the schema-driven rules and
         // are pinned by integration tests + agent playbooks, and their rich
@@ -2065,7 +2632,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Hard required-parent rules from the schema (`validation.requiredForTypes`,
         // e.g. tasks/stories need a hierarchy parent) → ORPHANED_ENTITY violations.
-        const requiredParentRules = getRequiredParentRules(activeSchema);
+        const requiredParentRules = getRequiredParentRules(eng.activeSchema);
 
         // NOTE: index.getAll() returns EntityMetadata (flat parent_id, no
         // `relationships`/`fields`). The rules below need the full relationship
@@ -2076,18 +2643,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // VALID RELATIONSHIP SET — derived from the schema (single source of truth).
         // See schema-derivation.ts / default-schema.ts `positioning` metadata.
-        const ALLOWED = VALIDATION_ALLOWLIST;
+        const ALLOWED = eng.validationAllowList;
         // Every relationship field name in the ACTIVE schema (forward + reverse), so legacy
         // fields that are no longer valid are detected even if the parser parked them in
         // `passthrough` (an entity type the current schema doesn't treat as from/to).
-        const REL_FIELDS = getAllRelationshipFieldNames(activeSchema);
+        const REL_FIELDS = getAllRelationshipFieldNames(eng.activeSchema);
 
         for (const meta of entities) {
-          const path = index.getPathById(meta.id);
+          const path = eng.index.getPathById(meta.id);
           if (!path) continue;
           let entity: RuntimeEntity;
           try {
-            entity = parser.parse(await adapter.readFile(path), path);
+            entity = eng.parser.parse(await eng.fs.readFile(path), path);
           } catch {
             continue; // skip unparseable files
           }
@@ -2127,7 +2694,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const okTypes = allowedForType[field];
             const badTargets: string[] = [];
             for (const targetId of asList(val)) {
-              const target = index.get(targetId);
+              const target = eng.index.get(targetId);
               if (target && !okTypes.includes(target.type)) {
                 badTargets.push(`${targetId} (${target.type})`);
               }
@@ -2161,23 +2728,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                entities_checked: entities.length,
-                violations_count: violations.length,
-                violations: violations.slice(0, 500),
-                advisories_count: advisories.length,
-                advisories: advisories.slice(0, 200),
-                advisory_note: advisories.length > 0
-                  ? 'Advisories are non-blocking fan-out guidelines (not enforced on writes). Reconcile them over time using each suggestion — prefer small, reviewable re-organizations over bulk edits.'
-                  : undefined,
-              }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({
+          vault: eng.entry.id,
+          entities_checked: entities.length,
+          violations_count: violations.length,
+          violations: violations.slice(0, 500),
+          advisories_count: advisories.length,
+          advisories: advisories.slice(0, 200),
+          advisory_note: advisories.length > 0
+            ? 'Advisories are non-blocking fan-out guidelines (not enforced on writes). Reconcile them over time using each suggestion — prefer small, reviewable re-organizations over bulk edits.'
+            : undefined,
+        });
       }
 
       case 'cleanup_completed': {
@@ -2186,9 +2747,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           dry_run?: boolean;
         };
 
-        await scanIndex();
+        await eng.scanIndex();
 
-        let milestones = index.getAll().filter(e =>
+        let milestones = eng.index.getAll().filter(e =>
           e.type === 'milestone' && e.status === 'Completed' && !e.archived
         );
 
@@ -2196,73 +2757,57 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           milestones = milestones.filter(m => m.id === milestone_id);
         }
 
-        // Each archive candidate carries its original markdown body so the
-        // archive copy keeps it (BUG A: frontmatter-only writes destroyed it).
-        const toArchive: Array<{ entity: RuntimeEntity; body: string }> = [];
+        // Candidates: completed stories/tasks under each completed milestone.
+        const candidates: EntityMetadata[] = [];
+        for (const milestone of milestones) {
+          const children = eng.index.getAll().filter(e =>
+            (e.type === 'story' || e.type === 'task') &&
+            e.parent_id === milestone.id &&
+            !e.archived
+          );
+          for (const child of children) {
+            if (child.status === 'Completed') candidates.push(child);
+          }
+        }
+
         const stats = {
           milestones_processed: milestones.length,
           stories_archived: 0,
           tasks_archived: 0,
         };
+        const archived: Array<{ id: string; from: string; to: string }> = [];
+        const errors: string[] = [];
 
-        for (const milestone of milestones) {
-          // Find all stories and tasks under this milestone
-          const children = index.getAll().filter(e =>
-            (e.type === 'story' || e.type === 'task') &&
-            e.parent_id === milestone.id &&
-            !e.archived
-          );
-
-          for (const child of children) {
-            if (child.status === 'Completed') {
-              // Archiving re-serializes the entity, so load the full parsed form.
-              const cp = index.getPathById(child.id);
-              const raw = cp ? await adapter.readFile(cp) : null;
-              const full = raw && cp ? parser.parse(raw, cp) : null;
-              if (!full || !raw) continue;
-              toArchive.push({ entity: full, body: extractBody(raw) });
-              if (child.type === 'story') stats.stories_archived++;
-              if (child.type === 'task') stats.tasks_archived++;
-            }
+        if (dry_run) {
+          // Preview counts only — nothing written.
+          for (const c of candidates) {
+            if (c.type === 'story') stats.stories_archived++;
+            if (c.type === 'task') stats.tasks_archived++;
           }
-        }
-
-        if (!dry_run && toArchive.length > 0) {
-          for (const { entity, body } of toArchive) {
-            const updated = { ...entity, archived: true };
-            const content = serializer.serialize(updated) + body;
-
-            // Move to archive folder
-            const archiveFolder = 'archive';
-            const typeFolder = pathResolver.getTypeFolderPath(entity.type);
-            const filename = pathResolver.generateFilename(entity.id, entity.title);
-
-            const archivePath = `${archiveFolder}/${typeFolder.split('/').pop()}/${filename}`;
-            await adapter.writeFile(archivePath, content);
-
-            // Remove from original location
-            const originalPath = `${typeFolder}/${filename}`;
+        } else {
+          // archiveEntity is copy → VERIFY → delete-original (fixes the old
+          // block that wrote the archive copy but never removed the source —
+          // NodeFsAdapter.deleteFile exists and is used now).
+          for (const c of candidates) {
             try {
-              // Note: NodeFsAdapter doesn't have delete, so we just write to archive
-              // The original file would need manual cleanup or a delete method added
+              const moved = await archiveEntity(eng, c.id);
+              archived.push({ id: c.id, ...moved });
+              if (c.type === 'story') stats.stories_archived++;
+              if (c.type === 'task') stats.tasks_archived++;
             } catch (e) {
-              // Ignore if original doesn't exist
+              errors.push(`${c.id}: ${e instanceof Error ? e.message : String(e)}`);
             }
           }
         }
 
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                dry_run,
-                ...stats,
-                entities_to_archive: toArchive.length,
-              }, null, 2),
-            },
-          ],
-        };
+        return jsonResult({
+          vault: eng.entry.id,
+          dry_run,
+          ...stats,
+          entities_to_archive: candidates.length,
+          ...(archived.length > 0 && { archived }),
+          ...(errors.length > 0 && { errors }),
+        });
       }
 
       case 'manage_documents': {
@@ -2273,18 +2818,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           document_id?: string;
         };
 
-        await scanIndex();
+        await eng.scanIndex();
 
         if (action === 'get_decision_history') {
           // Re-parse into full entities: the filter/map below reads `fields`
           // and `relationships`, which are absent from flat index metadata.
-          const decisionMetas = index.getAll().filter(e =>
+          const decisionMetas = eng.index.getAll().filter(e =>
             e.type === 'decision' && !e.archived
           );
           let decisions: RuntimeEntity[] = [];
           for (const meta of decisionMetas) {
-            const p = index.getPathById(meta.id);
-            const ent = p ? parser.parse(await adapter.readFile(p), p) : null;
+            const p = eng.index.getPathById(meta.id);
+            const ent = p ? eng.parser.parse(await eng.fs.readFile(p), p) : null;
             if (ent) decisions.push(ent);
           }
 
@@ -2309,17 +2854,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             affects: d.relationships?.affects || [],
           }));
 
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  total: history.length,
-                  decisions: history,
-                }, null, 2),
-              },
-            ],
-          };
+          return jsonResult({
+            vault: eng.entry.id,
+            total: history.length,
+            decisions: history,
+          });
         } else if (action === 'check_freshness') {
           if (!document_id) {
             return {
@@ -2328,7 +2867,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             };
           }
 
-          const doc = index.get(document_id);
+          const doc = eng.index.get(document_id);
           if (!doc) {
             return {
               content: [{ type: 'text', text: `Document ${document_id} not found` }],
@@ -2338,7 +2877,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           // Check if there are newer decisions that might affect this document
           const docUpdated = new Date(doc.updated_at);
-          const decisions = index.getAll().filter(e =>
+          const decisions = eng.index.getAll().filter(e =>
             e.type === 'decision' &&
             e.status === 'Decided' &&
             new Date(e.created_at) > docUpdated
@@ -2346,24 +2885,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           const stale = decisions.length > 0;
 
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  document_id,
-                  last_updated: doc.updated_at,
-                  is_stale: stale,
-                  newer_decisions_count: decisions.length,
-                  newer_decisions: decisions.slice(0, 5).map(d => ({
-                    id: d.id,
-                    title: d.title,
-                    created: d.created_at,
-                  })),
-                }, null, 2),
-              },
-            ],
-          };
+          return jsonResult({
+            vault: eng.entry.id,
+            document_id,
+            last_updated: doc.updated_at,
+            is_stale: stale,
+            newer_decisions_count: decisions.length,
+            newer_decisions: decisions.slice(0, 5).map(d => ({
+              id: d.id,
+              title: d.title,
+              created: d.created_at,
+            })),
+          });
         }
 
         return {
@@ -2381,6 +2914,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           excerpt_budget,
           filters,
           include_scores,
+          workspace,
         } = args as {
           query: string;
           top_k?: number;
@@ -2397,9 +2931,51 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             heading_path_contains?: string;
           };
           include_scores?: boolean;
+          workspace?: string;
         };
 
-        const engine = await getMsrlEngine();
+        if (workspace) {
+          // Workspace scope: external docs are NOT in the vault's MSRL index —
+          // bounded plain keyword scan over the confined subtree (.md/.canvas
+          // only, symlink-escape safe via listWorkspaceFiles).
+          const root = await resolveWorkspaceRoot(eng, workspace);
+          const all: string[] = [];
+          await listWorkspaceFiles(root, root, true, all);
+          const docs = all.filter(f => f.endsWith('.md') || f.endsWith('.canvas')).slice(0, WS_SEARCH_MAX_FILES);
+          const needle = query.toLowerCase();
+          const limit = Math.min(top_k ?? 10, 100);
+          const results: Array<{ path: string; excerpt: string }> = [];
+          for (const rel of docs) {
+            if (results.length >= limit) break;
+            let real: string;
+            try {
+              real = confineExisting(nodePath.join(root, rel), [root]);
+            } catch {
+              continue;
+            }
+            assertDocPath(real);
+            let text: string;
+            try {
+              text = await nodeFsp.readFile(real, 'utf8');
+            } catch {
+              continue;
+            }
+            const at = text.toLowerCase().indexOf(needle);
+            if (at === -1) continue;
+            const start = Math.max(0, at - 200);
+            const end = Math.min(text.length, at + needle.length + 200);
+            results.push({ path: rel, excerpt: text.slice(start, end) });
+          }
+          return jsonResult({
+            vault: eng.entry.id,
+            workspace,
+            mode: 'keyword-scan',
+            total_results: results.length,
+            results,
+          });
+        }
+
+        const engine = await getMsrl(eng);
         const result: QueryResult = await engine.query({
           query,
           topK: top_k,
@@ -2423,7 +2999,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
 
         // Map camelCase results back to snake_case for MCP
-        const output = {
+        return jsonResult({
+          vault: eng.entry.id,
           results: result.results.map((r) => ({
             doc_uri: r.docUri,
             heading_path: r.headingPath,
@@ -2446,18 +3023,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             results_dropped_by_score: result.meta.resultsDroppedByScore,
             results_dropped_by_limit: result.meta.resultsDroppedByLimit,
           },
-        };
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
-        };
+        });
       }
 
       case 'msrl_status': {
-        const engine = await getMsrlEngine();
+        const engine = await getMsrl(eng);
         const status: IndexStatus = engine.getStatus();
 
-        const output = {
+        return jsonResult({
+          vault: eng.entry.id,
           state: status.state,
           snapshot_id: status.snapshotId,
           snapshot_timestamp: status.snapshotTimestamp,
@@ -2476,11 +3050,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               current_file: status.buildProgress.currentFile,
             },
           }),
-        };
+        });
+      }
 
-        return {
-          content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+      case 'list_workspaces': {
+        const workspaces = await readWorkspaces(eng.fs);
+        return jsonResult({
+          vault: eng.entry.id,
+          count: Object.keys(workspaces).length,
+          workspaces,
+        });
+      }
+
+      case 'add_workspace': {
+        const { name: wsName, path: wsPath, description } = args as {
+          name: string;
+          path: string;
+          description?: string;
         };
+        if (!wsName || typeof wsName !== 'string') throw new Error(`add_workspace requires 'name'.`);
+        if (!wsPath || typeof wsPath !== 'string') throw new Error(`add_workspace requires 'path'.`);
+        // Registration-time confinement (D7) — the stored path is the
+        // CONFINED canonical result, and every later access re-confines it.
+        const allowed = (await registry.loadConfig()).allowedRoots;
+        const updated = await addWorkspace(
+          eng.fs,
+          { name: wsName, path: wsPath, description },
+          (p) => confinePath(p, allowed)
+        );
+        console.error(`add_workspace: '${wsName}' → ${updated[wsName].path} (vault ${eng.entry.id})`);
+        return jsonResult({
+          vault: eng.entry.id,
+          name: wsName,
+          path: updated[wsName].path,
+          ...(description !== undefined && { description }),
+        });
+      }
+
+      case 'remove_workspace': {
+        const { name: wsName } = args as { name: string };
+        if (!wsName || typeof wsName !== 'string') throw new Error(`remove_workspace requires 'name'.`);
+        await removeWorkspace(eng.fs, wsName);
+        console.error(`remove_workspace: '${wsName}' (vault ${eng.entry.id})`);
+        return jsonResult({ vault: eng.entry.id, name: wsName, removed: true });
       }
 
       case 'entities': {
@@ -2511,21 +3123,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             };
           }
 
-          await scanIndex();
+          await eng.scanIndex();
 
           const entities: RuntimeEntity[] = [];
           const notFound: EntityId[] = [];
 
           for (const id of ids) {
-            const path = index.getPathById(id);
+            const path = eng.index.getPathById(id);
             if (!path) {
               notFound.push(id);
               continue;
             }
 
             try {
-              const content = await adapter.readFile(path);
-              const entity = parser.parse(content, path);
+              const content = await eng.fs.readFile(path);
+              const entity = eng.parser.parse(content, path);
 
               // Apply field filtering if requested
               if (fields && fields.length > 0) {
@@ -2544,15 +3156,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
           }
 
-          const output = {
+          return jsonResult({
+            vault: eng.entry.id,
             entities,
             count: entities.length,
             ...(notFound.length > 0 && { not_found: notFound }),
-          };
-
-          return {
-            content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
-          };
+          });
         } else if (action === 'batch') {
           // BATCH ACTION: Perform multiple operations
           if (!ops || ops.length === 0) {
@@ -2604,11 +3213,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   throw new Error('type and payload.title are required for create operation');
                 }
 
+                // Accept-then-match (D8) — PER ITEM: a type/status that doesn't
+                // match the resolved vault's schema rejects THIS op only (the
+                // per-op catch reports it; valid sibling ops still run).
+                assertEntityMatchesVault(eng.entry.id, eng.activeSchema, {
+                  type,
+                  status: typeof payload.status === 'string' ? payload.status : undefined,
+                });
+
                 if (dryRun) {
                   // Dry run: preview the entity that would be created
-                  await scanIndex();
-                  const allocator = new IDAllocator(schema, index);
-                  const newId = await allocator.allocate(type);
+                  await eng.scanIndex();
+                  const newId = await eng.allocator.allocate(type);
 
                   results.push({
                     client_id,
@@ -2623,30 +3239,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   succeeded++;
                 } else {
                   // Actually create the entity
-                  await scanIndex();
-                  const allocator = new IDAllocator(schema, index);
-                  const newId = await allocator.allocate(type);
+                  await eng.scanIndex();
+                  const newId = await eng.allocator.allocate(type);
 
                   const now = new Date().toISOString();
-                  const typeDef = schema.getEntityType(type);
+                  const typeDef = eng.schema.getEntityType(type);
 
-                  // Resolve cross-references in payload
-                  const resolvedPayload = { ...payload };
-                  for (const [key, value] of Object.entries(resolvedPayload)) {
+                  // Resolve {{client_id}} cross-references DEEPLY — refs live
+                  // inside the `relationships` wrapper (and can be array
+                  // members), not just at the top level; a shallow walk wrote
+                  // literal "{{ms}}" into frontmatter. Unknown refs FAIL the
+                  // op — silently passing the placeholder through corrupts the
+                  // entity file.
+                  const resolveRefs = (value: unknown): unknown => {
                     if (typeof value === 'string' && value.startsWith('{{') && value.endsWith('}}')) {
                       const refClientId = value.slice(2, -2);
                       const refId = clientIdMap.get(refClientId);
-                      if (refId) {
-                        resolvedPayload[key] = refId;
+                      if (!refId) {
+                        throw new Error(
+                          `Unknown client_id reference "${value}" — it must match the client_id of an EARLIER create op in this batch.`
+                        );
                       }
+                      return refId;
                     }
-                  }
+                    if (Array.isArray(value)) return value.map(resolveRefs);
+                    if (value && typeof value === 'object') {
+                      return Object.fromEntries(
+                        Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, resolveRefs(v)])
+                      );
+                    }
+                    return value;
+                  };
+                  const resolvedPayload = resolveRefs(payload) as Record<string, unknown>;
 
                   const { workstream, status, relationships, ...customFields } = resolvedPayload;
 
                   // BUG 1: route flat relationship keys in the payload into
                   // relationships (explicit `relationships` entries win).
-                  const split = splitFlatRelationshipKeys(type, customFields);
+                  const split = splitFlatRelationshipKeys(eng.schema, type, customFields);
                   const mergedRelationships = {
                     ...split.relationships,
                     ...((relationships as Record<string, unknown>) ?? {}),
@@ -2678,17 +3308,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     relationships: mergedRelationships,
                   };
 
-                  const errors = validator.validate(entity);
+                  const errors = eng.validator.validate(entity);
                   if (errors.length > 0) {
                     throw new Error(`Validation failed: ${errors.map(e => `${e.field}: ${e.message}`).join(', ')}`);
                   }
 
-                  const content = serializer.serialize(entity);
-                  const filename = pathResolver.generateFilename(newId, sanitizedTitle);
-                  const folder = pathResolver.getTypeFolderPath(type);
+                  const content = eng.serializer.serialize(entity);
+                  const filename = eng.pathResolver.generateFilename(newId, sanitizedTitle);
+                  const folder = eng.pathResolver.getTypeFolderPath(type);
                   const filePath = `${folder}/${filename}`;
 
-                  await adapter.writeFile(filePath, content);
+                  await eng.fs.writeFile(filePath, content);
 
                   clientIdMap.set(client_id, newId);
                   processedClientIds.add(client_id);
@@ -2706,22 +3336,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   throw new Error('id is required for update operation');
                 }
 
-                await scanIndex();
-                const path = index.getPathById(id);
+                await eng.scanIndex();
+                const path = eng.index.getPathById(id);
                 if (!path) {
                   throw new Error(`Entity ${id} not found`);
                 }
 
-                const content = await adapter.readFile(path);
-                const entity = parser.parse(content, path);
+                const content = await eng.fs.readFile(path);
+                const entity = eng.parser.parse(content, path);
 
                 const changes: Array<{ field: string; before: unknown; after: unknown }> = [];
 
                 // BUG 1: schema-driven routing for flat payload keys — same
                 // rules as update_entity (relationship names → relationships,
                 // per-type custom fields → fields; nested objects replace).
-                const relNames = getRelationshipFieldNamesForType(entity.type);
-                const customNames = new Set(schema.getFields(entity.type).map(f => f.name));
+                const relNames = getRelationshipFieldNamesForType(eng.schema, entity.type);
+                const customNames = new Set(eng.schema.getFields(entity.type).map(f => f.name));
                 const currentValue = (key: string): unknown =>
                   key === 'body'
                     ? extractBody(content)
@@ -2754,7 +3384,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   succeeded++;
                 } else {
                   // BUG 4: capture pre-existing violations before applying.
-                  const errorsBefore = validator.validate(entity);
+                  const errorsBefore = eng.validator.validate(entity);
                   const beforeKeys = new Set(errorsBefore.map(e => `${e.code}:${e.field}`));
                   const touched = new Set<string>();
 
@@ -2795,7 +3425,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
                   // BUG 4: reject only problems in touched fields (or newly
                   // introduced); pre-existing untouched violations → warnings.
-                  const errorsAfter = validator.validate(entity);
+                  const errorsAfter = eng.validator.validate(entity);
                   const blocking = errorsAfter.filter(
                     e => touched.has(e.field) || !beforeKeys.has(`${e.code}:${e.field}`)
                   );
@@ -2808,8 +3438,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
                   // BUG A: re-attach (or replace) the markdown body.
                   const newBody = bodyUpdate !== undefined ? normalizeBody(bodyUpdate) : extractBody(content);
-                  const newContent = serializer.serialize(entity) + newBody;
-                  await adapter.writeFile(path, newContent);
+                  const newContent = eng.serializer.serialize(entity) + newBody;
+                  await eng.fs.writeFile(path, newContent);
 
                   results.push({
                     client_id,
@@ -2834,21 +3464,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   });
                   succeeded++;
                 } else {
-                  await scanIndex();
-                  const path = index.getPathById(id);
+                  await eng.scanIndex();
+                  const path = eng.index.getPathById(id);
                   if (!path) {
                     throw new Error(`Entity ${id} not found`);
                   }
 
-                  const content = await adapter.readFile(path);
-                  const entity = parser.parse(content, path);
+                  const content = await eng.fs.readFile(path);
+                  const entity = eng.parser.parse(content, path);
 
                   entity.archived = true;
                   entity.updated_at = new Date().toISOString();
 
                   // BUG A: preserve the markdown body across the archive rewrite.
-                  const newContent = serializer.serialize(entity) + extractBody(content);
-                  await adapter.writeFile(path, newContent);
+                  const newContent = eng.serializer.serialize(entity) + extractBody(content);
+                  await eng.fs.writeFile(path, newContent);
 
                   results.push({
                     client_id,
@@ -2883,7 +3513,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
           }
 
-          const output = {
+          return jsonResult({
+            vault: eng.entry.id,
             results,
             summary: {
               total: ops.length,
@@ -2891,11 +3522,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               failed,
               dry_run: dryRun,
             },
-          };
-
-          return {
-            content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
-          };
+          });
         } else {
           return {
             content: [{ type: 'text', text: `Error: Invalid action '${action}'. Valid actions: get, batch` }],
@@ -2920,12 +3547,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Graceful shutdown
+// Graceful shutdown — every vault's MSRL instance (spec §10: iterate the map).
 async function shutdown() {
   console.error('Shutting down...');
-  if (msrlEngine) {
-    await msrlEngine.shutdown();
-    console.error('MSRL engine shut down');
+  for (const [id, pending] of msrlStarted) {
+    try {
+      const engine = await pending;
+      await engine.shutdown();
+      console.error(`MSRL engine shut down (vault '${id}')`);
+    } catch {
+      // Never let one vault's MSRL block process shutdown.
+    }
   }
   process.exit(0);
 }
@@ -2933,50 +3565,13 @@ async function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-// The NodeFsAdapter is rooted at VAULT_PATH, so schema.json is addressed relative
-// to it (''); this is the absolute path only for human-readable logs/output.
-const SCHEMA_ABS_PATH = `${VAULT_PATH}/${SCHEMA_FILENAME}`;
-
-// Valid empty canvas JSON (2-space indent + trailing newline) — what the
-// bootstrap/repair writes so the plugin's "populate from vault" has a real file.
-const EMPTY_CANVAS_JSON = JSON.stringify({ nodes: [], edges: [] }, null, 2) + '\n';
-
-/**
- * Ensure the ACTIVE schema's `settings.defaultCanvas` (fallback:
- * 'projects/Project.canvas') exists and holds valid canvas JSON:
- *   - missing              → create parent folder + write the empty canvas
- *   - empty/whitespace-only → repair by rewriting the empty canvas
- *   - has content          → leave untouched
- * Never throws — canvas bootstrap must not block the server (mirrors the
- * schema bootstrap's stderr logging).
- */
-async function ensureDefaultCanvas(): Promise<void> {
-  const canvasPath = activeSchema.settings?.defaultCanvas || 'projects/Project.canvas';
-  try {
-    if (await adapter.exists(canvasPath)) {
-      const content = await adapter.readFile(canvasPath);
-      if (content.trim() !== '') return; // real content — leave untouched
-      await adapter.writeFile(canvasPath, EMPTY_CANVAS_JSON);
-      console.error(`Repaired empty canvas ${VAULT_PATH}/${canvasPath} (rewrote valid empty canvas JSON).`);
-      return;
-    }
-    const parentDir = canvasPath.includes('/') ? canvasPath.slice(0, canvasPath.lastIndexOf('/')) : '';
-    if (parentDir) {
-      await adapter.createDir(parentDir, { recursive: true });
-    }
-    await adapter.writeFile(canvasPath, EMPTY_CANVAS_JSON);
-    console.error(`Bootstrapped ${VAULT_PATH}/${canvasPath} (empty canvas).`);
-  } catch (e) {
-    console.error(`WARNING: could not ensure default canvas ${canvasPath}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Plugin installation bootstrap — the npm package that ships this MCP server
 // (bin/mcp-server.mjs) ALSO contains the Obsidian plugin artifacts
 // (manifest.json, main.js, styles.css at the package root), so a new vault
-// doesn't need a separate download-and-extract step: the server copies the
-// plugin into <vault>/.obsidian/plugins/<id>/ on startup.
+// doesn't need a separate download-and-extract step. The install itself is the
+// parameterized ensurePluginInstalled(fs, artifactsDir) in vault-engine.ts;
+// locating the artifacts is HOST-process state and stays here.
 // ---------------------------------------------------------------------------
 
 /**
@@ -2987,9 +3582,9 @@ async function ensureDefaultCanvas(): Promise<void> {
  */
 async function findPluginSourceDir(): Promise<string | null> {
   const { dirname, join } = await import('node:path');
-  const { fileURLToPath } = await import('node:url');
+  const { fileURLToPath: toPath } = await import('node:url');
   const { access } = await import('node:fs/promises');
-  const here = dirname(fileURLToPath(import.meta.url));
+  const here = dirname(toPath(import.meta.url));
   for (const candidate of [here, dirname(here)]) {
     try {
       await access(join(candidate, 'manifest.json'));
@@ -3000,121 +3595,57 @@ async function findPluginSourceDir(): Promise<string | null> {
   return null;
 }
 
-/** '1.8.99' vs '1.9.0' → negative/zero/positive (numeric per-segment compare). */
-function compareVersions(a: string, b: string): number {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
-    if (d !== 0) return d;
-  }
-  return 0;
-}
-
 /**
- * Install (or upgrade) the bundled Obsidian plugin into the vault:
- *   - not installed            → copy manifest.json/main.js/styles.css into
- *                                .obsidian/plugins/<id>/ and register the id in
- *                                .obsidian/community-plugins.json
- *   - installed, older version → overwrite the artifacts (upgrade); the user's
- *                                data.json settings are never touched
- *   - installed, same or newer → leave untouched
- * Never throws — like the schema/canvas bootstrap, this must not block the
- * server. Obsidian may still ask the user to trust the vault / leave
- * restricted mode the first time; that confirmation can't be done from disk.
+ * Startup bootstrap for the legacy VAULT_PATH vault (absorbed into the
+ * registry as a transient entry). Preserves the pre-multi-vault UX: on first
+ * connect the vault gets schema.json (bootstrapped if missing), the default
+ * canvas, and the bundled plugin — WITHOUT building a full engine (startup
+ * stays light; engines are built lazily on first tool use). Vaults without
+ * VAULT_PATH bootstrap through add_vault instead.
  */
-async function ensurePluginInstalled(): Promise<void> {
-  try {
-    const { join } = await import('node:path');
-    const { readFile: nodeReadFile } = await import('node:fs/promises');
-    const sourceDir = await findPluginSourceDir();
-    if (!sourceDir) {
-      console.error('WARNING: plugin artifacts (manifest.json/main.js) not found next to the MCP server — skipping plugin install.');
-      return;
-    }
-    const manifestRaw = await nodeReadFile(join(sourceDir, 'manifest.json'), 'utf8');
-    const manifest = JSON.parse(manifestRaw) as { id?: string; version?: string };
-    if (!manifest.id || !manifest.version) {
-      console.error('WARNING: bundled manifest.json has no id/version — skipping plugin install.');
-      return;
-    }
-
-    // Obsidian's config folder is user-configurable (Vault#configDir), but this
-    // server runs OUTSIDE Obsidian and cannot query the API — vaults with a
-    // renamed config folder must set OBSIDIAN_CONFIG_DIR to match.
-    // eslint-disable-next-line obsidianmd/hardcoded-config-path
-    const configDir = process.env.OBSIDIAN_CONFIG_DIR || '.obsidian';
-
-    // adapter is rooted at VAULT_PATH → vault-relative paths.
-    const pluginDir = `${configDir}/plugins/${manifest.id}`;
-    const installedManifestPath = `${pluginDir}/manifest.json`;
-    if (await adapter.exists(installedManifestPath)) {
-      try {
-        const installed = JSON.parse(await adapter.readFile(installedManifestPath)) as { version?: string };
-        if (installed.version && compareVersions(installed.version, manifest.version) >= 0) {
-          return; // same or newer already installed — leave untouched
-        }
-      } catch { /* unreadable installed manifest → reinstall */ }
-    }
-
-    await adapter.createDir(pluginDir, { recursive: true });
-    await adapter.writeFile(installedManifestPath, manifestRaw);
-    await adapter.writeFile(`${pluginDir}/main.js`, await nodeReadFile(join(sourceDir, 'main.js'), 'utf8'));
-    try {
-      await adapter.writeFile(`${pluginDir}/styles.css`, await nodeReadFile(join(sourceDir, 'styles.css'), 'utf8'));
-    } catch { /* styles.css is optional */ }
-
-    // Register in community-plugins.json so Obsidian enables it on next load
-    // (preserving any other enabled plugins).
-    const communityPath = `${configDir}/community-plugins.json`;
-    let enabled: string[] = [];
-    if (await adapter.exists(communityPath)) {
-      try {
-        const parsed = JSON.parse(await adapter.readFile(communityPath));
-        if (Array.isArray(parsed)) enabled = parsed;
-      } catch { /* malformed → rewrite with just our id below */ }
-    }
-    if (!enabled.includes(manifest.id)) {
-      enabled.push(manifest.id);
-      await adapter.writeFile(communityPath, JSON.stringify(enabled, null, 2) + '\n');
-    }
-    console.error(`Installed plugin ${manifest.id} v${manifest.version} into ${VAULT_PATH}/${pluginDir} (and enabled it in community-plugins.json).`);
-  } catch (e) {
-    console.error(`WARNING: could not install the bundled plugin: ${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
-/** Load (or bootstrap-inject) <VAULT_PATH>/schema.json and apply it. */
-async function loadSchema(): Promise<void> {
-  const result = await loadOrBootstrapSchema(adapter, '');
-  applySchema(result.schema);
-  schemaSource = result.source;
-  schemaErrors = result.errors;
+async function bootstrapVaultPath(): Promise<void> {
+  if (!VAULT_PATH) return;
+  const fs = new NodeFsAdapter(VAULT_PATH);
+  const schemaAbsPath = `${VAULT_PATH}/${SCHEMA_FILENAME}`;
+  const result = await loadOrBootstrapSchema(fs, '');
   if (result.wroteDefault) {
-    console.error(`Bootstrapped ${SCHEMA_ABS_PATH} from the default schema.`);
+    console.error(`Bootstrapped ${schemaAbsPath} from the default schema.`);
   }
   if (result.errors.length > 0) {
     console.error(`WARNING: ${SCHEMA_FILENAME} is invalid — falling back to the default schema. Errors:`);
     for (const e of result.errors) console.error(`  - ${e}`);
   } else {
-    console.error(`Schema source: ${result.source} (${SCHEMA_ABS_PATH})`);
+    console.error(`Schema source: ${result.source} (${schemaAbsPath})`);
   }
   // The vault's default canvas is part of the bootstrap contract too.
-  await ensureDefaultCanvas();
+  await ensureDefaultCanvas(fs, result.schema);
   // As is the plugin itself — the npm package carries the same artifacts.
-  await ensurePluginInstalled();
+  const artifactsDir = await findPluginSourceDir();
+  if (artifactsDir) {
+    await ensurePluginInstalled(fs, artifactsDir);
+  } else {
+    console.error('WARNING: plugin artifacts (manifest.json/main.js) not found next to the MCP server — skipping plugin install.');
+  }
+  // Dataview is a runtime dependency of the plugin's views — install/enable it
+  // too (no-op when present; warn-and-skip when offline).
+  await ensureDataviewInstalled(fs);
 }
 
 // Start the server
 async function main() {
-  // Single source of truth: read/inject schema.json BEFORE serving any requests.
-  await loadSchema();
+  // Legacy single-vault bootstrap (no-op when VAULT_PATH is unset — the
+  // server then starts on the registry alone).
+  await bootstrapVaultPath();
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
   console.error('Obsidian Unified MCP Server started');
-  console.error(`Vault path: ${VAULT_PATH}`);
+  console.error(
+    VAULT_PATH
+      ? `Vault path: ${VAULT_PATH}`
+      : `No VAULT_PATH set — serving registered vaults from ${resolveConfigPath()} (use list_vaults / add_vault).`
+  );
   console.error('Waiting for requests...');
 }
 
@@ -3122,4 +3653,3 @@ main().catch((error) => {
   console.error('Fatal error:', error);
   process.exit(1);
 });
-

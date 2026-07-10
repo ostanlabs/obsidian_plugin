@@ -6,10 +6,7 @@
  * for common operations.
  */
 
-import type { Vault, FileManager } from 'obsidian';
-import { ObsidianVaultAdapter } from './adapters/obsidian-vault-adapter.js';
 import { SchemaRegistry } from './entity-core/schema-registry.js';
-import { DEFAULT_SCHEMA } from './entity-core/default-schema.js';
 import { EntityParser } from './entity-core/parser.js';
 import { EntitySerializer } from './entity-core/serializer.js';
 import { EntityValidator } from './entity-core/validator.js';
@@ -28,9 +25,10 @@ import type {
 } from './entity-core/types.js';
 
 export interface EntityCoreConfig {
-  vault: Vault;
-  /** Optional: lets deletions respect the user's "Deleted files" preference. */
-  fileManager?: FileManager;
+  /** Injected filesystem (e.g. ObsidianVaultAdapter in plugin mode, NodeFsAdapter in MCP mode). */
+  fs: FileSystem;
+  /** Injected schema registry (e.g. built from the vault's schema.json, or DEFAULT_SCHEMA). */
+  schema: SchemaRegistry;
   vaultPath: string;
   entitiesFolder: string;
   archiveFolder: string;
@@ -43,7 +41,8 @@ export interface EntityCoreConfig {
  * Usage:
  * ```ts
  * const core = new EntityCoreFacade({
- *   vault: this.app.vault,
+ *   fs: new ObsidianVaultAdapter(this.app.vault),
+ *   schema: new SchemaRegistry(DEFAULT_SCHEMA),
  *   vaultPath: this.app.vault.adapter.basePath,
  *   entitiesFolder: 'entities',
  *   archiveFolder: 'archive',
@@ -76,8 +75,8 @@ export class EntityCoreFacade {
   private migrator?: SchemaMigrator;
 
   constructor(private readonly config: EntityCoreConfig) {
-    this.fs = new ObsidianVaultAdapter(config.vault, config.fileManager);
-    this.schema = new SchemaRegistry(DEFAULT_SCHEMA);
+    this.fs = config.fs;
+    this.schema = config.schema;
     this.parser = new EntityParser(this.schema);
     this.serializer = new EntitySerializer(this.schema);
     this.validator = new EntityValidator(this.schema);
@@ -101,7 +100,7 @@ export class EntityCoreFacade {
     this.allocator = new IDAllocator(this.schema, index);
     this.relationshipGraph = new RelationshipGraph(this.schema, index);
     this.canvasManager = new CanvasManager(this.schema, this.fs, this.pathResolver);
-    this.migrator = new SchemaMigrator(this.fs, this.config.vaultPath, this.pathResolver);
+    this.migrator = new SchemaMigrator(this.fs, this.config.vaultPath, this.pathResolver, this.schema);
   }
 
   // =============================================================================
