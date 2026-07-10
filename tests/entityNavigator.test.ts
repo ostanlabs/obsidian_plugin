@@ -3,7 +3,9 @@ import {
 	isEntityId,
 	EntityIndex,
 	ID_PATTERNS,
+	deriveEntryRelationshipFields,
 } from "../util/entityNavigator";
+import { DEFAULT_SCHEMA } from "../src/entity-core/default-schema";
 
 // ---------------------------------------------------------------------------
 // Light Obsidian fake: only the surface EntityIndex touches. Since Phase 3
@@ -78,6 +80,41 @@ describe("entityNavigator - id helpers", () => {
 	});
 	it("exposes ID_PATTERNS", () => {
 		expect(ID_PATTERNS.milestone.test("M-999")).toBe(true);
+	});
+});
+
+describe("entityNavigator - schema-derived entry relationship fields", () => {
+	it("derives the previously hardcoded edge-key list from DEFAULT_SCHEMA (plus legacy enables)", () => {
+		// many↔many relationship pairs (forward+reverse) + the legacy `enables` key.
+		// Same SET as the pre-derivation hardcoded list (order is not load-bearing:
+		// the fields are only iterated to feed independent edge buckets).
+		expect([...deriveEntryRelationshipFields(DEFAULT_SCHEMA)].sort()).toEqual(
+			[
+				"depends_on",
+				"implements",
+				"documents",
+				"affects",
+				"enables",
+				"implemented_by",
+				"documented_by",
+				"decided_by",
+				"blocks",
+			].sort()
+		);
+	});
+
+	it("excludes hierarchy (parent_id/by_parent handle it) and scalar one↔one links", () => {
+		const fields = deriveEntryRelationshipFields(DEFAULT_SCHEMA);
+		for (const f of [
+			"parent",
+			"children",
+			"supersedes",
+			"superseded_by",
+			"previous_version",
+			"next_version",
+		]) {
+			expect(fields).not.toContain(f);
+		}
 	});
 });
 

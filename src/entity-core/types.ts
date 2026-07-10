@@ -57,6 +57,8 @@ export interface FieldDefinition {
   values?: string[];
   required?: boolean;
   default?: unknown;
+  /** Human/agent-facing explanation surfaced by get_schema. */
+  description?: string;
 }
 
 export interface CanvasTypeConfig {
@@ -76,6 +78,8 @@ export interface EntityTypeDefinition {
   defaultStatus: string;
   fields: FieldDefinition[];
   canvas: CanvasTypeConfig;
+  /** Human/agent-facing explanation surfaced by get_schema. */
+  description?: string;
 }
 
 export type Cardinality = 'one' | 'many';
@@ -131,6 +135,21 @@ export interface RelationshipPositioning {
   crossWsExcludedTypes?: string[];
 }
 
+/**
+ * Validation policy for a relationship — the single source of truth for the MCP
+ * validator's structural rules (validate_project). Moves the previously hardcoded
+ * FANOUT_LIMITS / ORPHANED_ENTITY policy in mcp.ts into the schema. Consumed via
+ * getRequiredParentRules() and getFanoutRules() in schema-derivation.ts.
+ */
+export interface RelationshipValidation {
+  /** Source entity types whose FORWARD field must be non-empty (hard violation: ORPHANED_ENTITY). */
+  requiredForTypes?: string[];
+  /** Advisory fan-out limit for the forward field per source entity. */
+  maxForwardTargets?: number;
+  /** Advisory fan-in limit for the reverse field per target entity. */
+  maxReverseTargets?: number;
+}
+
 export interface RelationshipDefinition {
   name: string;
   label: string;
@@ -140,6 +159,15 @@ export interface RelationshipDefinition {
   graph: RelationshipGraphConfig;
   /** Positioning/validation semantics — single source of truth (optional for back-compat). */
   positioning?: RelationshipPositioning;
+  /** Validation policy (required-parent + fan-out limits) — single source of truth. */
+  validation?: RelationshipValidation;
+  /**
+   * Serializer emits the forward field even when empty, so users see the slot in
+   * frontmatter — replaces the hardcoded `alwaysInclude` list in util/frontmatter.ts.
+   */
+  emitWhenEmpty?: boolean;
+  /** Human/agent-facing explanation surfaced by get_schema. */
+  description?: string;
 }
 
 export interface SchemaSettings {
@@ -159,6 +187,11 @@ export interface SchemaSettings {
    * When omitted the engine falls back to its built-in default order.
    */
   overlapPriorityOrder?: string[];
+  /**
+   * Vault-relative canvas file the MCP bootstraps on first connect;
+   * must end in `.canvas` (e.g. "projects/Project.canvas").
+   */
+  defaultCanvas?: string;
 }
 
 export interface WorkstreamsConfig {

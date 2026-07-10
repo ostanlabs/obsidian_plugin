@@ -7,6 +7,11 @@ import { DEFAULT_SCHEMA } from '../../src/entity-core/default-schema.js';
 import {
   buildValidationAllowList,
   buildRelationshipRules,
+  getAllRelationshipFieldNames,
+  buildOrderingRelationships,
+  getRequiredParentRules,
+  getFanoutRules,
+  getEmitWhenEmptyFields,
   type DerivedRelationshipRule,
 } from '../../src/entity-core/schema-derivation.js';
 import type { Schema } from '../../src/entity-core/types.js';
@@ -252,5 +257,136 @@ describe('I. REGRESSION-LOCK: buildRelationshipRules(DEFAULT_SCHEMA) whole-outpu
     expect(rules.filter((r) => r.sourceType === 'document' && r.field === 'decided_by')).toHaveLength(1);
     expect(rules.filter((r) => r.sourceType === 'feature' && r.field === 'documented_by')).toHaveLength(1);
     expect(rules.filter((r) => r.field === 'implements' && r.direction === 'parent')).toHaveLength(2); // milestone + story
+  });
+});
+
+// ===========================================================================
+// Validation-policy / relationship-field derivations — the schema replaces
+// lists previously hardcoded in mcp.ts (REL_FIELDS, FANOUT_LIMITS, the
+// story/task-need-parent rule), util/relationshipReconciler.ts
+// (ORDERING_RELATIONSHIPS) and util/frontmatter.ts (alwaysInclude).
+// ===========================================================================
+
+describe('I. getAllRelationshipFieldNames', () => {
+  it('returns every forward+reverse field of the default schema, deduped, in declaration order', () => {
+    // Must cover exactly the hardcoded REL_FIELDS list from mcp.ts validate_project.
+    expect(getAllRelationshipFieldNames(DEFAULT_SCHEMA)).toEqual([
+      'parent', 'children', 'depends_on', 'blocks', 'implements', 'implemented_by',
+      'documents', 'documented_by', 'affects', 'decided_by', 'supersedes',
+      'superseded_by', 'previous_version', 'next_version',
+    ]);
+  });
+
+  it('dedupes fields shared across pairs and relationships', () => {
+    const s = {
+      relationships: [
+        { name: 'a', pairs: [
+          { from: 'x', to: 'y', forward: 'f', reverse: 'r' },
+          { from: 'y', to: 'z', forward: 'f', reverse: 'r' },
+        ] },
+        { name: 'b', pairs: [{ from: 'x', to: 'x', forward: 'f', reverse: 'g' }] },
+      ],
+    } as unknown as Schema;
+    expect(getAllRelationshipFieldNames(s)).toEqual(['f', 'r', 'g']);
+  });
+});
+
+describe('I. buildOrderingRelationships', () => {
+  it('DEFAULT_SCHEMA yields exactly the reconciler\'s historical hardcoded list', () => {
+    // Must equal the ORDERING_RELATIONSHIPS list from util/relationshipReconciler.ts:174.
+    expect(buildOrderingRelationships(DEFAULT_SCHEMA)).toEqual([
+      { field: 'depends_on', direction: 'after' },
+      { field: 'blocks', direction: 'before' },
+    ]);
+  });
+
+  it('excludes one-sided sequencing (emitReverseRule false/absent) and containment', () => {
+    const orderings = buildOrderingRelationships(DEFAULT_SCHEMA);
+    const fields = orderings.map((o) => o.field);
+    expect(fields).not.toContain('supersedes');       // sequencing, emitReverseRule: false
+    expect(fields).not.toContain('previous_version'); // sequencing, emitReverseRule: false
+    expect(fields).not.toContain('parent');           // containment
+  });
+
+  it('forwardDirection "before" flips the reverse field to "after"', () => {
+    const s = {
+      relationships: [{
+        name: 'seq', label: 'Seq',
+        pairs: [{ from: 'x', to: 'x', forward: 'fwd', reverse: 'rev' }],
+        positioning: { role: 'sequencing', forwardDirection: 'before', emitReverseRule: true },
+      }],
+    } as unknown as Schema;
+    expect(buildOrderingRelationships(s)).toEqual([
+      { field: 'fwd', direction: 'before' },
+      { field: 'rev', direction: 'after' },
+    ]);
+  });
+});
+
+describe('I. getRequiredParentRules', () => {
+  it('DEFAULT_SCHEMA: hierarchy requires a parent for task + story (ORPHANED_ENTITY policy)', () => {
+    expect(getRequiredParentRules(DEFAULT_SCHEMA)).toEqual([
+      { relationship: 'hierarchy', field: 'parent', types: ['task', 'story'] },
+    ]);
+  });
+
+  it('relationships without requiredForTypes (or empty) emit no rule', () => {
+    const s = {
+      relationships: [
+        { name: 'a', pairs: [{ from: 'x', to: 'y', forward: 'f', reverse: 'r' }], validation: {} },
+        { name: 'b', pairs: [{ from: 'x', to: 'y', forward: 'g', reverse: 'h' }], validation: { requiredForTypes: [] } },
+      ],
+    } as unknown as Schema;
+    expect(getRequiredParentRules(s)).toEqual([]);
+  });
+});
+
+describe('I. getFanoutRules', () => {
+  it('DEFAULT_SCHEMA yields exactly the four historical FANOUT_LIMITS advisories', () => {
+    // Mirrors FANOUT_LIMITS from mcp.ts validate_project:
+    //   feature_implemented_by: 3, document_documents: 2, feature_documented_by: 2, decision_affects: 2.
+    expect(getFanoutRules(DEFAULT_SCHEMA)).toEqual([
+      { relationship: 'implementation', end: 'reverse', field: 'implemented_by', limit: 3, sourceTypes: ['feature'] },
+      { relationship: 'documentation', end: 'forward', field: 'documents', limit: 2, sourceTypes: ['document'] },
+      { relationship: 'documentation', end: 'reverse', field: 'documented_by', limit: 2, sourceTypes: ['feature'] },
+      { relationship: 'decision-impact', end: 'forward', field: 'affects', limit: 2, sourceTypes: ['decision'] },
+    ]);
+  });
+
+  it('aggregates carrier sourceTypes across pairs and preserves "*"', () => {
+    const s = {
+      relationships: [{
+        name: 'impl', label: 'Impl',
+        pairs: [
+          { from: 'milestone', to: 'feature', forward: 'implements', reverse: 'implemented_by' },
+          { from: 'story', to: 'feature', forward: 'implements', reverse: 'implemented_by' },
+          { from: '*', to: 'feature', forward: 'implements', reverse: 'implemented_by' },
+        ],
+        validation: { maxForwardTargets: 4, maxReverseTargets: 3 },
+      }],
+    } as unknown as Schema;
+    expect(getFanoutRules(s)).toEqual([
+      { relationship: 'impl', end: 'forward', field: 'implements', limit: 4, sourceTypes: ['milestone', 'story', '*'] },
+      { relationship: 'impl', end: 'reverse', field: 'implemented_by', limit: 3, sourceTypes: ['feature'] },
+    ]);
+  });
+});
+
+describe('I. getEmitWhenEmptyFields', () => {
+  it('DEFAULT_SCHEMA emits the parent + depends_on slots (hierarchy + dependency)', () => {
+    expect(getEmitWhenEmptyFields(DEFAULT_SCHEMA)).toEqual(['parent', 'depends_on']);
+  });
+
+  it('only relationships flagged emitWhenEmpty contribute, forward fields only, deduped', () => {
+    const s = {
+      relationships: [
+        { name: 'a', emitWhenEmpty: true, pairs: [
+          { from: 'x', to: 'y', forward: 'f', reverse: 'r' },
+          { from: 'y', to: 'z', forward: 'f', reverse: 'r2' },
+        ] },
+        { name: 'b', pairs: [{ from: 'x', to: 'y', forward: 'g', reverse: 'h' }] },
+      ],
+    } as unknown as Schema;
+    expect(getEmitWhenEmptyFields(s)).toEqual(['f']);
   });
 });

@@ -2,6 +2,8 @@ import {
 	stripQuotes,
 	sanitizeRelationshipValue,
 	sanitizeAllRelationships,
+	RELATIONSHIP_FIELDS,
+	LEGACY_RELATIONSHIP_FIELDS,
 } from "../util/sanitizeRelationships";
 
 describe("sanitizeRelationships", () => {
@@ -49,6 +51,46 @@ describe("sanitizeRelationships", () => {
 		});
 	});
 
+	describe("RELATIONSHIP_FIELDS (schema-derived)", () => {
+		it("is every forward+reverse schema field plus the legacy pair", () => {
+			expect([...RELATIONSHIP_FIELDS].sort()).toEqual(
+				[
+					// hierarchy
+					"parent",
+					"children",
+					// dependency
+					"depends_on",
+					"blocks",
+					// implementation
+					"implements",
+					"implemented_by",
+					// documentation
+					"documents",
+					"documented_by",
+					// decision-impact
+					"affects",
+					"decided_by",
+					// supersession
+					"supersedes",
+					"superseded_by",
+					// versioning
+					"previous_version",
+					"next_version",
+					// legacy (not in schema, still present in old vault files)
+					"enables",
+					"enabled_by",
+				].sort()
+			);
+		});
+
+		it("keeps the deprecated enables/enabled_by pair via the explicit legacy list", () => {
+			expect([...LEGACY_RELATIONSHIP_FIELDS]).toEqual(["enables", "enabled_by"]);
+			for (const f of LEGACY_RELATIONSHIP_FIELDS) {
+				expect(RELATIONSHIP_FIELDS).toContain(f);
+			}
+		});
+	});
+
 	describe("sanitizeAllRelationships", () => {
 		it("sanitizes all known relationship fields in place", () => {
 			const fm: Record<string, unknown> = {
@@ -81,6 +123,22 @@ describe("sanitizeRelationships", () => {
 			sanitizeAllRelationships(fm);
 			sanitizeAllRelationships(fm);
 			expect(fm.depends_on).toEqual(["S-1"]);
+		});
+
+		it("sanitizes schema-only fields the old hardcoded list missed (next_version)", () => {
+			const fm: Record<string, unknown> = { next_version: '"DOC-002"' };
+			sanitizeAllRelationships(fm);
+			expect(fm.next_version).toBe("DOC-002");
+		});
+
+		it("still sanitizes legacy enables/enabled_by from old vault files", () => {
+			const fm: Record<string, unknown> = {
+				enables: ['"S-001"'],
+				enabled_by: "'DEC-001'",
+			};
+			sanitizeAllRelationships(fm);
+			expect(fm.enables).toEqual(["S-001"]);
+			expect(fm.enabled_by).toBe("DEC-001");
 		});
 	});
 });

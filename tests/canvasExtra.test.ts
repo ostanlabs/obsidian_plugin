@@ -143,6 +143,97 @@ describe("canvas - load/save", () => {
 		expect(data.nodes[0].id).toBe("n1");
 	});
 
+	function appReading(content: string) {
+		return { vault: { read: async () => content } } as any;
+	}
+	const canvasFile = { path: "b.canvas" } as any;
+
+	it("loadCanvasData treats an empty file as an empty canvas", async () => {
+		const data = await loadCanvasData(appReading(""), canvasFile);
+		expect(data).toEqual({ nodes: [], edges: [] });
+	});
+
+	it("loadCanvasData treats a whitespace-only file as an empty canvas", async () => {
+		const data = await loadCanvasData(appReading("  \n\t\n"), canvasFile);
+		expect(data).toEqual({ nodes: [], edges: [] });
+	});
+
+	it("loadCanvasData normalizes {} to empty nodes/edges", async () => {
+		const data = await loadCanvasData(appReading("{}"), canvasFile);
+		expect(data).toEqual({ nodes: [], edges: [] });
+	});
+
+	it("loadCanvasData normalizes null nodes to an empty array", async () => {
+		const data = await loadCanvasData(
+			appReading('{"nodes": null, "edges": []}'),
+			canvasFile
+		);
+		expect(data.nodes).toEqual([]);
+		expect(data.edges).toEqual([]);
+	});
+
+	it("loadCanvasData normalizes a missing edges key", async () => {
+		const data = await loadCanvasData(
+			appReading('{"nodes": [{"id": "n1", "type": "text", "x": 0, "y": 0, "width": 1, "height": 1}]}'),
+			canvasFile
+		);
+		expect(data.nodes).toHaveLength(1);
+		expect(data.edges).toEqual([]);
+	});
+
+	it("loadCanvasData preserves other top-level keys when normalizing", async () => {
+		const data = await loadCanvasData(
+			appReading('{"metadata": {"custom": true}}'),
+			canvasFile
+		);
+		expect(data.nodes).toEqual([]);
+		expect(data.edges).toEqual([]);
+		expect((data as any).metadata).toEqual({ custom: true });
+	});
+
+	it("loadCanvasData throws a descriptive error for invalid JSON", async () => {
+		await expect(
+			loadCanvasData(appReading("{nodes: []}"), canvasFile)
+		).rejects.toThrow(/Canvas file "b\.canvas" contains invalid JSON/);
+	});
+
+	it("loadCanvasData throws for non-object JSON", async () => {
+		await expect(loadCanvasData(appReading("42"), canvasFile)).rejects.toThrow(
+			/Canvas file "b\.canvas" is not a valid canvas/
+		);
+	});
+
+	it("loadCanvasData throws for JSON arrays", async () => {
+		await expect(loadCanvasData(appReading("[]"), canvasFile)).rejects.toThrow(
+			/expected a JSON object, got an array/
+		);
+	});
+
+	it("loadCanvasData throws for JSON null", async () => {
+		await expect(
+			loadCanvasData(appReading("null"), canvasFile)
+		).rejects.toThrow(/is not a valid canvas/);
+	});
+
+	it("round-trips a valid canvas through save and load", async () => {
+		const payload: CanvasData = {
+			nodes: [{ id: "n1", type: "text", x: 0, y: 0, width: 1, height: 1, text: "hi" }],
+			edges: [
+				{ id: "e1", fromNode: "n1", fromSide: "bottom", toNode: "n1", toSide: "top" },
+			],
+		};
+		let written = "";
+		const app = {
+			vault: {
+				modify: async (_f: any, c: string) => (written = c),
+				read: async () => written,
+			},
+		} as any;
+		await saveCanvasData(app, canvasFile, payload);
+		const data = await loadCanvasData(app, canvasFile);
+		expect(data).toEqual(payload);
+	});
+
 	it("saveCanvasData writes JSON back to the vault", async () => {
 		let written = "";
 		const app = {

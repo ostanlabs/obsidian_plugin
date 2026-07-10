@@ -1699,3 +1699,237 @@ function extractBodyForTest(content: string): string {
   const m = content.match(/^---\n[\s\S]*?\n---\n?([\s\S]*)$/);
   return m ? m[1] : '';
 }
+
+// ---------------------------------------------------------------------------
+// CANVAS BOOTSTRAP: on startup (and after set_schema) the server ensures the
+// active schema's settings.defaultCanvas exists and holds valid canvas JSON,
+// so the plugin's "populate from vault" always has a real file to target.
+//   - missing               → parent folder created + empty canvas written
+//   - empty/whitespace-only → repaired (rewritten as the empty canvas)
+//   - has content           → byte-identical untouched
+// ---------------------------------------------------------------------------
+const EMPTY_CANVAS = JSON.stringify({ nodes: [], edges: [] }, null, 2) + '\n';
+
+describe('mcp.ts default-canvas bootstrap on startup — disposable vaults', () => {
+  test('fresh empty vault: startup bootstraps BOTH schema.json and projects/Project.canvas', async () => {
+    const vault = makeVault({});
+    const c = new McpClient(vault);
+    try {
+      await c.start();
+      expect(fs.existsSync(path.join(vault, 'schema.json'))).toBe(true);
+      const canvasAbs = path.join(vault, 'projects', 'Project.canvas');
+      expect(fs.existsSync(canvasAbs)).toBe(true);
+      const raw = fs.readFileSync(canvasAbs, 'utf-8');
+      expect(JSON.parse(raw)).toEqual({ nodes: [], edges: [] });
+      expect(raw).toBe(EMPTY_CANVAS);
+      expect(c.stderr).toMatch(/Bootstrapped .*Project\.canvas/);
+    } finally {
+      await c.stop();
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  }, 120000);
+
+  test('existing zero-byte canvas at the default path is repaired on startup', async () => {
+    const vault = makeVault({ 'projects/Project.canvas': '' });
+    const c = new McpClient(vault);
+    try {
+      await c.start();
+      const raw = fs.readFileSync(path.join(vault, 'projects', 'Project.canvas'), 'utf-8');
+      expect(raw).toBe(EMPTY_CANVAS);
+      expect(c.stderr).toMatch(/Repaired empty canvas .*Project\.canvas/);
+    } finally {
+      await c.stop();
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  }, 120000);
+
+  test('existing non-empty canvas is left byte-identical untouched', async () => {
+    // Deliberately NOT pretty-printed and NOT newline-terminated: any rewrite
+    // (even a semantically-equal one) would change the bytes.
+    const existing = '{"nodes":[{"id":"n1","type":"text","text":"keep me","x":0,"y":0,"width":120,"height":60}],"edges":[]}';
+    const vault = makeVault({ 'projects/Project.canvas': existing });
+    const c = new McpClient(vault);
+    try {
+      await c.start();
+      const raw = fs.readFileSync(path.join(vault, 'projects', 'Project.canvas'), 'utf-8');
+      expect(raw).toBe(existing);
+      expect(c.stderr).not.toMatch(/(Bootstrapped|Repaired).*\.canvas/);
+    } finally {
+      await c.stop();
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  }, 120000);
+});
+
+// ---------------------------------------------------------------------------
+// PLUGIN INSTALL BOOTSTRAP: the npm package shipping the MCP server also
+// carries the Obsidian plugin artifacts (manifest.json/main.js/styles.css at
+// the package root — here, the repo root next to bin/). On startup the server
+// installs them into <vault>/.obsidian/plugins/<id>/ and registers the id in
+// community-plugins.json, so a new vault needs no separate plugin download.
+//   - not installed        → installed + enabled
+//   - older installed      → upgraded (data.json untouched)
+//   - same/newer installed → byte-identical untouched
+// ---------------------------------------------------------------------------
+describe('mcp.ts plugin-install bootstrap on startup — disposable vaults', () => {
+  const srcManifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'manifest.json'), 'utf-8'));
+  const pluginRel = `.obsidian/plugins/${srcManifest.id}`;
+
+  test('fresh vault: startup installs the plugin and enables it in community-plugins.json', async () => {
+    const vault = makeVault({});
+    const c = new McpClient(vault);
+    try {
+      await c.start();
+      const installed = JSON.parse(fs.readFileSync(path.join(vault, pluginRel, 'manifest.json'), 'utf-8'));
+      expect(installed.id).toBe(srcManifest.id);
+      expect(installed.version).toBe(srcManifest.version);
+      expect(fs.existsSync(path.join(vault, pluginRel, 'main.js'))).toBe(true);
+      const enabled = JSON.parse(fs.readFileSync(path.join(vault, '.obsidian', 'community-plugins.json'), 'utf-8'));
+      expect(enabled).toContain(srcManifest.id);
+      expect(c.stderr).toMatch(/Installed plugin canvas-project-manager/);
+    } finally {
+      await c.stop();
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  }, 120000);
+
+  test('same-or-newer installed version is left untouched', async () => {
+    const sentinel = '/* user-managed newer build — do not overwrite */';
+    const vault = makeVault({
+      [`${pluginRel}/manifest.json`]: JSON.stringify({ ...srcManifest, version: '99.0.0' }),
+      [`${pluginRel}/main.js`]: sentinel,
+    });
+    const c = new McpClient(vault);
+    try {
+      await c.start();
+      expect(fs.readFileSync(path.join(vault, pluginRel, 'main.js'), 'utf-8')).toBe(sentinel);
+      expect(JSON.parse(fs.readFileSync(path.join(vault, pluginRel, 'manifest.json'), 'utf-8')).version).toBe('99.0.0');
+      expect(c.stderr).not.toMatch(/Installed plugin/);
+    } finally {
+      await c.stop();
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  }, 120000);
+
+  test('older installed version is upgraded; data.json and other enabled plugins survive', async () => {
+    const vault = makeVault({
+      [`${pluginRel}/manifest.json`]: JSON.stringify({ ...srcManifest, version: '0.0.1' }),
+      [`${pluginRel}/main.js`]: '/* stale build */',
+      [`${pluginRel}/data.json`]: '{"userSetting":true}',
+      '.obsidian/community-plugins.json': JSON.stringify(['some-other-plugin']),
+    });
+    const c = new McpClient(vault);
+    try {
+      await c.start();
+      expect(JSON.parse(fs.readFileSync(path.join(vault, pluginRel, 'manifest.json'), 'utf-8')).version).toBe(srcManifest.version);
+      expect(fs.readFileSync(path.join(vault, pluginRel, 'main.js'), 'utf-8')).not.toBe('/* stale build */');
+      expect(fs.readFileSync(path.join(vault, pluginRel, 'data.json'), 'utf-8')).toBe('{"userSetting":true}');
+      const enabled = JSON.parse(fs.readFileSync(path.join(vault, '.obsidian', 'community-plugins.json'), 'utf-8'));
+      expect(enabled).toEqual(['some-other-plugin', srcManifest.id]);
+      expect(c.stderr).toMatch(/Installed plugin canvas-project-manager/);
+    } finally {
+      await c.stop();
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  }, 120000);
+});
+
+// ---------------------------------------------------------------------------
+// SCHEMA-DRIVEN RUNTIME REBUILD: set_schema must hot-reload EVERYTHING derived
+// from the schema — path routing (pathResolver), index scanning (scanIndex's
+// folder list), and validate_project's rule set (required-parent, fan-out
+// limits). Tests are order-dependent: set_schema runs first.
+// ---------------------------------------------------------------------------
+describe('mcp.ts set_schema hot-reload: custom types + schema-driven validation — disposable fixture', () => {
+  let vault: string;
+  let c: McpClient;
+  let riskId: string;
+
+  beforeAll(async () => {
+    vault = makeVault(FIXTURE);
+    c = new McpClient(vault);
+    await c.start();
+  }, 120000);
+
+  afterAll(async () => {
+    if (c) await c.stop();
+    if (vault) fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test('set_schema accepts a custom entity type + modified fan-out limit + new defaultCanvas (bootstrapped)', async () => {
+    const gs = await c.callJson('get_schema');
+    const s = JSON.parse(JSON.stringify(gs.schema));
+    s.entityTypes.push({
+      type: 'risk',
+      label: 'Risk',
+      idPrefix: 'RISK',
+      folder: 'risks',
+      statuses: ['Open', 'Mitigated', 'Accepted'],
+      defaultStatus: 'Open',
+      fields: [],
+    });
+    const impact = s.relationships.find((r: any) => r.name === 'decision-impact');
+    expect(impact).toBeDefined();
+    impact.validation = { ...(impact.validation ?? {}), maxForwardTargets: 5 };
+    s.settings.defaultCanvas = 'projects/Custom.canvas';
+
+    const res = await c.callJson('set_schema', { schema: s });
+    expect(res.saved).toBe(true);
+    expect(res.entityTypes).toBe(7);
+
+    // set_schema bootstraps the newly-named defaultCanvas.
+    const canvasAbs = path.join(vault, 'projects', 'Custom.canvas');
+    expect(fs.existsSync(canvasAbs)).toBe(true);
+    expect(fs.readFileSync(canvasAbs, 'utf-8')).toBe(EMPTY_CANVAS);
+  });
+
+  test('create_entity of the custom type succeeds (pathResolver rebuilt) and lands in its schema folder', async () => {
+    const r = await c.call('create_entity', { type: 'risk', title: 'Vendor lock-in', properties: {} });
+    expect(r.isError).toBeFalsy();
+    const m = r.text!.match(/Created risk (RISK-\d+)/);
+    expect(m).toBeTruthy();
+    riskId = m![1];
+    expect(r.text).toContain('Path: risks/');
+    expect(fs.existsSync(path.join(vault, 'risks'))).toBe(true);
+  });
+
+  test('the custom-type entity is found by get_entity and list/search after rescan (scanIndex schema-driven)', async () => {
+    const e = await c.callJson('get_entity', { id: riskId });
+    expect(e.type).toBe('risk');
+    expect(e.title).toBe('Vendor lock-in');
+    expect(e.status).toBe('Open'); // custom type's defaultStatus
+
+    const listed = await c.call('list_entities', { type: 'risk' });
+    expect(listed.text).toMatch(/Found 1 entity of type risk/);
+    expect(listed.text).toContain(riskId);
+  });
+
+  test('validate_project uses the SCHEMA fan-out limit (decision-impact maxForwardTargets: 5), rule id stable', async () => {
+    // 3 affects: over the old hardcoded limit (2) but within the new schema limit (5) → NO advisory.
+    const ok = await c.call('create_entity', {
+      type: 'decision', title: 'Within raised limit',
+      properties: { relationships: { affects: ['DOC-001', 'DOC-771', 'DOC-772'] } },
+    });
+    expect(ok.isError).toBeFalsy();
+    const okId = ok.text!.match(/(DEC-\d+)/)![1];
+
+    // 6 affects: over the new schema limit → advisory citing limit 5, legacy rule id.
+    const over = await c.call('create_entity', {
+      type: 'decision', title: 'Over raised limit',
+      properties: { relationships: { affects: ['DOC-001', 'DOC-781', 'DOC-782', 'DOC-783', 'DOC-784', 'DOC-785'] } },
+    });
+    expect(over.isError).toBeFalsy();
+    const overId = over.text!.match(/(DEC-\d+)/)![1];
+
+    const v = await c.callJson('validate_project');
+    const dec = (v.advisories as Array<{ rule: string; entity: string; message: string; suggestion: string }>)
+      .filter(a => a.rule === 'DECISION_FANOUT');
+    expect(dec.some(a => a.entity.startsWith(`${okId} `))).toBe(false);
+    const hit = dec.find(a => a.entity.startsWith(`${overId} `));
+    expect(hit).toBeDefined();
+    expect(hit!.message).toMatch(/decision affects 6 documents \(limit 5\)/);
+    expect(hit!.suggestion).toContain('Point `affects` at the 5 documents');
+    // Fan-out stays advisory-only.
+    expect((v.violations as Array<{ rule: string }>).every(x => !x.rule.includes('FANOUT'))).toBe(true);
+  });
+});

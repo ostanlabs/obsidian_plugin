@@ -21,6 +21,12 @@ module.exports = {
   
   // Module resolution
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
+
+  // Source uses ESM ".js" import specifiers that resolve to ".ts" — strip the
+  // extension so ts-jest resolves the TypeScript source (mirrors jest.config.js).
+  moduleNameMapper: {
+    '^(\\.{1,2}/.*)\\.js$': '$1',
+  },
   
   // Transform TypeScript
   transform: {

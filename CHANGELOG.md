@@ -5,6 +5,26 @@ All notable changes to the Canvas Project Manager plugin will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-07-09
+
+### 🧬 Schema as Single Source of Truth
+
+- **Validation rules live in the schema**: relationships gained a `validation` block — `requiredForTypes` (drives the ORPHANED_ENTITY rule) and `maxForwardTargets`/`maxReverseTargets` (drive the fan-out advisories). `validate_project` derives its entire rule set from the ACTIVE schema, so `set_schema` edits take effect immediately (legacy rule ids preserved; custom rules get generated `<REL>_<END>_FANOUT` ids)
+- **Descriptions in the schema**: entity types, relationships, and ambiguous fields carry `description` strings surfaced by `get_schema` (including the decision `decided_by` person-field vs relationship-field disambiguation)
+- **Hardcoded relationship lists eliminated**: validate_project's field list, reconciler ordering rules, entity-navigator entry fields, sanitization fields, and frontmatter always-emit fields now all derive from the schema (new helpers in `schema-derivation.ts`); deprecated `enables`/`enabled_by` kept as explicit legacy fields. Fixes a drift bug: `next_version` was missing from sanitization
+- **`emitWhenEmpty` relationship flag** replaces the hardcoded frontmatter always-include list; **`settings.defaultCanvas`** codified in the default schema
+
+### 🚀 Empty-Vault Bootstrap (zero manual setup)
+
+- **Canvas bootstrap**: on startup (and after `set_schema`) the MCP ensures `settings.defaultCanvas` (default `projects/Project.canvas`) exists with valid canvas JSON; zero-byte canvases are repaired
+- **Plugin auto-install**: the npm package ships the plugin artifacts next to the MCP server, so startup installs/upgrades the plugin into `<vault>/.obsidian/plugins/canvas-project-manager/` and enables it in `community-plugins.json` — no separate download-and-extract step. Never downgrades; never touches `data.json`
+- **Crash-proof canvas reads**: `loadCanvasData`/`readCanvas` treat empty files as empty canvases, normalize missing `nodes`/`edges` keys, and throw descriptive errors on corrupt JSON instead of `SyntaxError: Unexpected end of JSON input`
+
+### 🔧 set_schema Hot-Reload Fixes
+
+- **Stale `pathResolver`**: rebuilt in `applySchema` — creating an entity of a schema-added custom type no longer throws "Unknown entity type"
+- **`scanIndex` schema-driven**: entity folders derive from the active schema (custom-type folders are scanned; no more hardcoded pluralization)
+
 ## [1.8.46] - 2026-06-29
 
 ### 🔒 Security & Submission Compliance

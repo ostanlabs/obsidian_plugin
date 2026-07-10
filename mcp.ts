@@ -14,7 +14,13 @@ import {
 import { NodeFsAdapter } from './src/adapters/node-fs-adapter.js';
 import { SchemaRegistry } from './src/entity-core/schema-registry.js';
 import { DEFAULT_SCHEMA } from './src/entity-core/default-schema.js';
-import { buildValidationAllowList, buildReverseRelationMap } from './src/entity-core/schema-derivation.js';
+import {
+  buildValidationAllowList,
+  buildReverseRelationMap,
+  getAllRelationshipFieldNames,
+  getRequiredParentRules,
+  getFanoutRules,
+} from './src/entity-core/schema-derivation.js';
 import { loadOrBootstrapSchema, serializeSchema, validateSchema, SCHEMA_FILENAME } from './src/entity-core/schema-bootstrap.js';
 import type { Schema } from './src/entity-core/types.js';
 // Bundled as a raw string via esbuild `--loader:.html=text`. get_schema_designer
@@ -62,6 +68,10 @@ function applySchema(s: Schema): void {
   serializer = new EntitySerializer(schema);
   validator = new EntityValidator(schema);
   VALIDATION_ALLOWLIST = buildValidationAllowList(s);
+  // Path routing derives from the schema's entity-type folders/prefixes — without
+  // this rebuild, create_entity of a type added via set_schema throws
+  // "Unknown entity type" from the stale resolver.
+  pathResolver = new PathResolver(schema, config);
   // Keep the index's reverse relationship map in sync with the active schema.
   index.setReverseRelationMap(buildReverseRelationMap(s));
   activeSchema = s;
@@ -183,7 +193,8 @@ async function listFilesRecursive(folder: string): Promise<string[]> {
   return out;
 }
 
-const pathResolver = new PathResolver(schema, config);
+// `let` — rebuilt inside applySchema whenever the active schema changes.
+let pathResolver = new PathResolver(schema, config);
 
 // Initialize ProjectIndex
 const index = new ProjectIndex();
@@ -224,27 +235,15 @@ function buildMetadata(entity: RuntimeEntity, filePath: string, mtimeMs: number)
 async function scanIndex(): Promise<void> {
   index.clear();
 
-  // Get all entity types from schema
-  const entityTypes = ['task', 'story', 'milestone', 'decision', 'document', 'feature'];
-
-  // Build list of folders to scan: archive + type folders.
+  // Build list of folders to scan: archive + each entity type's folder from the
+  // ACTIVE schema (custom types added via set_schema are scanned too).
   // Archive is scanned FIRST so that when a stale duplicate of an entity exists
   // in both a live type folder and archive/, the LIVE copy wins the id→path
   // mapping (index.set is last-writer-wins per id).
   const folders: string[] = [config.archiveFolder];
-
-  // Add type-specific folders
-  for (const type of entityTypes) {
-    // Map entity type to folder name (handle irregular plurals)
-    let typeFolderName: string;
-    if (type === 'decision') {
-      typeFolderName = 'decisions';
-    } else if (type === 'story') {
-      typeFolderName = 'stories';
-    } else {
-      typeFolderName = `${type}s`;
-    }
-    folders.push(typeFolderName);
+  for (const typeDef of schema.getAllEntityTypes()) {
+    const folder = pathResolver.getTypeFolderPath(typeDef.type);
+    if (!folders.includes(folder)) folders.push(folder);
   }
 
   // Scan all folders. Type folders are flat; archive/ nests by type/quarter,
@@ -409,7 +408,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'get_schema',
-      description: 'Get the active schema (from schema.json or the codified default), its source, and any validation errors.',
+      description: 'Get the active schema (from schema.json or the codified default), its source, and any validation errors. Beyond entity types and relationships, the schema carries validation rules (per-relationship requiredForTypes parent rules and maxForwardTargets/maxReverseTargets fan-out limits — validate_project derives its rule set from these), canvas positioning metadata, and settings (e.g. settings.defaultCanvas, the canvas file bootstrapped on startup).',
       inputSchema: {
         type: 'object',
         properties: {},
@@ -417,7 +416,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'set_schema',
-      description: 'Configure the vault\'s relationships/schema. Writes <vault>/schema.json (the single source of truth for both the MCP validator and the plugin positioning) and hot-reloads. Provide a full "schema" object, or a "relationships" array to merge into the current schema. Invalid schemas are rejected and not saved.',
+      description: 'Configure the vault\'s relationships/schema. Writes <vault>/schema.json (the single source of truth for both the MCP validator and the plugin positioning) and hot-reloads all schema-derived machinery (path routing, index scanning, validation). The schema also carries validation rules (requiredForTypes parent rules, fan-out limits) that validate_project derives its rules from, positioning metadata, and settings.defaultCanvas (bootstrapped if missing after a successful save). Provide a full "schema" object, or a "relationships" array to merge into the current schema. Invalid schemas are rejected and not saved.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1249,6 +1248,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         applySchema(candidate);
         schemaSource = 'file';
         schemaErrors = [];
+        // If the new schema names a defaultCanvas that doesn't exist yet (or is
+        // an empty file), bootstrap/repair it now — same step as server startup.
+        await ensureDefaultCanvas();
         return {
           content: [{
             type: 'text',
@@ -2008,17 +2010,46 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const violations: Array<{entity: string; rule: string; message: string}> = [];
 
-        // ADVISORIES — soft fan-out guidelines, deliberately NOT enforced on
+        // ADVISORIES — soft fan-out guidelines derived from the ACTIVE schema's
+        // relationship `validation.maxForwardTargets`/`maxReverseTargets`
+        // (schema-derivation.getFanoutRules). Deliberately NOT enforced on
         // create/update writes. They flag entities whose relationship fan-out
         // makes the canvas/graph hard to read, with concrete reorganization
         // suggestions for the agent to reconcile over time.
-        const FANOUT_LIMITS = {
-          document_documents: 2,   // a document should document at most 2 features
-          decision_affects: 2,     // a decision should affect at most 2 documents
-          feature_implemented_by: 3, // a feature should have at most 3 implementers
-          feature_documented_by: 2, // a feature should be documented by at most 2 documents
+        const fanoutRules = getFanoutRules(activeSchema);
+
+        // Rule-id stability: these four ids predate the schema-driven rules and
+        // are pinned by integration tests + agent playbooks, and their rich
+        // reorganization prose stays in code. Any OTHER schema-defined fan-out
+        // rule gets a generated `<RELATIONSHIP>_<END>_FANOUT` id and a generic
+        // suggestion. Limits always come from the schema, never from here.
+        const LEGACY_FANOUT: Record<string, { rule: string; noun: string; suggestion: (limit: number) => string }> = {
+          'documentation:forward': {
+            rule: 'DOCUMENT_FANOUT',
+            noun: 'features',
+            suggestion: (limit) => `Split into focused documents so each documents at most ${limit} features: keep the ${limit} features this document is primarily about in \`documents\`, and move the rest into new per-feature (or per-cohesive-pair) documents that can carry \`previous_version\`/body links back to this one. On the canvas a document anchors to its FIRST documents-target, so wide fan-out also strands the document between distant feature clusters.`,
+          },
+          'decision-impact:forward': {
+            rule: 'DECISION_FANOUT',
+            noun: 'documents',
+            suggestion: (limit) => `Point \`affects\` at the ${limit} documents that materially change because of this decision; for the others, record the impact in each document's body or split the decision into narrower per-scope decisions linked via \`supersedes\`/body references. Decisions position next to their first affected document, so long affects lists scatter meaning.`,
+          },
+          'documentation:reverse': {
+            rule: 'FEATURE_DOC_FANOUT',
+            noun: 'documents',
+            suggestion: (limit) => `Unify the documentation into at most ${limit} documents: merge overlapping/partial specs into one current document, chain superseded versions via \`previous_version\` (a superseded document should drop its \`documents\` link to this feature), and keep only the documents this feature genuinely relies on (e.g. current spec + guide). Wide doc fan-in usually signals stale or duplicated specs rather than thorough coverage.`,
+          },
+          'implementation:reverse': {
+            rule: 'FEATURE_IMPLEMENTER_FANOUT',
+            noun: 'implementers',
+            suggestion: (limit) => `Consolidate to at most ${limit} implementers: either designate one umbrella story/milestone as the primary implementer (demote the others' \`implements\` to \`affects\` or body references), or split the feature into sub-features so each has a small, honest implementer set. Only the first implementer positions the feature on the canvas; the rest are edge-only.`,
+          },
         };
         const advisories: Array<{entity: string; rule: string; message: string; suggestion: string}> = [];
+
+        // Hard required-parent rules from the schema (`validation.requiredForTypes`,
+        // e.g. tasks/stories need a hierarchy parent) → ORPHANED_ENTITY violations.
+        const requiredParentRules = getRequiredParentRules(activeSchema);
 
         // NOTE: index.getAll() returns EntityMetadata (flat parent_id, no
         // `relationships`/`fields`). The rules below need the full relationship
@@ -2030,12 +2061,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // VALID RELATIONSHIP SET — derived from the schema (single source of truth).
         // See schema-derivation.ts / default-schema.ts `positioning` metadata.
         const ALLOWED = VALIDATION_ALLOWLIST;
-        // Every relationship field name in the full schema (forward + reverse), so legacy
+        // Every relationship field name in the ACTIVE schema (forward + reverse), so legacy
         // fields that are no longer valid are detected even if the parser parked them in
         // `passthrough` (an entity type the current schema doesn't treat as from/to).
-        const REL_FIELDS = ['parent', 'children', 'depends_on', 'blocks', 'implements',
-          'implemented_by', 'documents', 'documented_by', 'affects', 'decided_by',
-          'supersedes', 'superseded_by', 'previous_version', 'next_version'];
+        const REL_FIELDS = getAllRelationshipFieldNames(activeSchema);
 
         for (const meta of entities) {
           const path = index.getPathById(meta.id);
@@ -2047,13 +2076,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             continue; // skip unparseable files
           }
 
-          // Rule: Stories and tasks need parents (positioning containment)
-          if ((entity.type === 'story' || entity.type === 'task') && !hasRel(entity.relationships?.parent)) {
-            violations.push({
-              entity: `${entity.id} (${entity.title})`,
-              rule: 'ORPHANED_ENTITY',
-              message: `${entity.type} missing parent`,
-            });
+          // Rule: required-parent relationships (schema `validation.requiredForTypes` —
+          // in the default schema: stories and tasks need a hierarchy parent).
+          for (const req of requiredParentRules) {
+            if (req.types.includes(entity.type) && !hasRel(entity.relationships?.[req.field])) {
+              violations.push({
+                entity: `${entity.id} (${entity.title})`,
+                rule: 'ORPHANED_ENTITY',
+                message: `${entity.type} missing ${req.field}`,
+              });
+            }
           }
 
           // Rule: enforce the valid relationship set (allowed fields + allowed target types).
@@ -2093,56 +2125,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
           }
 
-          // Advisory: document fan-out (documents → features)
-          if (entity.type === 'document') {
-            const targets = asList(relView['documents']);
-            if (targets.length > FANOUT_LIMITS.document_documents) {
-              advisories.push({
-                entity: `${entity.id} (${entity.title})`,
-                rule: 'DOCUMENT_FANOUT',
-                message: `document documents ${targets.length} features (limit ${FANOUT_LIMITS.document_documents}): ${targets.join(', ')}`,
-                suggestion: `Split into focused documents so each documents at most ${FANOUT_LIMITS.document_documents} features: keep the ${FANOUT_LIMITS.document_documents} features this document is primarily about in \`documents\`, and move the rest into new per-feature (or per-cohesive-pair) documents that can carry \`previous_version\`/body links back to this one. On the canvas a document anchors to its FIRST documents-target, so wide fan-out also strands the document between distant feature clusters.`,
-              });
-            }
-          }
-
-          // Advisory: decision fan-out (affects → documents)
-          if (entity.type === 'decision') {
-            const targets = asList(relView['affects']);
-            if (targets.length > FANOUT_LIMITS.decision_affects) {
-              advisories.push({
-                entity: `${entity.id} (${entity.title})`,
-                rule: 'DECISION_FANOUT',
-                message: `decision affects ${targets.length} documents (limit ${FANOUT_LIMITS.decision_affects}): ${targets.join(', ')}`,
-                suggestion: `Point \`affects\` at the ${FANOUT_LIMITS.decision_affects} documents that materially change because of this decision; for the others, record the impact in each document's body or split the decision into narrower per-scope decisions linked via \`supersedes\`/body references. Decisions position next to their first affected document, so long affects lists scatter meaning.`,
-              });
-            }
-          }
-
-          // Advisory: feature documentation fan-in (documented_by → documents)
-          if (entity.type === 'feature') {
-            const targets = asList(relView['documented_by']);
-            if (targets.length > FANOUT_LIMITS.feature_documented_by) {
-              advisories.push({
-                entity: `${entity.id} (${entity.title})`,
-                rule: 'FEATURE_DOC_FANOUT',
-                message: `feature documented_by ${targets.length} documents (limit ${FANOUT_LIMITS.feature_documented_by}): ${targets.join(', ')}`,
-                suggestion: `Unify the documentation into at most ${FANOUT_LIMITS.feature_documented_by} documents: merge overlapping/partial specs into one current document, chain superseded versions via \`previous_version\` (a superseded document should drop its \`documents\` link to this feature), and keep only the documents this feature genuinely relies on (e.g. current spec + guide). Wide doc fan-in usually signals stale or duplicated specs rather than thorough coverage.`,
-              });
-            }
-          }
-
-          // Advisory: feature implementer fan-out (implemented_by → stories/milestones)
-          if (entity.type === 'feature') {
-            const targets = asList(relView['implemented_by']);
-            if (targets.length > FANOUT_LIMITS.feature_implemented_by) {
-              advisories.push({
-                entity: `${entity.id} (${entity.title})`,
-                rule: 'FEATURE_IMPLEMENTER_FANOUT',
-                message: `feature implemented_by ${targets.length} implementers (limit ${FANOUT_LIMITS.feature_implemented_by}): ${targets.join(', ')}`,
-                suggestion: `Consolidate to at most ${FANOUT_LIMITS.feature_implemented_by} implementers: either designate one umbrella story/milestone as the primary implementer (demote the others' \`implements\` to \`affects\` or body references), or split the feature into sub-features so each has a small, honest implementer set. Only the first implementer positions the feature on the canvas; the rest are edge-only.`,
-              });
-            }
+          // Advisories: fan-out limits from the schema (one rule per relationship end
+          // carrying a `validation.maxForwardTargets`/`maxReverseTargets`).
+          for (const fr of fanoutRules) {
+            if (!fr.sourceTypes.includes(entity.type) && !fr.sourceTypes.includes('*')) continue;
+            const targets = asList(relView[fr.field]);
+            if (targets.length <= fr.limit) continue;
+            const legacy = LEGACY_FANOUT[`${fr.relationship}:${fr.end}`];
+            const rule = legacy?.rule
+              ?? `${fr.relationship.replace(/[^a-zA-Z0-9]+/g, '_').toUpperCase()}_${fr.end.toUpperCase()}_FANOUT`;
+            advisories.push({
+              entity: `${entity.id} (${entity.title})`,
+              rule,
+              message: `${entity.type} ${fr.field} ${targets.length} ${legacy?.noun ?? 'targets'} (limit ${fr.limit}): ${targets.join(', ')}`,
+              suggestion: legacy
+                ? legacy.suggestion(fr.limit)
+                : `Reduce \`${fr.field}\` on this ${entity.type} to at most ${fr.limit} targets (schema advisory on the "${fr.relationship}" relationship): keep the primary targets in the field and move the rest into body references or narrower split-out entities.`,
+            });
           }
         }
 
@@ -2922,6 +2921,147 @@ process.on('SIGTERM', shutdown);
 // to it (''); this is the absolute path only for human-readable logs/output.
 const SCHEMA_ABS_PATH = `${VAULT_PATH}/${SCHEMA_FILENAME}`;
 
+// Valid empty canvas JSON (2-space indent + trailing newline) — what the
+// bootstrap/repair writes so the plugin's "populate from vault" has a real file.
+const EMPTY_CANVAS_JSON = JSON.stringify({ nodes: [], edges: [] }, null, 2) + '\n';
+
+/**
+ * Ensure the ACTIVE schema's `settings.defaultCanvas` (fallback:
+ * 'projects/Project.canvas') exists and holds valid canvas JSON:
+ *   - missing              → create parent folder + write the empty canvas
+ *   - empty/whitespace-only → repair by rewriting the empty canvas
+ *   - has content          → leave untouched
+ * Never throws — canvas bootstrap must not block the server (mirrors the
+ * schema bootstrap's stderr logging).
+ */
+async function ensureDefaultCanvas(): Promise<void> {
+  const canvasPath = activeSchema.settings?.defaultCanvas || 'projects/Project.canvas';
+  try {
+    if (await adapter.exists(canvasPath)) {
+      const content = await adapter.readFile(canvasPath);
+      if (content.trim() !== '') return; // real content — leave untouched
+      await adapter.writeFile(canvasPath, EMPTY_CANVAS_JSON);
+      console.error(`Repaired empty canvas ${VAULT_PATH}/${canvasPath} (rewrote valid empty canvas JSON).`);
+      return;
+    }
+    const parentDir = canvasPath.includes('/') ? canvasPath.slice(0, canvasPath.lastIndexOf('/')) : '';
+    if (parentDir) {
+      await adapter.createDir(parentDir, { recursive: true });
+    }
+    await adapter.writeFile(canvasPath, EMPTY_CANVAS_JSON);
+    console.error(`Bootstrapped ${VAULT_PATH}/${canvasPath} (empty canvas).`);
+  } catch (e) {
+    console.error(`WARNING: could not ensure default canvas ${canvasPath}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Plugin installation bootstrap — the npm package that ships this MCP server
+// (bin/mcp-server.mjs) ALSO contains the Obsidian plugin artifacts
+// (manifest.json, main.js, styles.css at the package root), so a new vault
+// doesn't need a separate download-and-extract step: the server copies the
+// plugin into <vault>/.obsidian/plugins/<id>/ on startup.
+// ---------------------------------------------------------------------------
+
+/**
+ * The directory holding the plugin artifacts: the package root. When running
+ * the published bundle this file lives at <pkg>/bin/mcp-server.mjs → parent
+ * dir; when running from a repo checkout (tsx mcp.ts) it's the repo root
+ * itself. Probe for manifest.json in the module's dir, then its parent.
+ */
+async function findPluginSourceDir(): Promise<string | null> {
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const { access } = await import('node:fs/promises');
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const candidate of [here, dirname(here)]) {
+    try {
+      await access(join(candidate, 'manifest.json'));
+      await access(join(candidate, 'main.js'));
+      return candidate;
+    } catch { /* keep probing */ }
+  }
+  return null;
+}
+
+/** '1.8.99' vs '1.9.0' → negative/zero/positive (numeric per-segment compare). */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+/**
+ * Install (or upgrade) the bundled Obsidian plugin into the vault:
+ *   - not installed            → copy manifest.json/main.js/styles.css into
+ *                                .obsidian/plugins/<id>/ and register the id in
+ *                                .obsidian/community-plugins.json
+ *   - installed, older version → overwrite the artifacts (upgrade); the user's
+ *                                data.json settings are never touched
+ *   - installed, same or newer → leave untouched
+ * Never throws — like the schema/canvas bootstrap, this must not block the
+ * server. Obsidian may still ask the user to trust the vault / leave
+ * restricted mode the first time; that confirmation can't be done from disk.
+ */
+async function ensurePluginInstalled(): Promise<void> {
+  try {
+    const { join } = await import('node:path');
+    const { readFile: nodeReadFile } = await import('node:fs/promises');
+    const sourceDir = await findPluginSourceDir();
+    if (!sourceDir) {
+      console.error('WARNING: plugin artifacts (manifest.json/main.js) not found next to the MCP server — skipping plugin install.');
+      return;
+    }
+    const manifestRaw = await nodeReadFile(join(sourceDir, 'manifest.json'), 'utf8');
+    const manifest = JSON.parse(manifestRaw) as { id?: string; version?: string };
+    if (!manifest.id || !manifest.version) {
+      console.error('WARNING: bundled manifest.json has no id/version — skipping plugin install.');
+      return;
+    }
+
+    // adapter is rooted at VAULT_PATH → vault-relative paths.
+    const pluginDir = `.obsidian/plugins/${manifest.id}`;
+    const installedManifestPath = `${pluginDir}/manifest.json`;
+    if (await adapter.exists(installedManifestPath)) {
+      try {
+        const installed = JSON.parse(await adapter.readFile(installedManifestPath)) as { version?: string };
+        if (installed.version && compareVersions(installed.version, manifest.version) >= 0) {
+          return; // same or newer already installed — leave untouched
+        }
+      } catch { /* unreadable installed manifest → reinstall */ }
+    }
+
+    await adapter.createDir(pluginDir, { recursive: true });
+    await adapter.writeFile(installedManifestPath, manifestRaw);
+    await adapter.writeFile(`${pluginDir}/main.js`, await nodeReadFile(join(sourceDir, 'main.js'), 'utf8'));
+    try {
+      await adapter.writeFile(`${pluginDir}/styles.css`, await nodeReadFile(join(sourceDir, 'styles.css'), 'utf8'));
+    } catch { /* styles.css is optional */ }
+
+    // Register in community-plugins.json so Obsidian enables it on next load
+    // (preserving any other enabled plugins).
+    const communityPath = '.obsidian/community-plugins.json';
+    let enabled: string[] = [];
+    if (await adapter.exists(communityPath)) {
+      try {
+        const parsed = JSON.parse(await adapter.readFile(communityPath));
+        if (Array.isArray(parsed)) enabled = parsed;
+      } catch { /* malformed → rewrite with just our id below */ }
+    }
+    if (!enabled.includes(manifest.id)) {
+      enabled.push(manifest.id);
+      await adapter.writeFile(communityPath, JSON.stringify(enabled, null, 2) + '\n');
+    }
+    console.error(`Installed plugin ${manifest.id} v${manifest.version} into ${VAULT_PATH}/${pluginDir} (and enabled it in community-plugins.json).`);
+  } catch (e) {
+    console.error(`WARNING: could not install the bundled plugin: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 /** Load (or bootstrap-inject) <VAULT_PATH>/schema.json and apply it. */
 async function loadSchema(): Promise<void> {
   const result = await loadOrBootstrapSchema(adapter, '');
@@ -2937,6 +3077,10 @@ async function loadSchema(): Promise<void> {
   } else {
     console.error(`Schema source: ${result.source} (${SCHEMA_ABS_PATH})`);
   }
+  // The vault's default canvas is part of the bootstrap contract too.
+  await ensureDefaultCanvas();
+  // As is the plugin itself — the npm package carries the same artifacts.
+  await ensurePluginInstalled();
 }
 
 // Start the server

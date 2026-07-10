@@ -2,7 +2,7 @@ import { App, TFile, Notice } from "obsidian";
 import { parseAnyFrontmatter, applyFrontmatterUpdates } from "./frontmatter";
 import { sanitizeYamlValue, hasUnsafeYamlChars } from "./yamlSanitizer";
 import { DEFAULT_SCHEMA } from "../src/entity-core/default-schema.js";
-import { buildReverseRelationMap } from "../src/entity-core/schema-derivation.js";
+import { buildReverseRelationMap, buildOrderingRelationships } from "../src/entity-core/schema-derivation.js";
 import { SchemaRegistry } from "../src/entity-core/schema-registry.js";
 import { EntityParser } from "../src/entity-core/parser.js";
 import { toFlatFrontmatter } from "../src/adapters/model-map.js";
@@ -166,15 +166,23 @@ export async function sanitizeEntityFilesForYaml(
 const RELATIONSHIP_PAIRS: [string, string][] = Object.entries(REVERSE_RELATION_MAP);
 
 /**
- * Relationship fields that create ordering constraints (A must come before B)
- * Format: [field, direction] where direction indicates if the source is "before" or "after" the target
+ * Relationship fields that create ordering constraints (A must come before B),
+ * DERIVED from the schema's `positioning` metadata via
+ * schema-derivation.buildOrderingRelationships.
+ * Format: { field, direction } where direction indicates if the source is "before" or "after" the target
  * - "before": source -> target means source must be LEFT of target (source blocks target, or target depends_on source)
  * - "after": source -> target means source must be RIGHT of target (source depends_on target)
+ *
+ * Criterion (see buildOrderingRelationships): relationships with
+ * `positioning.role === 'sequencing'` AND `positioning.emitReverseRule === true`
+ * — the forward field gets `forwardDirection`, the reverse field the opposite.
+ * Sequencing relationships WITHOUT a reverse rule (supersession, versioning)
+ * are deliberately excluded: their reverse side carries no ordering semantics
+ * for the cycle breaker, which matches the previously hardcoded
+ * [depends_on/after, blocks/before] list.
  */
-const ORDERING_RELATIONSHIPS: { field: string; direction: "before" | "after" }[] = [
-	{ field: "depends_on", direction: "after" },  // A depends_on B means A is AFTER B (B -> A)
-	{ field: "blocks", direction: "before" },     // A blocks B means A is BEFORE B (A -> B)
-];
+export const ORDERING_RELATIONSHIPS: { field: string; direction: "before" | "after" }[] =
+	buildOrderingRelationships(DEFAULT_SCHEMA);
 
 export interface ReconciliationResult {
 	totalReconciled: number;

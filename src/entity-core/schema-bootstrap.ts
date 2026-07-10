@@ -39,6 +39,15 @@ export function validateSchema(obj: unknown): string[] {
   }
   const s = obj as Record<string, any>;
 
+  const okDescription = (v: unknown) => v === undefined || typeof v === 'string';
+
+  if (s.settings && typeof s.settings === 'object' && s.settings.defaultCanvas !== undefined) {
+    const dc = s.settings.defaultCanvas;
+    if (typeof dc !== 'string' || !dc.endsWith('.canvas')) {
+      errors.push('settings.defaultCanvas must be a string ending in ".canvas"');
+    }
+  }
+
   if (!Array.isArray(s.entityTypes)) errors.push('missing "entityTypes" array');
   else {
     const types = new Set<string>();
@@ -46,6 +55,14 @@ export function validateSchema(obj: unknown): string[] {
       if (!e || typeof e !== 'object') { errors.push(`entityTypes[${i}] is not an object`); return; }
       if (!e.type) errors.push(`entityTypes[${i}] missing "type"`);
       else { if (types.has(e.type)) errors.push(`duplicate entity type "${e.type}"`); types.add(e.type); }
+      if (!okDescription(e.description)) errors.push(`entityTypes[${e.type ?? i}].description must be a string`);
+      if (Array.isArray(e.fields)) {
+        e.fields.forEach((f: any, j: number) => {
+          if (f && typeof f === 'object' && !okDescription(f.description)) {
+            errors.push(`entityTypes[${e.type ?? i}].fields[${f.name ?? j}].description must be a string`);
+          }
+        });
+      }
     });
   }
 
@@ -83,6 +100,37 @@ export function validateSchema(obj: unknown): string[] {
         if (r.positioning.priority !== undefined &&
             (typeof r.positioning.priority !== 'number' || r.positioning.priority < 0)) {
           errors.push(`relationships[${label}].positioning.priority must be a non-negative number`);
+        }
+      }
+      if (!okDescription(r?.description)) errors.push(`relationships[${label}].description must be a string`);
+      if (r?.validation !== undefined) {
+        const v = r.validation;
+        if (!v || typeof v !== 'object' || Array.isArray(v)) {
+          errors.push(`relationships[${label}].validation must be an object`);
+        } else {
+          if (v.requiredForTypes !== undefined) {
+            if (!Array.isArray(v.requiredForTypes)) {
+              errors.push(`relationships[${label}].validation.requiredForTypes must be an array`);
+            } else {
+              // Each entry must be a known entity type that appears as a `from` in this
+              // relationship's pairs (the forward field lives on the FROM entity).
+              const fromTypes = new Set<string>(
+                Array.isArray(r.pairs) ? r.pairs.map((p: any) => p?.from).filter(Boolean) : []
+              );
+              for (const t of v.requiredForTypes) {
+                if (typeof t !== 'string' || !okType(t)) {
+                  errors.push(`relationships[${label}].validation.requiredForTypes has unknown entity type "${t}"`);
+                } else if (!fromTypes.has(t) && !fromTypes.has('*')) {
+                  errors.push(`relationships[${label}].validation.requiredForTypes: "${t}" is not a "from" type of any pair`);
+                }
+              }
+            }
+          }
+          for (const k of ['maxForwardTargets', 'maxReverseTargets'] as const) {
+            if (v[k] !== undefined && (typeof v[k] !== 'number' || !Number.isInteger(v[k]) || v[k] <= 0)) {
+              errors.push(`relationships[${label}].validation.${k} must be a positive integer`);
+            }
+          }
         }
       }
     });

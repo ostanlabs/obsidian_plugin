@@ -6,6 +6,9 @@
  * relationship detection and graph building.
  */
 
+import { DEFAULT_SCHEMA } from "../src/entity-core/default-schema.js";
+import { getAllRelationshipFieldNames } from "../src/entity-core/schema-derivation.js";
+
 /**
  * Strip quotes from a single entity ID string.
  * Handles both double quotes ("M-001") and single quotes ('M-001').
@@ -70,15 +73,32 @@ export function sanitizeRelationshipValue(
 }
 
 /**
+ * Deprecated relationship fields that are no longer in the schema but may
+ * still exist in old vault files (the `enables`/`enabled_by` pair predates
+ * the depends_on↔blocks correction). Sanitization must keep cleaning them so
+ * legacy frontmatter doesn't retain quoted IDs, even though no current code
+ * writes these fields.
+ */
+export const LEGACY_RELATIONSHIP_FIELDS = ["enables", "enabled_by"] as const;
+
+/**
+ * All known relationship field names: every forward+reverse field across the
+ * schema's relationships (schema-derivation.getAllRelationshipFieldNames),
+ * plus the explicit legacy fields above.
+ */
+export const RELATIONSHIP_FIELDS: string[] = [
+	...getAllRelationshipFieldNames(DEFAULT_SCHEMA),
+	...LEGACY_RELATIONSHIP_FIELDS,
+];
+
+/**
  * Sanitize all relationship fields in a frontmatter object.
  *
- * Processes common relationship field names and strips quotes from their values:
- * - parent, depends_on, blocks, enables, affects
- * - implements, implemented_by
- * - supersedes, superseded_by
- * - documents, documented_by
- * - affects, decided_by
- * - previous_version
+ * Processes all schema relationship field names (forward + reverse, e.g.
+ * parent/children, depends_on/blocks, implements/implemented_by,
+ * documents/documented_by, affects/decided_by, supersedes/superseded_by,
+ * previous_version/next_version) plus the legacy enables/enabled_by pair,
+ * and strips quotes from their values.
  *
  * @param frontmatter - Frontmatter object to sanitize (modified in place)
  * @returns The same frontmatter object with sanitized relationships
@@ -86,26 +106,7 @@ export function sanitizeRelationshipValue(
 export function sanitizeAllRelationships(
 	frontmatter: Record<string, unknown>
 ): Record<string, unknown> {
-	// List of all known relationship fields
-	const relationshipFields = [
-		"parent",
-		"depends_on",
-		"blocks",
-		"enables",
-		"affects",
-		"implements",
-		"implemented_by",
-		"supersedes",
-		"superseded_by",
-		"documents",
-		"documented_by",
-		"decided_by",
-		"previous_version",
-		"children",
-		"enabled_by",
-	];
-
-	for (const field of relationshipFields) {
+	for (const field of RELATIONSHIP_FIELDS) {
 		if (field in frontmatter) {
 			frontmatter[field] = sanitizeRelationshipValue(
 				frontmatter[field] as string | string[] | null | undefined

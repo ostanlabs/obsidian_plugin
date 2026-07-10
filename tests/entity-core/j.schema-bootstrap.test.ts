@@ -102,6 +102,103 @@ describe('J. validateSchema', () => {
     const errs = validateSchema({ entityTypes: [{ type: 'x' }, { type: 'x' }], relationships: [] });
     expect(errs.some((e) => /duplicate entity type "x"/.test(e))).toBe(true);
   });
+
+  // -- new schema-model fields: descriptions, validation policy, defaultCanvas --
+
+  it('flags settings.defaultCanvas that is not a string ending in ".canvas"', () => {
+    const base = { entityTypes: [], relationships: [] };
+    expect(validateSchema({ ...base, settings: { defaultCanvas: 'projects/Project.md' } })
+      .some((e) => /defaultCanvas/.test(e))).toBe(true);
+    expect(validateSchema({ ...base, settings: { defaultCanvas: 42 } })
+      .some((e) => /defaultCanvas/.test(e))).toBe(true);
+    expect(validateSchema({ ...base, settings: { defaultCanvas: 'projects/Project.canvas' } })
+      .some((e) => /defaultCanvas/.test(e))).toBe(false);
+    // absent → fine
+    expect(validateSchema({ ...base, settings: {} }).some((e) => /defaultCanvas/.test(e))).toBe(false);
+  });
+
+  it('flags non-string descriptions on entity types, fields, and relationships', () => {
+    const errs = validateSchema({
+      entityTypes: [{ type: 'task', description: 7, fields: [{ name: 'goal', kind: 'text', description: [] }] }],
+      relationships: [{
+        name: 'r', description: {}, pairs: [{ from: 'task', to: 'task', forward: 'f', reverse: 'g' }],
+      }],
+    });
+    expect(errs.some((e) => /entityTypes\[task\]\.description must be a string/.test(e))).toBe(true);
+    expect(errs.some((e) => /entityTypes\[task\]\.fields\[goal\]\.description must be a string/.test(e))).toBe(true);
+    expect(errs.some((e) => /relationships\[r\]\.description must be a string/.test(e))).toBe(true);
+  });
+
+  it('accepts string descriptions everywhere', () => {
+    const errs = validateSchema({
+      entityTypes: [{ type: 'task', description: 'a task', fields: [{ name: 'goal', kind: 'text', description: 'the goal' }] }],
+      relationships: [{
+        name: 'r', description: 'a rel', pairs: [{ from: 'task', to: 'task', forward: 'f', reverse: 'g' }],
+      }],
+    });
+    expect(errs).toEqual([]);
+  });
+
+  it('flags validation.requiredForTypes that is not an array or names unknown types', () => {
+    const rel = (validation: unknown) => ({
+      entityTypes: [{ type: 'task' }, { type: 'story' }, { type: 'milestone' }],
+      relationships: [{
+        name: 'hierarchy',
+        pairs: [
+          { from: 'task', to: 'story', forward: 'parent', reverse: 'children' },
+          { from: 'story', to: 'milestone', forward: 'parent', reverse: 'children' },
+        ],
+        validation,
+      }],
+    });
+    expect(validateSchema(rel({ requiredForTypes: 'task' }))
+      .some((e) => /requiredForTypes must be an array/.test(e))).toBe(true);
+    expect(validateSchema(rel({ requiredForTypes: ['ghost'] }))
+      .some((e) => /requiredForTypes has unknown entity type "ghost"/.test(e))).toBe(true);
+    // known type but not a "from" of any pair → flagged
+    expect(validateSchema(rel({ requiredForTypes: ['milestone'] }))
+      .some((e) => /"milestone" is not a "from" type of any pair/.test(e))).toBe(true);
+    // valid: both types appear as pair `from`s
+    expect(validateSchema(rel({ requiredForTypes: ['task', 'story'] }))).toEqual([]);
+  });
+
+  it('flags non-positive / non-integer fan-out limits', () => {
+    const rel = (validation: unknown) => ({
+      entityTypes: [{ type: 'document' }, { type: 'feature' }],
+      relationships: [{
+        name: 'documentation',
+        pairs: [{ from: 'document', to: 'feature', forward: 'documents', reverse: 'documented_by' }],
+        validation,
+      }],
+    });
+    expect(validateSchema(rel({ maxForwardTargets: 0 }))
+      .some((e) => /maxForwardTargets must be a positive integer/.test(e))).toBe(true);
+    expect(validateSchema(rel({ maxReverseTargets: -2 }))
+      .some((e) => /maxReverseTargets must be a positive integer/.test(e))).toBe(true);
+    expect(validateSchema(rel({ maxForwardTargets: 1.5 }))
+      .some((e) => /maxForwardTargets must be a positive integer/.test(e))).toBe(true);
+    expect(validateSchema(rel({ maxForwardTargets: '2' }))
+      .some((e) => /maxForwardTargets must be a positive integer/.test(e))).toBe(true);
+    expect(validateSchema(rel({ maxForwardTargets: 2, maxReverseTargets: 2 }))).toEqual([]);
+  });
+
+  it('flags a validation block that is not an object', () => {
+    const errs = validateSchema({
+      entityTypes: [{ type: 'task' }],
+      relationships: [{
+        name: 'r', pairs: [{ from: 'task', to: 'task', forward: 'f', reverse: 'g' }],
+        validation: ['nope'],
+      }],
+    });
+    expect(errs.some((e) => /relationships\[r\]\.validation must be an object/.test(e))).toBe(true);
+  });
+
+  it('still accepts the default schema with the new policy fields populated', () => {
+    // DEFAULT_SCHEMA now carries descriptions, validation blocks, emitWhenEmpty
+    // and settings.defaultCanvas — all must pass.
+    expect(validateSchema(DEFAULT_SCHEMA)).toEqual([]);
+    expect(DEFAULT_SCHEMA.settings.defaultCanvas).toBe('projects/Project.canvas');
+  });
 });
 
 describe('J. loadOrBootstrapSchema (may write)', () => {

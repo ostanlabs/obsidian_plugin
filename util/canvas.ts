@@ -46,10 +46,54 @@ export interface CanvasData {
 
 /**
  * Load canvas data from a .canvas file
+ *
+ * Resilient to freshly-created canvases:
+ * - Empty / whitespace-only files (Obsidian creates zero-byte .canvas files)
+ *   are treated as an empty canvas: `{ nodes: [], edges: [] }`.
+ * - Parsed objects missing `nodes`/`edges` (or with non-array values there)
+ *   have those keys normalized to empty arrays; other top-level keys are kept.
+ * - Non-empty content that is invalid JSON, or that parses to a non-object
+ *   (string/number/array/null), throws a descriptive Error naming the file.
+ *   We deliberately do NOT swallow this: replacing potentially-corrupt user
+ *   data with an empty canvas would let a later save overwrite their file.
  */
 export async function loadCanvasData(app: App, canvasFile: TFile): Promise<CanvasData> {
 	const content = await app.vault.read(canvasFile);
-	return JSON.parse(content) as CanvasData;
+
+	// A brand-new canvas file is zero bytes; treat it as a legitimate empty canvas.
+	if (content.trim().length === 0) {
+		return { nodes: [], edges: [] };
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(content);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		throw new Error(
+			`Canvas file "${canvasFile.path}" contains invalid JSON: ${reason}`
+		);
+	}
+
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error(
+			`Canvas file "${canvasFile.path}" is not a valid canvas: expected a JSON object, got ${
+				Array.isArray(parsed) ? "an array" : JSON.stringify(parsed)
+			}`
+		);
+	}
+
+	// Normalize missing/null/non-array nodes and edges while preserving any
+	// other top-level keys Obsidian may have written.
+	const data = parsed as Record<string, unknown>;
+	if (!Array.isArray(data.nodes)) {
+		data.nodes = [];
+	}
+	if (!Array.isArray(data.edges)) {
+		data.edges = [];
+	}
+
+	return data as unknown as CanvasData;
 }
 
 /**

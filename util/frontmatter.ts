@@ -2,6 +2,8 @@ import { App, TFile } from "obsidian";
 import YAML from "yaml";
 import { ItemFrontmatter, FeatureFrontmatter } from "../types";
 import { sanitizeAllRelationships } from "./sanitizeRelationships";
+import { DEFAULT_SCHEMA } from "../src/entity-core/default-schema";
+import { getEmitWhenEmptyFields } from "../src/entity-core/schema-derivation";
 
 /**
  * Parsed frontmatter with string index signature for dynamic access
@@ -330,8 +332,21 @@ export function updateFrontmatter(
  * emitted even when empty, preserving the plugin's long-standing contract.
  */
 export function createWithFrontmatter(body: string, frontmatter: Partial<ItemFrontmatter>): string {
-	// Fields that must appear in the block even when empty/undefined.
-	const alwaysInclude = ['parent', 'notion_page_id', 'created_by_plugin', 'depends_on'];
+	// Fields that must appear in the block even when empty/undefined. The
+	// relationship fields come from the schema (`emitWhenEmpty` on hierarchy and
+	// dependency → parent, depends_on); the rest are plugin bookkeeping keys
+	// that have no schema representation.
+	const alwaysInclude = [
+		...getEmitWhenEmptyFields(DEFAULT_SCHEMA),
+		'notion_page_id',
+		'created_by_plugin',
+	];
+	// Schema cardinality decides the empty placeholder: 'many' → [], 'one' → "".
+	const arrayCardinality = new Set(
+		DEFAULT_SCHEMA.relationships
+			.filter(r => r.cardinality.forward === 'many')
+			.flatMap(r => r.pairs.map(p => p.forward)),
+	);
 
 	const out: Record<string, unknown> = {};
 
@@ -350,7 +365,7 @@ export function createWithFrontmatter(body: string, frontmatter: Partial<ItemFro
 	// Guarantee the always-include fields exist even if absent from the input.
 	for (const key of alwaysInclude) {
 		if (!(key in out)) {
-			out[key] = key === 'depends_on' ? [] : "";
+			out[key] = arrayCardinality.has(key) ? [] : "";
 		}
 	}
 

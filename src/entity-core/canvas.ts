@@ -165,7 +165,24 @@ export class CanvasManager {
   private async readCanvas(canvasPath: CanvasPath): Promise<CanvasFile> {
     const absolutePath = this.pathResolver.toAbsolutePath(canvasPath);
     const content = await this.fs.readFile(absolutePath);
-    return JSON.parse(content) as CanvasFile;
+    // A zero-byte/blank .canvas is a legitimate fresh canvas (Obsidian creates
+    // empty files), not corruption — treat it as empty rather than crashing.
+    if (content.trim() === '') {
+      return { nodes: [], edges: [] } as CanvasFile;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch (e) {
+      throw new Error(`Canvas file "${canvasPath}" contains invalid JSON: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`Canvas file "${canvasPath}" is not a valid canvas: expected a JSON object`);
+    }
+    const canvas = parsed as CanvasFile;
+    if (!Array.isArray(canvas.nodes)) canvas.nodes = [];
+    if (!Array.isArray(canvas.edges)) canvas.edges = [];
+    return canvas;
   }
 
   private async writeCanvas(canvasPath: CanvasPath, canvas: CanvasFile): Promise<void> {

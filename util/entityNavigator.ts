@@ -36,7 +36,7 @@ import { EntityParser } from "../src/entity-core/parser.js";
 import { SchemaRegistry } from "../src/entity-core/schema-registry.js";
 import { DEFAULT_SCHEMA } from "../src/entity-core/default-schema.js";
 import { buildReverseRelationMap } from "../src/entity-core/schema-derivation.js";
-import type { EntityMetadata, RuntimeEntity } from "../src/entity-core/types.js";
+import type { EntityMetadata, RuntimeEntity, Schema } from "../src/entity-core/types.js";
 
 // ID patterns for entity types
 export const ID_PATTERNS: Record<string, RegExp> = {
@@ -92,19 +92,47 @@ export function isEntityId(id: string): boolean {
 
 /**
  * The relationship-shaped keys `EntityIndexEntry` captures as arrays. These are
- * the exact edge types fed into the ProjectIndex relationship graph.
+ * the exact edge types fed into the ProjectIndex relationship graph, DERIVED
+ * from the schema.
+ *
+ * Criterion: forward+reverse fields of every relationship whose cardinality is
+ * many↔many. The exclusions are semantic, not accidental:
+ *  - hierarchy (parent 'one' / children 'many') is NOT graph-edge state here —
+ *    parent rides `EntityMetadata.parent_id` and children queries go through
+ *    the ProjectIndex `by_parent` secondary index (see getParent/getChildren),
+ *    so feeding it into the edge graph would double-index it;
+ *  - supersession/versioning ('one'↔'one' scalar links) have no navigator
+ *    query and no `EntityIndexEntry` projection — the pre-derivation list
+ *    omitted them too.
+ * With DEFAULT_SCHEMA this yields exactly the previously hardcoded list
+ * (minus deprecated `enables`, re-added below as a legacy edge key).
+ *
+ * TODO(consolidate): move this derivation to src/entity-core/schema-derivation.ts
  */
-const ENTRY_RELATIONSHIP_FIELDS = [
-	"depends_on",
-	"implements",
-	"documents",
-	"affects",
-	"enables",
-	"implemented_by",
-	"documented_by",
-	"decided_by",
-	"blocks",
-] as const;
+function deriveManyToManyRelationshipFields(schema: Schema): string[] {
+	const fields: string[] = [];
+	for (const rel of schema.relationships) {
+		if (rel.cardinality.forward !== "many" || rel.cardinality.reverse !== "many") continue;
+		for (const p of rel.pairs) {
+			if (!fields.includes(p.forward)) fields.push(p.forward);
+			if (!fields.includes(p.reverse)) fields.push(p.reverse);
+		}
+	}
+	return fields;
+}
+
+/**
+ * Deprecated relationship keys that are NOT in the schema but still exist in
+ * legacy vault files and are load-bearing for the navigator: `enables` edges
+ * ride RuntimeEntity.passthrough and back getEnabledEntities() /
+ * getRelatedDecisions() and the EntityIndexEntry.enables projection. Kept as
+ * an explicit legacy list so the schema derivation stays clean.
+ */
+const LEGACY_ENTRY_RELATIONSHIP_FIELDS = ["enables"] as const;
+
+export function deriveEntryRelationshipFields(schema: Schema): string[] {
+	return [...deriveManyToManyRelationshipFields(schema), ...LEGACY_ENTRY_RELATIONSHIP_FIELDS];
+}
 
 /**
  * Read a relationship-shaped key: schema-recognized values live in
@@ -167,6 +195,8 @@ export class EntityIndex {
 	private parser: EntityParser;
 	/** field → inverse field, derived from the active schema (single source of truth). */
 	private inverseRelationMap: Record<string, string>;
+	/** The edge-type keys fed into the relationship graph, derived from the same schema. */
+	private entryRelationshipFields: string[];
 
 	constructor(app: App, settings: EntityNavigatorSettings, schema?: SchemaRegistry) {
 		this.app = app;
@@ -174,6 +204,7 @@ export class EntityIndex {
 		const registry = schema ?? new SchemaRegistry(DEFAULT_SCHEMA);
 		this.parser = new EntityParser(registry);
 		this.inverseRelationMap = buildReverseRelationMap(registry.getSchema());
+		this.entryRelationshipFields = deriveEntryRelationshipFields(registry.getSchema());
 		this.projectIndex = new ProjectIndex(this.inverseRelationMap);
 	}
 
@@ -313,7 +344,7 @@ export class EntityIndex {
 		const id = entity.id;
 		this.projectIndex.set(this.toMetadata(entity, file));
 		this.projectIndex.removeForwardRelationships(id);
-		for (const field of ENTRY_RELATIONSHIP_FIELDS) {
+		for (const field of this.entryRelationshipFields) {
 			for (const target of asIdArray(relationshipValue(entity, field))) {
 				if (target.length > 0) this.projectIndex.addRelationship(id, field, target);
 			}

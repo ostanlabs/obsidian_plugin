@@ -19,6 +19,7 @@ import {
 	cleanTransitiveDependencies,
 	detectAndBreakCycles,
 	sanitizeEntityFilesForYaml,
+	ORDERING_RELATIONSHIPS,
 } from "../util/relationshipReconciler";
 import { parseRawFrontmatter } from "../util/frontmatter";
 
@@ -234,6 +235,34 @@ describe("cleanTransitiveDependencies", () => {
 		const res = await cleanTransitiveDependencies(app, files);
 		expect(res.totalCleaned).toBe(0);
 		expect(store.get("T-001.md")!.depends_on).toEqual(["T-002", "T-003"]);
+	});
+});
+
+describe("ORDERING_RELATIONSHIPS (schema-derived)", () => {
+	it("derives exactly the previously hardcoded list from DEFAULT_SCHEMA", () => {
+		// sequencing + emitReverseRule=true ⇒ dependency only:
+		// forward depends_on → forwardDirection 'after', reverse blocks → 'before'.
+		expect(ORDERING_RELATIONSHIPS).toEqual([
+			{ field: "depends_on", direction: "after" },
+			{ field: "blocks", direction: "before" },
+		]);
+	});
+
+	it("excludes sequencing relationships without a reverse rule (supersession, versioning)", () => {
+		const fields = ORDERING_RELATIONSHIPS.map((r) => r.field);
+		for (const f of ["supersedes", "superseded_by", "previous_version", "next_version"]) {
+			expect(fields).not.toContain(f);
+		}
+	});
+
+	it("cycle breaker ignores supersedes chains (not an ordering field)", async () => {
+		const { app, files } = makeVault([
+			{ id: "DEC-001", type: "decision", title: "A", supersedes: "DEC-002" },
+			{ id: "DEC-002", type: "decision", title: "B", supersedes: "DEC-001" },
+		]);
+		const res = await detectAndBreakCycles(app, files, "decision");
+		expect(res.cyclesFound).toBe(0);
+		expect(res.edgesRemoved).toEqual([]);
 	});
 });
 
