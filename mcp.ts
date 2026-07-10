@@ -3039,8 +3039,14 @@ async function ensurePluginInstalled(): Promise<void> {
       return;
     }
 
+    // Obsidian's config folder is user-configurable (Vault#configDir), but this
+    // server runs OUTSIDE Obsidian and cannot query the API — vaults with a
+    // renamed config folder must set OBSIDIAN_CONFIG_DIR to match.
+    // eslint-disable-next-line obsidianmd/hardcoded-config-path
+    const configDir = process.env.OBSIDIAN_CONFIG_DIR || '.obsidian';
+
     // adapter is rooted at VAULT_PATH → vault-relative paths.
-    const pluginDir = `.obsidian/plugins/${manifest.id}`;
+    const pluginDir = `${configDir}/plugins/${manifest.id}`;
     const installedManifestPath = `${pluginDir}/manifest.json`;
     if (await adapter.exists(installedManifestPath)) {
       try {
@@ -3060,7 +3066,7 @@ async function ensurePluginInstalled(): Promise<void> {
 
     // Register in community-plugins.json so Obsidian enables it on next load
     // (preserving any other enabled plugins).
-    const communityPath = '.obsidian/community-plugins.json';
+    const communityPath = `${configDir}/community-plugins.json`;
     let enabled: string[] = [];
     if (await adapter.exists(communityPath)) {
       try {
