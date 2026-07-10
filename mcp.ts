@@ -931,7 +931,7 @@ Scaffold writes schema.json (the default schema), one folder per entity type, ar
             name: { type: 'string', description: 'Human-readable vault name (default: the directory basename).' },
             id: { type: 'string', description: 'Stable vault id (default: kebab slug of the name/basename; suffixed on collision).' },
             bootstrap: { type: 'string', enum: ['auto', 'always', 'never'], description: 'Scaffold/adopt behavior (default: auto).' },
-            installPlugin: { type: 'boolean', description: 'Also install the bundled Obsidian plugin into the new vault (scaffold only; default: false).' },
+            installPlugin: { type: 'boolean', description: 'Install the bundled Obsidian plugin into the new vault (scaffold only; default: true — pass false for a headless vault that will never be opened in Obsidian).' },
           },
           required: ['path'],
         },
@@ -1088,7 +1088,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         case 'add_vault': {
-          const { path: rawPath, name: vaultName, id: requestedId, bootstrap = 'auto', installPlugin = false } = args as {
+          // installPlugin defaults TRUE on scaffold — parity with the v1.9.0
+          // "first connect needs zero manual setup" startup bootstrap; a vault
+          // scaffolded via add_vault should be Obsidian-ready the same way.
+          const { path: rawPath, name: vaultName, id: requestedId, bootstrap = 'auto', installPlugin = true } = args as {
             path: string;
             name?: string;
             id?: string;
@@ -3225,17 +3228,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   const now = new Date().toISOString();
                   const typeDef = eng.schema.getEntityType(type);
 
-                  // Resolve cross-references in payload
-                  const resolvedPayload = { ...payload };
-                  for (const [key, value] of Object.entries(resolvedPayload)) {
+                  // Resolve {{client_id}} cross-references DEEPLY — refs live
+                  // inside the `relationships` wrapper (and can be array
+                  // members), not just at the top level; a shallow walk wrote
+                  // literal "{{ms}}" into frontmatter. Unknown refs FAIL the
+                  // op — silently passing the placeholder through corrupts the
+                  // entity file.
+                  const resolveRefs = (value: unknown): unknown => {
                     if (typeof value === 'string' && value.startsWith('{{') && value.endsWith('}}')) {
                       const refClientId = value.slice(2, -2);
                       const refId = clientIdMap.get(refClientId);
-                      if (refId) {
-                        resolvedPayload[key] = refId;
+                      if (!refId) {
+                        throw new Error(
+                          `Unknown client_id reference "${value}" — it must match the client_id of an EARLIER create op in this batch.`
+                        );
                       }
+                      return refId;
                     }
-                  }
+                    if (Array.isArray(value)) return value.map(resolveRefs);
+                    if (value && typeof value === 'object') {
+                      return Object.fromEntries(
+                        Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, resolveRefs(v)])
+                      );
+                    }
+                    return value;
+                  };
+                  const resolvedPayload = resolveRefs(payload) as Record<string, unknown>;
 
                   const { workstream, status, relationships, ...customFields } = resolvedPayload;
 

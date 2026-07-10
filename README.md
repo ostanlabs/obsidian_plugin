@@ -162,7 +162,9 @@ MCP client:
 
 1. `add_vault {"path": "/Users/you/Obsidian/Projects/MyProject", "bootstrap": "auto"}`
    — an empty/missing directory is **scaffolded** (schema.json, one folder per
-   entity type, `archive/`, `workspaces.json`, default canvas); an existing
+   entity type, `archive/`, `workspaces.json`, default canvas, and the bundled
+   Obsidian plugin installed into `.obsidian/plugins/` — pass
+   `installPlugin: false` for a headless vault); an existing
    vault is **adopted** with its real layout detected (top-level vs `entities/`
    type folders, archive style). Adoption never creates files beside your data.
 2. `list_vaults` — shows the registered ids agents pass as the `vault` argument.

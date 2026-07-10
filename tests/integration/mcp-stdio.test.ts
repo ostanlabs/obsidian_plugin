@@ -1138,6 +1138,45 @@ describe('mcp.ts error/edge paths — read-mostly fixture', () => {
       expect(r.text).toMatch(/atomic mode/);
       expect(r.text).toMatch(/Rolled back/);
     });
+
+    test('batch {{client_id}} refs resolve DEEPLY — inside the relationships wrapper, not just top-level keys', async () => {
+      // Regression: the shallow resolver wrote the literal "{{ms}}" string
+      // into frontmatter when the ref sat under payload.relationships.
+      const r = await c.callJson('entities', {
+        action: 'batch',
+        ops: [
+          { client_id: 'st', op: 'create', type: 'story', payload: { title: 'Ref target story', priority: 'High' } },
+          {
+            client_id: 'tk',
+            op: 'create',
+            type: 'task',
+            payload: { title: 'Nested ref task', goal: 'g', relationships: { parent: '{{st}}' } },
+          },
+        ],
+      });
+      expect(r.summary.failed).toBe(0);
+      const storyId = r.results[0].id;
+      const taskId = r.results[1].id;
+      const got = await c.callJson('entities', { action: 'get', ids: [taskId] });
+      expect(got.entities[0].relationships.parent).toBe(storyId);
+      expect(JSON.stringify(got.entities[0])).not.toContain('{{');
+    });
+
+    test('batch unknown {{ref}} FAILS that op instead of writing the literal placeholder', async () => {
+      const r = await c.callJson('entities', {
+        action: 'batch',
+        ops: [
+          {
+            client_id: 'bad',
+            op: 'create',
+            type: 'task',
+            payload: { title: 'Dangling ref', goal: 'g', relationships: { parent: '{{nope}}' } },
+          },
+        ],
+      });
+      expect(r.results[0].success).toBe(false);
+      expect(r.results[0].error).toMatch(/Unknown client_id reference "\{\{nope\}\}"/);
+    });
   });
 
   describe('tool dispatch default', () => {
