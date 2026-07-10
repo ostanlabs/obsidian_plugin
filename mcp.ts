@@ -59,6 +59,8 @@ import {
   diffSchemas,
   hasStructuralChanges,
   computeSchemaVersionBump,
+  readAppliedSchema,
+  writeAppliedSchema,
 } from './src/mcp/reconcile.js';
 import {
   buildVaultEngine,
@@ -417,18 +419,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             schema: { type: 'object', description: 'Full Schema object (entityTypes, relationships, settings, workstreams).' },
             relationships: { type: 'array', description: 'Relationships array to merge into the current schema (relationships-only edit).' },
             dryRun: { type: 'boolean', description: 'Validate and diff only: return the reconcile plan (entities to archive, folders, collisions, dangling refs) without writing anything.', default: false },
+            collisionPolicy: { type: 'string', enum: ['refuse', 'suffix'], description: 'When an archive target filename already exists: "refuse" (default) aborts the whole apply with nothing written; "suffix" archives the colliding file as <name>_dup-N.md instead. Run dryRun first — the plan lists every collision.', default: 'refuse' },
           },
           required: ['vault'],
         },
       },
       {
         name: 'reconcile_vault',
-        description: 'Catch the vault\'s folders/entities up to a hand-edited <vault>/schema.json. Diffs the last-applied (active) schema against the schema.json currently on disk and reconciles the difference transactionally (same machinery as set_schema): removing a type ARCHIVES its entities into archive/<old-folder>/ (copy-then-delete — entity files are never destroyed), folder renames move files with collision checks, and added relationships are inverse-backfilled. Returns { upToDate: true } when the on-disk schema already matches the active one; an invalid on-disk schema.json is rejected with its validation errors (the last-good schema stays active). Pass dryRun: true to preview the exact change plan (folders to create, the entity ids to be archived, filename collisions, dangling refs left on survivors) WITHOUT writing anything. CAUTION: reconciling a vault currently open in Obsidian is best-effort — archival and folder renames change file inodes, so the plugin may miss those renames until Obsidian reloads.',
+        description: 'Catch the vault\'s folders/entities up to a hand-edited <vault>/schema.json. Diffs the persisted last-reconciled baseline (.mcp-applied-schema.json — survives server restarts, so edits made while the server was down are caught too) against the schema.json currently on disk and reconciles the difference transactionally (same machinery as set_schema): removing a type ARCHIVES its entities into archive/<old-folder>/ (copy-then-delete — entity files are never destroyed), folder renames move files with collision checks, and added relationships are inverse-backfilled. Returns { upToDate: true } when the on-disk schema already matches the active one; an invalid on-disk schema.json is rejected with its validation errors (the last-good schema stays active). Pass dryRun: true to preview the exact change plan (folders to create, the entity ids to be archived, filename collisions, dangling refs left on survivors) WITHOUT writing anything. CAUTION: reconciling a vault currently open in Obsidian is best-effort — archival and folder renames change file inodes, so the plugin may miss those renames until Obsidian reloads.',
         inputSchema: {
           type: 'object',
           properties: {
             vault: vaultRequired,
             dryRun: { type: 'boolean', description: 'Return the reconcile plan without writing anything.', default: false },
+            collisionPolicy: { type: 'string', enum: ['refuse', 'suffix'], description: 'When an archive target filename already exists: "refuse" (default) aborts the whole apply with nothing written; "suffix" archives the colliding file as <name>_dup-N.md instead. Run dryRun first — the plan lists every collision.', default: 'refuse' },
           },
           required: ['vault'],
         },
@@ -1129,6 +1133,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               throw new Error(`Scaffold schema failed validation (nothing written): ${schemaErrs.join('; ')}`);
             }
             await vfs.writeFile(SCHEMA_FILENAME, serializeSchema(schema));
+            // Scaffolded folders match this schema by construction — it is the
+            // vault's initial reconcile baseline.
+            await writeAppliedSchema(vfs, schema);
             for (const t of schema.entityTypes) {
               const folder = layout.entitiesFolder ? `${layout.entitiesFolder}/${t.folder}` : t.folder;
               await vfs.createDir(folder, { recursive: true });
@@ -1626,10 +1633,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // hot-swaps the engine and rescans; we must NOT write the file a second
         // time around it. Non-structural edits keep the direct fast path (write
         // + applySchema) with the SAME schemaVersion bump rule as the reconciler.
-        const { schema: fullSchema, relationships, dryRun = false } = args as {
+        const { schema: fullSchema, relationships, dryRun = false, collisionPolicy = 'refuse' } = args as {
           schema?: Schema;
           relationships?: unknown[];
           dryRun?: boolean;
+          collisionPolicy?: 'refuse' | 'suffix';
         };
         let candidate: Schema;
         if (fullSchema) {
@@ -1678,8 +1686,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             });
           }
           // eng.fs is rooted at the vault → write the RELATIVE filename.
+          // The applied-schema baseline follows every save (even non-structural
+          // ones) so reconcile_vault's restart-safe diff never reports stale
+          // description/field edits as drift.
           const bumped: Schema = { ...candidate, schemaVersion: version.to };
           await eng.fs.writeFile(SCHEMA_FILENAME, serializeSchema(bumped));
+          await writeAppliedSchema(eng.fs, bumped);
           console.error(`set_schema: wrote ${schemaPath} (schemaVersion ${version.from} -> ${version.to})`);
           // Hot-reload the in-flight engine AND invalidate the registry cache so
           // the next engine() rebuilds from the file (both stay consistent).
@@ -1708,7 +1720,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // writes the bumped schema.json + applySchema + rescan itself.
         // The plan is built from eng.index — rescan first so it sees every file.
         await eng.scanIndex();
-        const outcome = await reconcileVault(eng, eng.activeSchema, candidate, { dryRun });
+        const outcome = await reconcileVault(eng, eng.activeSchema, candidate, { dryRun, collisionPolicy });
         if (dryRun) {
           return jsonResult({
             vault: eng.entry.id,
@@ -1750,25 +1762,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'reconcile_vault': {
-        // Catch-up after a hand-edited schema.json (spec §9.1): old = the
-        // engine's ACTIVE (last-applied) schema, new = the file on disk.
-        const { dryRun = false } = args as { dryRun?: boolean };
+        // Catch-up after a hand-edited schema.json (spec §9.1): new = the file
+        // on disk; old = the PERSISTED applied-schema baseline (falling back to
+        // the engine's active schema for vaults that predate the baseline).
+        // The baseline — not activeSchema — is what makes this restart-safe: a
+        // schema.json edited while the server was DOWN is loaded as the active
+        // schema at boot, so an active-vs-disk diff would always be empty and
+        // the edit's folder/archival consequences would silently never run.
+        const { dryRun = false, collisionPolicy = 'refuse' } = args as {
+          dryRun?: boolean;
+          collisionPolicy?: 'refuse' | 'suffix';
+        };
         const loaded = await loadSchemaOrDefault(eng.fs, '');
         if (loaded.errors.length > 0) {
           // Present-but-invalid file → loud SchemaInvalid with the load errors;
           // the last-good (active) schema stays in force.
           throw new SchemaInvalid(loaded.errors);
         }
-        if (JSON.stringify(loaded.schema) === JSON.stringify(eng.activeSchema)) {
+        const baseline = (await readAppliedSchema(eng.fs)) ?? eng.activeSchema;
+        if (JSON.stringify(loaded.schema) === JSON.stringify(baseline)) {
           return jsonResult({
             vault: eng.entry.id,
             upToDate: true,
-            schemaVersion: eng.activeSchema.schemaVersion,
+            schemaVersion: loaded.schema.schemaVersion,
           });
         }
         // The plan is built from eng.index — rescan first so it sees every file.
         await eng.scanIndex();
-        const outcome = await reconcileVault(eng, eng.activeSchema, loaded.schema, { dryRun });
+        const outcome = await reconcileVault(eng, baseline, loaded.schema, { dryRun, collisionPolicy });
         if (dryRun) {
           return jsonResult({
             vault: eng.entry.id,
@@ -2254,7 +2275,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'read_docs': {
-        const { path, workspace } = args as { path: string; workspace?: string };
+        const { path, workspace } = args as { path?: string; workspace?: string };
+        if (typeof path !== 'string' || path.length === 0) {
+          // Guard before nodePath.resolve — a missing path otherwise surfaces
+          // as a raw TypeError instead of an actionable validation error.
+          return {
+            content: [{ type: 'text', text: 'read_docs requires a "path" argument (vault-relative, or workspace-relative when "workspace" is given).' }],
+            isError: true,
+          };
+        }
 
         if (workspace) {
           // Workspace-scoped read: confineExisting at ACCESS time (TOCTOU) +

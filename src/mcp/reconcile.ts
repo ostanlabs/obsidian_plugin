@@ -70,6 +70,12 @@ export const RECONCILE_JOURNAL_FILENAME = '.mcp-reconcile-journal.json';
 /** Tombstone index of removed-type entities (validation/reconcile can still
  * resolve archived ids of types the active schema no longer knows). */
 export const TOMBSTONES_FILENAME = '.mcp-tombstones.json';
+/** The last schema that was APPLIED with reconciliation semantics (folders
+ * created, removed types archived). reconcile_vault diffs the on-disk
+ * schema.json against THIS baseline — not against the engine's active schema,
+ * which at boot IS the on-disk file, making hand-edits-while-down invisible
+ * (the restart-blind catch-up gap found at the W12 acceptance gate). */
+export const APPLIED_SCHEMA_FILENAME = '.mcp-applied-schema.json';
 
 /** A lock older than this is presumed abandoned and taken over (mirrors
  * vault-registry's config lock). */
@@ -273,6 +279,31 @@ async function releaseVaultLock(fs: FileSystem): Promise<void> {
 // =============================================================================
 
 /** Read the per-vault tombstone index; [] when absent or unreadable. */
+/** The persisted reconcile baseline, or null when absent/corrupt (a corrupt
+ * baseline degrades to the pre-baseline behavior: diff against the active
+ * schema — never blocks reconciliation). */
+export async function readAppliedSchema(fs: FileSystem): Promise<Schema | null> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(APPLIED_SCHEMA_FILENAME);
+  } catch {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Schema) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the reconcile baseline. Every path that applies a schema with its
+ * folder consequences settled must call this: the reconciler's commit (below),
+ * set_schema's non-structural fast path, and add_vault's scaffold. */
+export async function writeAppliedSchema(fs: FileSystem, schema: Schema): Promise<void> {
+  await fs.writeFile(APPLIED_SCHEMA_FILENAME, JSON.stringify(schema, null, 2) + '\n');
+}
+
 export async function readTombstones(fs: FileSystem): Promise<TombstoneEntry[]> {
   let raw: string;
   try {
@@ -382,6 +413,13 @@ export async function buildReconcilePlan(
     const archiveDir = eng.entry.archiveFolder
       ? `${eng.entry.archiveFolder}/${oldDef.folder}`
       : oldDef.folder;
+    // Enumerate from the index AND from the OLD type folder on disk. The disk
+    // scan is load-bearing for the restart catch-up path: a freshly booted
+    // engine's ACTIVE schema (= the hand-edited disk file) no longer names the
+    // removed type, so scanIndex never visited its folder and the index knows
+    // none of its entities. Vault files reflect the OLD (baseline) schema —
+    // enumerate them where that schema says they live.
+    const seenSources = new Set<string>();
     for (const meta of eng.index.getByType(type)) {
       if (meta.archived) continue;
       // Target keeps the actual on-disk filename (archival never renames), only
@@ -392,7 +430,34 @@ export async function buildReconcilePlan(
         sourcePath: meta.vault_path,
         targetPath: `${archiveDir}/${basename(meta.vault_path)}`,
       });
+      seenSources.add(meta.vault_path);
       removedIds.add(meta.id);
+    }
+    const oldTypeFolder = oldResolver.getTypeFolderPath(type);
+    let diskEntries: { name: string; path: string; isDirectory: boolean }[] = [];
+    try {
+      diskEntries = await fs.readDir(oldTypeFolder);
+    } catch {
+      // Folder absent (no entities of this type) — nothing to add.
+    }
+    for (const entry of diskEntries) {
+      if (entry.isDirectory || !entry.name.endsWith('.md') || seenSources.has(entry.path)) continue;
+      let raw: string;
+      try {
+        raw = await fs.readFile(entry.path);
+      } catch {
+        continue;
+      }
+      const front = parseFrontmatter(raw);
+      const id = front?.id;
+      if (typeof id !== 'string' || front?.archived === true) continue;
+      entitiesToArchive.push({
+        id: id as EntityId,
+        type,
+        sourcePath: entry.path,
+        targetPath: `${archiveDir}/${entry.name}`,
+      });
+      removedIds.add(id as EntityId);
     }
   }
 
@@ -600,7 +665,10 @@ async function completeFromJournal(
   }
 
   // (6) Write the bumped schema.json (idempotent bytes) and hot-swap the engine.
+  // The applied-schema baseline is written alongside: this schema's folder
+  // consequences are now settled, so it becomes the reconcile reference point.
   await fs.writeFile(SCHEMA_FILENAME, serializeSchema(journal.newSchema));
+  await writeAppliedSchema(fs, journal.newSchema);
   eng.applySchema(journal.newSchema);
   await eng.scanIndex();
 

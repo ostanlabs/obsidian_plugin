@@ -2502,3 +2502,107 @@ describe('mcp.ts schema reconciliation: set_schema dryRun/apply + reconcile_vaul
     expect(ok.upToDate).toBe(true);
   });
 });
+
+describe('reconcile_vault restart-safety + collisionPolicy — W12 gate follow-ups', () => {
+  let vault: string;
+
+  function withoutType(schema: any, type: string): any {
+    const s = JSON.parse(JSON.stringify(schema));
+    s.entityTypes = s.entityTypes.filter((t: any) => t.type !== type);
+    s.relationships = s.relationships.filter((r: any) =>
+      r.pairs.every((p: any) => p.from !== type && p.to !== type),
+    );
+    return s;
+  }
+
+  beforeEach(() => {
+    vault = makeVault(FIXTURE);
+  });
+
+  afterEach(() => {
+    if (vault) fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test('a schema.json hand-edited while the server is DOWN is caught by the next server (persisted baseline)', async () => {
+    // Session 1: any successful save establishes the applied-schema baseline.
+    const c1 = new McpClient(vault);
+    await c1.start();
+    const gs = await c1.callJson('get_schema');
+    const tweak = JSON.parse(JSON.stringify(gs.schema));
+    tweak.settings.defaultCanvas = 'projects/Restart.canvas';
+    await c1.callJson('set_schema', { schema: tweak });
+    await c1.stop();
+    expect(fs.existsSync(path.join(vault, '.mcp-applied-schema.json'))).toBe(true);
+
+    // Server DOWN: hand-edit schema.json — remove the 'feature' type.
+    const onDisk = JSON.parse(fs.readFileSync(path.join(vault, 'schema.json'), 'utf-8'));
+    fs.writeFileSync(
+      path.join(vault, 'schema.json'),
+      JSON.stringify(withoutType(onDisk, 'feature'), null, 2) + '\n',
+      'utf-8',
+    );
+
+    // Session 2 (fresh process): the on-disk file IS the active schema now, so
+    // an active-vs-disk diff would be empty — the persisted baseline is what
+    // makes the catch-up see the removal.
+    const c2 = new McpClient(vault);
+    await c2.start();
+    try {
+      const r = await c2.callJson('reconcile_vault', {});
+      expect(r.upToDate).toBe(false);
+      expect(r.applied).toBe(true);
+      expect(r.typesRemoved).toEqual(['feature']);
+      expect(r.archived).toEqual(['F-001']);
+      expect(fs.existsSync(path.join(vault, 'archive', 'features', 'F-001_login.md'))).toBe(true);
+      expect(fs.existsSync(path.join(vault, 'features'))).toBe(false);
+      // Baseline advanced: a second catch-up is a no-op.
+      const again = await c2.callJson('reconcile_vault', {});
+      expect(again.upToDate).toBe(true);
+    } finally {
+      await c2.stop();
+    }
+  });
+
+  test('set_schema collisionPolicy "suffix" archives a colliding file as _dup-N instead of refusing', async () => {
+    // Pre-place the archive target the removal will want.
+    fs.mkdirSync(path.join(vault, 'archive', 'features'), { recursive: true });
+    fs.writeFileSync(path.join(vault, 'archive', 'features', 'F-001_login.md'), 'squatter\n', 'utf-8');
+
+    const c = new McpClient(vault);
+    await c.start();
+    try {
+      const gs = await c.callJson('get_schema');
+      const candidate = withoutType(gs.schema, 'feature');
+
+      // Default policy refuses (data protected, nothing written)...
+      const refused = await c.call('set_schema', { schema: candidate });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toMatch(/Reconcile refused/);
+      expect(fs.existsSync(path.join(vault, 'features', 'F-001_login.md'))).toBe(true);
+      expect(fs.readFileSync(path.join(vault, 'archive', 'features', 'F-001_login.md'), 'utf-8')).toBe('squatter\n');
+
+      // ...and 'suffix' resolves it: the entity lands as _dup-1, squatter untouched.
+      const r = await c.callJson('set_schema', { schema: candidate, collisionPolicy: 'suffix' });
+      expect(r.saved).toBe(true);
+      expect(r.reconciled.archived).toEqual(['F-001']);
+      expect(fs.existsSync(path.join(vault, 'archive', 'features', 'F-001_login_dup-1.md'))).toBe(true);
+      expect(fs.readFileSync(path.join(vault, 'archive', 'features', 'F-001_login.md'), 'utf-8')).toBe('squatter\n');
+      expect(fs.existsSync(path.join(vault, 'features'))).toBe(false);
+    } finally {
+      await c.stop();
+    }
+  });
+
+  test('read_docs without "path" returns a clean validation error, not a TypeError', async () => {
+    const c = new McpClient(vault);
+    await c.start();
+    try {
+      const r = await c.call('read_docs', {});
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/read_docs requires a "path" argument/);
+      expect(r.text).not.toMatch(/TypeError/);
+    } finally {
+      await c.stop();
+    }
+  });
+});

@@ -22,6 +22,7 @@ import {
   hasStructuralChanges,
   computeSchemaVersionBump,
   readTombstones,
+  readAppliedSchema,
   RECONCILE_LOCK_FILENAME,
   RECONCILE_JOURNAL_FILENAME,
   TOMBSTONES_FILENAME,
@@ -432,6 +433,23 @@ describe('reconcileVault — apply (type removal)', () => {
     expect(g1.schemaVersionAtRemoval).toBe(1);
     expect(typeof g1.ts).toBe('string');
     expect(result.tombstoned.sort()).toEqual(['G-001', 'G-002']);
+  });
+
+  it('persists the applied-schema baseline on apply (restart-safe reconcile_vault diffs)', async () => {
+    const { fs } = await applyRemoval();
+    const baseline = await readAppliedSchema(fs);
+    expect(baseline).not.toBeNull();
+    expect(baseline!.entityTypes.map((t) => t.type)).toEqual(['widget']);
+    expect(baseline!.schemaVersion).toBe(2);
+    // Baseline matches the written schema.json exactly — a restarted server
+    // diffing disk vs baseline sees no phantom drift.
+    const disk = JSON.parse(await fs.readFile('schema.json'));
+    expect(JSON.stringify(baseline)).toBe(JSON.stringify(disk));
+  });
+
+  it('readAppliedSchema returns null when no baseline exists (pre-baseline vaults degrade gracefully)', async () => {
+    const fs = memFs(SCHEMA_V1, removalVaultFiles());
+    expect(await readAppliedSchema(fs)).toBeNull();
   });
 
   it('writes the bumped schema.json, hot-swaps the engine, and clears journal + lock', async () => {
