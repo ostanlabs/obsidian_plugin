@@ -19,6 +19,7 @@ import {
 } from './types.js';
 import type { SchemaRegistry } from './schema-registry.js';
 import type { PathResolver } from './path-resolver.js';
+import { parse as parseYaml } from 'yaml';
 
 export class IDAllocator {
   constructor(
@@ -136,9 +137,10 @@ export class IDAllocator {
 
           reassigned.push(newId);
 
-          // TODO: Update all inbound references to this ID
-          // This requires scanning all files and replacing old ID with new ID
-          // in relationship fields. Deferred for now as it's complex.
+          // Inbound-reference rewrite (§5.3): every relationship-field
+          // occurrence of the old id follows the reassigned copy — in the
+          // entity files and in the index relationship graph.
+          await this.rewriteInboundReferences(fs, id, newId);
         } catch (error) {
           console.error(`Failed to repair duplicate ${id} at ${path}:`, error);
         }
@@ -147,6 +149,144 @@ export class IDAllocator {
 
     return reassigned;
   }
+
+  /** Field names (forward + reverse) of every relationship in the schema. */
+  private relationshipFieldNames(): Set<string> {
+    const fields = new Set<string>();
+    for (const rel of this.schema.getAllRelationships()) {
+      for (const pair of rel.pairs) {
+        fields.add(pair.forward);
+        fields.add(pair.reverse);
+      }
+    }
+    return fields;
+  }
+
+  /**
+   * Rewrite every relationship-field reference to `oldId` across the vault:
+   * textually in the frontmatter (scalar, block-list and inline-array shapes;
+   * formatting preserved) and in the index relationship graph. Only schema
+   * relationship fields are touched — id mentions in titles, vault_path or
+   * body prose stay as-is. Candidate files come from the index.
+   */
+  private async rewriteInboundReferences(
+    fs: FileSystem,
+    oldId: EntityId,
+    newId: EntityId
+  ): Promise<void> {
+    const relFields = this.relationshipFieldNames();
+
+    const paths = new Set<string>();
+    for (const entityId of this.index.getAllIds(true)) {
+      const p = this.index.getPathById(entityId);
+      if (p) paths.add(p);
+    }
+    // getPathById surfaces one path per id — add the collision set explicitly
+    // so both copies of a duplicated id are swept.
+    for (const group of this.index.findDuplicateIds()) {
+      for (const p of group.paths) paths.add(p);
+    }
+
+    for (const path of paths) {
+      let content: string;
+      try {
+        content = await fs.readFile(path);
+      } catch {
+        continue; // stale index entry — nothing to rewrite
+      }
+      const rewritten = rewriteRelationshipFields(content, relFields, oldId, newId);
+      if (rewritten === null) continue;
+      await fs.writeFile(path, rewritten);
+      this.reindexRelationships(rewritten, relFields);
+    }
+  }
+
+  /**
+   * Refresh the index graph for a rewritten entity: drop its forward edges and
+   * re-add them from the updated frontmatter (mirrors scanIndex). Guarded at
+   * runtime because the test harness index only implements the read side of
+   * the EntityIndex seam.
+   */
+  private reindexRelationships(content: string, relFields: Set<string>): void {
+    if (
+      typeof this.index.removeForwardRelationships !== 'function' ||
+      typeof this.index.addRelationship !== 'function'
+    ) {
+      return;
+    }
+    const fm = parseFrontmatter(content);
+    const entityId = fm?.id;
+    if (typeof entityId !== 'string') return;
+
+    this.index.removeForwardRelationships(entityId);
+    for (const field of relFields) {
+      const value = fm?.[field];
+      if (value === undefined || value === null) continue;
+      const targets = Array.isArray(value) ? value : [value];
+      for (const target of targets) {
+        if (typeof target === 'string') {
+          this.index.addRelationship(entityId, field, target);
+        }
+      }
+    }
+  }
+}
+
+/** Parse the YAML frontmatter block, or null when absent/invalid. */
+function parseFrontmatter(content: string): Record<string, unknown> | null {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match) return null;
+  try {
+    const fm = parseYaml(match[1]);
+    return fm && typeof fm === 'object' ? (fm as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `id` as a whole-token regex — never matches inside longer ids (S-035 ∉ S-0355). */
+function idToken(id: string): RegExp {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![A-Za-z0-9_-])${escaped}(?![A-Za-z0-9_-])`, 'g');
+}
+
+/**
+ * Textually rewrite `oldId` → `newId` inside relationship-field VALUES of the
+ * frontmatter block only: scalar (`field: ID`), inline array (`field: [ID, …]`)
+ * and block-list items (`- ID`) under a relationship key. Everything else —
+ * other fields, the `id:` line, the body — is untouched, so unaffected files
+ * stay byte-identical. Returns null when nothing changed.
+ */
+function rewriteRelationshipFields(
+  content: string,
+  relFields: Set<string>,
+  oldId: string,
+  newId: string
+): string | null {
+  const match = content.match(/^---\r?\n([\s\S]*?\r?\n)---/);
+  if (!match) return null;
+  const fmBlock = match[1];
+  const token = idToken(oldId);
+
+  let inRelField = false;
+  let changed = false;
+  const lines = fmBlock.split('\n').map((line) => {
+    const key = line.match(/^([A-Za-z0-9_-]+):/);
+    if (key) inRelField = relFields.has(key[1]);
+    const isListItem = !key && /^\s*-\s/.test(line);
+    if (!inRelField || (!key && !isListItem)) return line;
+
+    // Only the value side of a key line is eligible (key names are id-free anyway).
+    const value = key ? line.slice(key[0].length) : line;
+    const next = value.replace(token, newId);
+    if (next === value) return line;
+    changed = true;
+    return key ? key[0] + next : next;
+  });
+  if (!changed) return null;
+
+  const openLen = match[0].length - fmBlock.length - 3; // length of the opening '---\n'
+  return content.slice(0, openLen) + lines.join('\n') + content.slice(openLen + fmBlock.length);
 }
 
 /** Extract entity type from id prefix (schema-driven). */

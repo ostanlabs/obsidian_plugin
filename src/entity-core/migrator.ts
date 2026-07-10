@@ -67,9 +67,12 @@ export class SchemaMigrator {
   constructor(
     private readonly fs: FileSystem,
     private readonly vaultPath: string,
-    private readonly pathResolver?: PathResolver
+    private readonly pathResolver?: PathResolver,
+    schema?: SchemaRegistry
   ) {
-    this.schema = new SchemaRegistry(DEFAULT_SCHEMA);
+    // Injected by the facade so migrations honor a custom vault schema (§5.3);
+    // defaults preserve the pre-injection behavior for existing callers.
+    this.schema = schema ?? new SchemaRegistry(DEFAULT_SCHEMA);
   }
 
   /**

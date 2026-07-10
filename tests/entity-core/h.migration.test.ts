@@ -13,8 +13,9 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { SchemaMigrator, SchemaRegistry, PathResolver, DEFAULT_SCHEMA } from '../../src/entity-core/index.js';
+import type { Schema } from '../../src/entity-core/types.js';
 import type { PathResolverConfig } from '../../src/entity-core/path-resolver.js';
-import type { InMemoryFileSystem } from './harness/in-memory-fs.js';
+import { InMemoryFileSystem } from './harness/in-memory-fs.js';
 import { loadFixtureFs, VAULT_ROOT } from './harness/fixture-vault.js';
 
 const CONFIG: PathResolverConfig = {
@@ -158,5 +159,88 @@ describe('H. Migration v0→v1 (AgentPlatform acceptance)', () => {
       expect(second.entitiesModified).toBe(0);
       expect(second.changes).toHaveLength(0);
     });
+  });
+});
+
+describe('H. SchemaMigrator — injected schema (spec §5.3, work item W1)', () => {
+  /** Minimal 2-type schema unknown to DEFAULT_SCHEMA (widget/gadget). */
+  const TOY_SCHEMA: Schema = {
+    schemaVersion: 1,
+    settings: { idPadding: 3, archiveLayout: 'by-type', filenamePattern: '{id}_{title}' },
+    entityTypes: [
+      {
+        type: 'widget',
+        label: 'Widget',
+        idPrefix: 'W',
+        folder: 'widgets',
+        statuses: ['New', 'Done'],
+        defaultStatus: 'New',
+        fields: [],
+        canvas: { width: 400, height: 200, color: '1' },
+      },
+      {
+        type: 'gadget',
+        label: 'Gadget',
+        idPrefix: 'G',
+        folder: 'gadgets',
+        statuses: ['Open', 'Closed'],
+        defaultStatus: 'Open',
+        fields: [],
+        canvas: { width: 400, height: 200, color: '2' },
+      },
+    ],
+    relationships: [
+      {
+        name: 'pairing',
+        label: 'Pairing',
+        pairs: [{ from: 'widget', to: 'gadget', forward: 'pairs_with', reverse: 'paired_by' }],
+        cardinality: { forward: 'many', reverse: 'many' },
+        canvas: { color: '1', style: 'solid' },
+        graph: { transitiveReduction: false, cyclePrevention: false },
+      },
+    ],
+    workstreams: {
+      values: ['core'],
+      default: 'core',
+      normalization: {},
+      canvas: { core: { color: '1' } },
+    },
+  };
+
+  const TOY_FILES: Record<string, string> = {
+    // Missing status → toy default 'New' (NOT the default-schema vocabulary).
+    '/vault/entities/widgets/W-001_a.md': '---\nid: W-001\ntype: widget\ntitle: A\n---\nBody\n',
+    // Invalid status → remapped to the toy default 'Open'.
+    '/vault/entities/gadgets/G-001_b.md':
+      '---\nid: G-001\ntype: gadget\ntitle: B\nstatus: Bogus\n---\nBody\n',
+    // Quarter-nested archive → consolidated using the INJECTED type folder.
+    '/vault/archive/2026-Q1/gadgets/G-002_old.md':
+      '---\nid: G-002\ntype: gadget\ntitle: Old\nstatus: Closed\narchived: true\n---\nBody\n',
+  };
+
+  it('respects an injected 2-type toy schema (statuses + archive folders)', async () => {
+    const fs = new InMemoryFileSystem(TOY_FILES);
+    const reg = new SchemaRegistry(TOY_SCHEMA);
+    const resolver = new PathResolver(reg, CONFIG);
+    const m = new SchemaMigrator(fs, VAULT_ROOT, resolver, reg);
+
+    const result = await m.migrate({ targetVersion: 1 });
+    expect(result.success).toBe(true);
+    expect(fileFor(fs, 'W-001')).toMatch(/^status: New$/m);
+    expect(fileFor(fs, 'G-001')).toMatch(/^status: Open$/m);
+    // Archive consolidation resolved 'gadgets' from the injected schema, not DEFAULT.
+    expect(await fs.exists('/vault/archive/gadgets/G-002_old.md')).toBe(true);
+    expect(await fs.exists('/vault/archive/2026-Q1/gadgets/G-002_old.md')).toBe(false);
+  });
+
+  it('defaults to DEFAULT_SCHEMA when the schema argument is omitted (back-compat)', async () => {
+    const fs = new InMemoryFileSystem(TOY_FILES);
+    const resolver = new PathResolver(new SchemaRegistry(DEFAULT_SCHEMA), CONFIG);
+    const m = new SchemaMigrator(fs, VAULT_ROOT, resolver);
+
+    const result = await m.migrate({ targetVersion: 1 });
+    expect(result.success).toBe(true);
+    // 'widget' is unknown to the default schema → no status fill happens.
+    expect(fileFor(fs, 'W-001')).not.toMatch(/^status:/m);
   });
 });
