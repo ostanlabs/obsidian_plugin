@@ -448,6 +448,17 @@ function compareVersions(a: string, b: string): number {
  * Reads from the artifacts dir use node:fs (dynamic import — host paths are
  * outside the vault-rooted `fs` adapter).
  */
+/**
+ * Obsidian's config folder is user-configurable (Vault#configDir), but this
+ * server runs OUTSIDE Obsidian and cannot query the API — vaults with a
+ * renamed config folder must set OBSIDIAN_CONFIG_DIR to match (v1.9.2 fix;
+ * also what keeps the obsidianmd/hardcoded-config-path release lint green).
+ */
+function obsidianConfigDir(): string {
+  // eslint-disable-next-line obsidianmd/hardcoded-config-path
+  return process.env.OBSIDIAN_CONFIG_DIR || '.obsidian';
+}
+
 export async function ensurePluginInstalled(fs: FileSystem, artifactsDir: string): Promise<void> {
   try {
     const { join } = await import('node:path');
@@ -465,7 +476,7 @@ export async function ensurePluginInstalled(fs: FileSystem, artifactsDir: string
     }
 
     // fs is rooted at the vault → vault-relative paths.
-    const pluginDir = `.obsidian/plugins/${manifest.id}`;
+    const pluginDir = `${obsidianConfigDir()}/plugins/${manifest.id}`;
     const installedManifestPath = `${pluginDir}/manifest.json`;
     if (await fs.exists(installedManifestPath)) {
       try {
@@ -497,7 +508,7 @@ export async function ensurePluginInstalled(fs: FileSystem, artifactsDir: string
  * Malformed existing content is rewritten with just the requested ids.
  */
 export async function enableCommunityPlugins(fs: FileSystem, ids: string[]): Promise<void> {
-  const communityPath = '.obsidian/community-plugins.json';
+  const communityPath = `${obsidianConfigDir()}/community-plugins.json`;
   let enabled: string[] = [];
   if (await fs.exists(communityPath)) {
     try {
@@ -551,7 +562,7 @@ export async function ensureDataviewInstalled(
 ): Promise<void> {
   if (process.env.MCP_SKIP_DATAVIEW === '1') return;
   try {
-    const pluginDir = '.obsidian/plugins/dataview';
+    const pluginDir = `${obsidianConfigDir()}/plugins/dataview`;
     if (await fs.exists(`${pluginDir}/manifest.json`)) {
       // Present in any version → only make sure it's enabled.
       await enableCommunityPlugins(fs, ['dataview']);

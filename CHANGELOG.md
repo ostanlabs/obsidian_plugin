@@ -5,6 +5,12 @@ All notable changes to the Canvas Project Manager plugin will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.2] - 2026-07-09
+
+### 🩹 Release Fix
+
+- **Configurable Obsidian config dir in plugin auto-install**: the vault-bootstrap plugin installer hardcoded `.obsidian/`; it now honors `OBSIDIAN_CONFIG_DIR` (default `.obsidian`) for vaults with a renamed config folder. Fixes the `obsidianmd/hardcoded-config-path` lint error that blocked the 1.9.0/1.9.1 release workflows (those tags were removed; this release carries their changes)
+
 ## [1.9.1] - 2026-07-09
 
 ### 🔧 Schema-Derived Tool Surface
