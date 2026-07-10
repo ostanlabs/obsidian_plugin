@@ -2278,14 +2278,15 @@ describe('add_vault / remove_vault lifecycle — confined roots, no VAULT_PATH',
     expect(r.vault).toBe('fresh-vault');
 
     // On-disk scaffold (D4): schema.json, per-type folders under entities/,
-    // archive/, workspaces.json = {}, default canvas NAMED AFTER THE VAULT
-    // (basename here — no explicit name passed) with schema.json agreeing.
+    // archive/, workspaces.json = {}, default canvas NAMED AFTER THE VAULT at
+    // the VAULT ROOT (basename here — no explicit name passed), with
+    // schema.json's defaultCanvas agreeing.
     expect(fs.existsSync(path.join(target, 'schema.json'))).toBe(true);
     expect(fs.existsSync(path.join(target, 'archive'))).toBe(true);
     expect(JSON.parse(fs.readFileSync(path.join(target, 'workspaces.json'), 'utf-8'))).toEqual({});
-    expect(fs.existsSync(path.join(target, 'projects', 'fresh-vault.canvas'))).toBe(true);
+    expect(fs.existsSync(path.join(target, 'fresh-vault.canvas'))).toBe(true);
     const schema = JSON.parse(fs.readFileSync(path.join(target, 'schema.json'), 'utf-8'));
-    expect(schema.settings.defaultCanvas).toBe('projects/fresh-vault.canvas');
+    expect(schema.settings.defaultCanvas).toBe('fresh-vault.canvas');
     for (const t of schema.entityTypes) {
       expect(fs.existsSync(path.join(target, 'entities', t.folder))).toBe(true);
     }

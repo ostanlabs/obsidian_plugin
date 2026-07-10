@@ -1131,9 +1131,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const scaffold = async (): Promise<void> => {
             // Scaffold (D4/§7.2 step 3) — schema-bootstrap owns the schema file.
             await nodeFsp.mkdir(confined, { recursive: true });
-            // Personalize the default canvas after the vault (matches the
-            // established convention, e.g. AgentPlatform.canvas) instead of the
-            // generic Project.canvas — much easier to find on first open.
+            // Personalize the default canvas after the vault, AT THE VAULT
+            // ROOT (matches the established convention — AgentPlatform.canvas
+            // sits at the root, not inside a subfolder) instead of the generic
+            // projects/Project.canvas — front and center on first open.
             const displayName = (vaultName ?? nodePath.basename(confined))
               .replace(/[\\/:*?"<>|]/g, '-')
               .trim();
@@ -1141,7 +1142,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               ...DEFAULT_SCHEMA,
               settings: {
                 ...DEFAULT_SCHEMA.settings,
-                defaultCanvas: `${layout.canvasFolder}/${displayName || 'Project'}.canvas`,
+                defaultCanvas: `${displayName || 'Project'}.canvas`,
               },
             };
             const schemaErrs = validateSchema(schema);
